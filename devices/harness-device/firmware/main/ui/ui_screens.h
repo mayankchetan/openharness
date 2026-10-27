@@ -434,6 +434,9 @@ void ui_notif_replace(const cable_notif_t *rows, int count);
 void ui_project_emit(const char *project_id, const char *session_id, const char *kind, const char *text, const char *recap);
 // Restore a persisted historical card without changing the live busy lifecycle for this project.
 void ui_project_restore_event(const char *project_id, const char *kind, const char *text, const char *recap);
+// The whole answer a summary carried in `full` (a device that announced recap long-v1), for the reader. Call it
+// right after the summary's own event; a restore only fills a card that no live turn owns. NULL or "" does nothing.
+void ui_project_full(const char *project_id, const char *full, bool restore);
 void ui_project_clear_event(const char *project_id);
 // Ack of a cancel we sent: clear the matching project's transient "processing" status (the killed
 // turn won't emit a 'done'). Matches by session_id; no-op if not found.

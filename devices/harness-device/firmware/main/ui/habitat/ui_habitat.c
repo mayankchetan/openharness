@@ -4190,6 +4190,39 @@ void ui_project_emit(const char *id, const char *session, const char *kind, cons
 {
     event(id, session, kind, text_, recap, false);
 }
+// `full` may be longer than the buffer: it is cut on a character boundary, at a word when one is near, and ends
+// in "..." so the reader shows that it goes on.
+static void copy_full(char *dst, size_t cap, const char *src)
+{
+    copy(dst, cap, src);
+    if (!src || strlen(src) < cap || cap < 8)
+        return;
+    size_t n = strlen(dst) - 3;
+    while (n > 0 && ((unsigned char)dst[n] & 0xc0) == 0x80)
+        n--;
+    size_t word = n;
+    while (word > n / 2 && dst[word] != ' ')
+        word--;
+    if (dst[word] == ' ')
+        n = word;
+    memcpy(dst + n, "...", 4);
+}
+void ui_project_full(const char *id, const char *full, bool restore)
+{
+    if (!id || !full || !*full)
+        return;
+    display_lock();
+    pane_memory_t *m = pane_memory(id, false);
+    if (m && m->preview[0] && !(restore && (m->live_summary || m->awaiting_result || m->busy))) {
+        copy_full(m->full, sizeof m->full, full);
+        int i = find(id);
+        if (i >= 0) {
+            copy_full(s.agents[i].full, sizeof s.agents[i].full, full);
+            change();
+        }
+    }
+    display_unlock();
+}
 void ui_project_restore_event(const char *id, const char *kind, const char *text_,
                               const char *recap)
 {

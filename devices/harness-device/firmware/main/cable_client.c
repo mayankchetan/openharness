@@ -324,6 +324,8 @@ static void send_hello(void)
     // a wait back from this dial, which once had to: a wait is never an answer screen here.
     msg_string(&root, "swarmCard", "v1");
     msg_string(&root, "superTab", "wait-v1");
+    // The whole answer on each summary, as `full` (up to 1200 characters), for the reader (ui_project_full).
+    msg_string(&root, "recap", "long-v1");
 #ifdef HARNESS_DEBUG_COMMANDS
     // This build answers the host's debug.* commands — a script finds out from the greeting.
     msg_string(&root, "debug", "v1");
@@ -1434,9 +1436,11 @@ static void handle_message(const cJSON *root)
         // would make plugging the cable in announce every turn that finished while it was unplugged.
         if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(p, "restore"))) {
             ui_project_restore_event(agent_id, "summary", str_of(p, "text"), str_of(p, "recap"));
+            ui_project_full(agent_id, str_of(p, "full"), true);
             return;
         }
         ui_project_emit(agent_id, "", "summary", str_of(p, "text"), str_of(p, "recap"));
+        ui_project_full(agent_id, str_of(p, "full"), false);
         // The beep and the notification both hang off the SUMMARY, never the bare `done`. A real turn
         // emits done THEN summary; an empty or phantom turn emits only done — so a session that briefly
         // registers and vanishes stays silent, and the notification always carries a real recap.
