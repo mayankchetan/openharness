@@ -124,6 +124,15 @@ if(DEVICE_HABITAT_ORANGE)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_HABITAT_ORANGE=1)
 endif()
 
+# Host debug commands: debug.shot (a screenshot of the face) and debug.tap / press / swipe (injected touch)
+# over the cable — docs/DEBUG_COMMANDS.md. ON by default in this fork. Nothing runs until the host sends
+# one, but anyone with the cable can send one, so a build for a device out of your hands should say
+# -DDEVICE_NO_DEBUG_COMMANDS=1: the sources, the renderer hook and the touch hook then all drop out.
+if(NOT DEVICE_NO_DEBUG_COMMANDS)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE HARNESS_DEBUG_COMMANDS=1)
+    target_sources(${COMPONENT_LIB} PRIVATE "debug_cmd.c" "debug_cmd_json.c" "cable_debug.c")
+endif()
+
 # Focus and nothing else until the companion skins are finished (owner, 2026-09-30); the host tests
 # build without it and keep covering every skin. -DDEVICE_ALL_SKINS=1 lifts it for a build.
 if(NOT DEVICE_ALL_SKINS)

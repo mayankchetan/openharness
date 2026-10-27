@@ -14,6 +14,9 @@
 #include "freertos/task.h"
 #include <stdatomic.h>
 #include <assert.h>
+#ifdef HARNESS_DEBUG_COMMANDS
+#include "debug_cmd.h"
+#endif
 static esp_lcd_touch_handle_t controller;
 static esp_lcd_panel_io_handle_t io;
 static TaskHandle_t touch_task_handle;
@@ -67,6 +70,9 @@ static void task(void *arg)
     for (;;) {
         int64_t now = esp_timer_get_time();
         if (!controller) {
+#ifdef HARNESS_DEBUG_COMMANDS
+            dbg_inject_abort();   // an injected contact needs this loop's controller path to exist
+#endif
             if (now >= retry_at) {
                 open_touch();
                 retry_at = now + 5000000;
@@ -117,6 +123,26 @@ static void task(void *arg)
                 errors = 0;
             }
         }
+#ifdef HARNESS_DEBUG_COMMANDS
+        {
+            // A host-injected contact (debug.tap / press / swipe) stands in for the glass for this pass and
+            // goes through everything below exactly as a finger would: the press count, the wake swallow,
+            // the activity bump and habitat_touch(). Its coordinates were validated before it was armed.
+            dbg_sample_t injected;
+            if (dbg_inject_poll(now, &injected)) {
+                down = injected.down;
+                x = (uint16_t)injected.x;
+                y = (uint16_t)injected.y;
+                count = down ? 1 : 0;
+                trusted = true;
+                if (down) {
+                    last_good = now;
+                    last_x = x;
+                    last_y = y;
+                }
+            }
+        }
+#endif
         if (!trusted && invalidate) {
             // Neither a stale ACK, a malformed coordinate nor a failed read is a tap release.
             // Do not re-arm on the next DOWN from the same still-held finger.
@@ -181,3 +207,10 @@ void touch_stats(touch_stats_t *out)
                            .controller_ok = atomic_load(&controller_ready),
                            .held_now = atomic_load(&held)};
 }
+#ifdef HARNESS_DEBUG_COMMANDS
+void touch_inject_wake(void)
+{
+    if (touch_task_handle)
+        xTaskNotifyGive(touch_task_handle);
+}
+#endif

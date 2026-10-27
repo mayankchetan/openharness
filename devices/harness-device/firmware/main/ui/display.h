@@ -33,3 +33,14 @@ void display_set_power_cb(void (*cb)(bool on));
 // Reset the idle-off timer without a touch — ui_screens calls this while a voice turn is recording/
 // uploading/processing (voice uses the PWR key, not the touchscreen, so the screen must not auto-off).
 void display_bump_activity(void);
+
+#ifdef HARNESS_DEBUG_COMMANDS
+// Re-render the scene the panel is showing into `out` (HT_WIDTH x HT_HEIGHT RGB565, the renderer's own
+// panel byte order, 2 bytes per pixel, no padding). `out` is the caller's — PSRAM, 434 KB — and nothing
+// is allocated here. The work happens on the render task, between two frames, because that task owns the
+// compositor's caches; this call blocks the caller (never the renderer) until it is done or `timeout_ms`
+// passes. Returns DBG_OK, or DBG_E_ASLEEP (panel off / nothing painted yet), DBG_E_BUSY (a capture is
+// already queued) or DBG_E_TIMEOUT. See docs/DEBUG_COMMANDS.md.
+#include "debug_cmd.h"
+dbg_err_t display_capture(uint16_t *out, uint32_t timeout_ms);
+#endif

@@ -13,6 +13,10 @@ enum {
     // device that does not see it keeps its own settings screens; nothing here is load-bearing for a
     // session, so an older daemon simply never asks.
     CABLE_FEATURE_SETTINGS = 1u << 6,
+    // The host speaks the debug.* commands (docs/DEBUG_COMMANDS.md). Informational: the device answers
+    // them with or without it, because a host script that only wants a screenshot has no reason to
+    // play daemon and send a welcome first.
+    CABLE_FEATURE_DEBUG = 1u << 7,
 };
 
 // Optional welcome field. Older daemons omit it and retain the core voice,

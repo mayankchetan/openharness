@@ -24,3 +24,9 @@ typedef struct {
     bool     held_now;         // a press has been down past the stuck threshold
 } touch_stats_t;
 void touch_stats(touch_stats_t *out);
+
+#ifdef HARNESS_DEBUG_COMMANDS
+// Wake the touch task so it plays an injected gesture (dbg_inject_arm, debug_cmd.h) at once instead of
+// at its next idle poll. The gesture itself is read by the task, in place of the glass, on every pass.
+void touch_inject_wake(void);
+#endif

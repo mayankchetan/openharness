@@ -347,6 +347,69 @@ static void heartbeat(void)
              touch.controller_ok ? "" : " TOUCH-DEAD",
              display_is_asleep() ? " asleep" : "");
 }
+#ifdef HARNESS_DEBUG_COMMANDS
+// THE SCREENSHOT. The panel is write-only, so there is nothing to read back; the picture is the scene the
+// panel is showing, rasterized a second time into the caller's buffer. That is exactly what paint() does
+// for the panel, minus the QSPI transfer, and it is the cheapest honest answer: no full framebuffer is
+// kept (the whole point of this renderer), and no strip is teed on the hot path, so a frame that nobody
+// asked to see costs nothing.
+//
+// It runs on this task, between two frames, because ht_raster() owns two caches that only one renderer
+// may touch, and because scenes[front] is only stable here. The cost is one extra full-face raster of
+// this frame — about 20 strips of paint()'s own work — logged each time so it can be read off.
+//
+// A request is three states and one owner each: the caller moves IDLE -> REQUESTED, this task moves
+// REQUESTED -> RUNNING -> IDLE. A caller that gives up may withdraw only a REQUESTED capture; once it is
+// RUNNING the buffer is being written and stays the caller's problem until the semaphore comes back.
+enum { CAPTURE_IDLE, CAPTURE_REQUESTED, CAPTURE_RUNNING };
+static atomic_int capture_state;
+static uint16_t *capture_out;
+static dbg_err_t capture_result;
+static SemaphoreHandle_t capture_lock, capture_done;
+dbg_err_t display_capture(uint16_t *out, uint32_t timeout_ms)
+{
+    if (!out || !renderer || xSemaphoreTake(capture_lock, 0) != pdTRUE)
+        return DBG_E_BUSY;
+    xSemaphoreTake(capture_done, 0);   // a late give from an earlier capture that was withdrawn
+    capture_out = out;
+    atomic_store(&capture_state, CAPTURE_REQUESTED);
+    habitat_render_notify();
+    dbg_err_t result;
+    if (xSemaphoreTake(capture_done, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) {
+        result = capture_result;
+    } else {
+        int requested = CAPTURE_REQUESTED;
+        if (atomic_compare_exchange_strong(&capture_state, &requested, CAPTURE_IDLE)) {
+            result = DBG_E_TIMEOUT;   // never started; nothing was written
+        } else {
+            xSemaphoreTake(capture_done, portMAX_DELAY);   // started: the render watchdog bounds this
+            result = capture_result;
+        }
+    }
+    xSemaphoreGive(capture_lock);
+    return result;
+}
+static void capture_service(const ht_scene_t *scene, bool showing)
+{
+    int requested = CAPTURE_REQUESTED;
+    if (!atomic_compare_exchange_strong(&capture_state, &requested, CAPTURE_RUNNING))
+        return;
+    // `showing`: the panel is on and has painted this scene. Asleep, or before the first frame, there is
+    // no picture to take; the buffer is left as it was.
+    capture_result = showing ? DBG_OK : DBG_E_ASLEEP;
+    if (showing) {
+        int64_t started = esp_timer_get_time();
+        for (int y = 0; y < HT_HEIGHT; y += STRIP_LINES) {
+            int h = HT_HEIGHT - y < STRIP_LINES ? HT_HEIGHT - y : STRIP_LINES;
+            render_progress(RENDER_RASTER);
+            ht_raster(scene, (ht_rect_t){0, y, HT_WIDTH, h}, capture_out + (size_t)y * HT_WIDTH);
+        }
+        ESP_LOGI("habitat", "screenshot raster %lu us", (unsigned long)(esp_timer_get_time() - started));
+    }
+    atomic_store(&capture_state, CAPTURE_IDLE);
+    xSemaphoreGive(capture_done);
+}
+#endif
 static void render_task(void *arg)
 {
     (void)arg;
@@ -434,6 +497,9 @@ static void render_task(void *arg)
             front ^= 1;
             painted = false;
         }
+#ifdef HARNESS_DEBUG_COMMANDS
+        capture_service(&scenes[front], on && painted);
+#endif
         if (on && elapsed_since(&last_activity) > 300000) {
             display_lock();
             // A touch may have refreshed activity while we waited for this
@@ -455,6 +521,11 @@ void display_init(void)
     model_lock = xSemaphoreCreateRecursiveMutex();
     dma_done = xSemaphoreCreateBinary();
     assert(model_lock && dma_done);
+#ifdef HARNESS_DEBUG_COMMANDS
+    capture_lock = xSemaphoreCreateMutex();
+    capture_done = xSemaphoreCreateBinary();
+    assert(capture_lock && capture_done);
+#endif
     const spi_bus_config_t bus =
         CO5300_PANEL_BUS_QSPI_CONFIG(BSP_LCD_QSPI_SCLK, BSP_LCD_QSPI_D0, BSP_LCD_QSPI_D1,
                                      BSP_LCD_QSPI_D2, BSP_LCD_QSPI_D3, HT_WIDTH * STRIP_LINES * 2);

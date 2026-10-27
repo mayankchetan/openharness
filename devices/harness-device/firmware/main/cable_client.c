@@ -9,6 +9,9 @@
 #include "cJSON.h"
 #include "cable_link.h"
 #include "cable_json_guard.h"
+#ifdef HARNESS_DEBUG_COMMANDS
+#include "cable_debug.h"
+#endif
 #include "cable_machines.h"
 #include "device_mac.h"
 #include "esp_app_desc.h"
@@ -321,6 +324,10 @@ static void send_hello(void)
     // a wait back from this dial, which once had to: a wait is never an answer screen here.
     msg_string(&root, "swarmCard", "v1");
     msg_string(&root, "superTab", "wait-v1");
+#ifdef HARNESS_DEBUG_COMMANDS
+    // This build answers the host's debug.* commands — a script finds out from the greeting.
+    msg_string(&root, "debug", "v1");
+#endif
     // Which of the two dials this is (board.h) — informational, so a log or a bug report can say. A
     // daemon that predates the field ignores it.
     msg_string(&root, "hw", board()->name);
@@ -1341,6 +1348,10 @@ static void handle_message(const cJSON *root)
     if (!t) { s_bad++; return; }
     const cJSON *p = cJSON_GetObjectItemCaseSensitive(root, "p");
     if (!p) p = root;   // flat messages are legal; `p` is a convenience, not a requirement
+#ifdef HARNESS_DEBUG_COMMANDS
+    // debug.shot / tap / press / swipe — a host script, not the daemon (docs/DEBUG_COMMANDS.md).
+    if (cable_debug_handle(t, p)) return;
+#endif
 
     if (strcmp(t, "welcome") == 0) { session_up(p); return; }
     if (strcmp(t, "ping") == 0) { send_json(msg("pong")); return; }
@@ -1582,6 +1593,9 @@ static void session_tick(void *ctx)
 {
     (void)ctx;
     fw_update_tick();
+#ifdef HARNESS_DEBUG_COMMANDS
+    cable_debug_tick();
+#endif
     if (s_session && esp_timer_get_time() - s_last_rx_us > (int64_t)SILENCE_MS * 1000) {
         session_down("silence");
     }

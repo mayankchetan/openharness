@@ -57,6 +57,12 @@ cc -std=c11 -Wall -Wextra -Werror -O1 \
    -o "$out/test_cable_machines" "$here/test_cable_machines.c" "$here/../main/cable_machines.c"
 "$out/test_cable_machines"
 
+# The host's debug commands (screenshot chunking and checksum, round-face validation, gesture sampler, the
+# cable-task/touch-task hand-off on real threads). The JSON half is below, with the other cJSON tests.
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -pthread -fsanitize="${SANITIZERS:-undefined,bounds}" \
+   -I "$here/../main" -o "$out/test_debug_cmd" "$here/test_debug_cmd.c" "$here/../main/debug_cmd.c" -lm
+"$out/test_debug_cmd"
+
 # Which dial this image is on, decided from who answered on the I2C bus. Two boards ship on one image;
 # the table that tells them apart is arithmetic on a list of addresses, so it is proved here.
 cc -std=c11 -Wall -Wextra -Werror -O1 \
@@ -219,6 +225,7 @@ python3 "$here/test_brightness_ui.py"
 # The preferences the desktop app now owns, driven through the device's own read/apply/worker path.
 python3 "$here/test_device_settings.py"
 python3 "$here/test_touch_driver.py"
+python3 "$here/test_touch_inject.py"
 python3 "$here/test_render_guard.py"
 python3 "$here/test_display_power.py"
 python3 "$here/test_machine_ui.py"
@@ -242,6 +249,11 @@ if [[ -n "${IDF_PATH:-}" ]]; then
         -o "$out/test_cable_features" "$here/test_cable_features.c" \
         "$here/../main/cable_features.c" "$IDF_PATH/components/json/cJSON/cJSON.c"
     "$out/test_cable_features"
+    cc -std=c11 -Wall -Wextra -Werror -Wno-deprecated-declarations -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
+        -I "$here/../main" -I "$IDF_PATH/components/json/cJSON" \
+        -o "$out/test_debug_cmd_json" "$here/test_debug_cmd_json.c" \
+        "$here/../main/debug_cmd.c" "$here/../main/debug_cmd_json.c" "$IDF_PATH/components/json/cJSON/cJSON.c" -lm
+    "$out/test_debug_cmd_json"
     cc -std=c11 -Wall -Wextra -Werror -Wno-deprecated-declarations -O1 -g -pthread -fsanitize="${SANITIZERS:-undefined,bounds}" \
         -I "$here/../main" -I "$IDF_PATH/components/json/cJSON" \
         -o "$out/test_cable_scroll" "$here/test_cable_scroll.c" \
