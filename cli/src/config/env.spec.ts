@@ -53,6 +53,15 @@ describe('the environment, as env.ts reads it', () => {
     expect(load({ CABLE_DEBUG_API: '1' }, ['CABLE_DEBUG_API']).env).toEqual({ CABLE_DEBUG_API: false })
   })
 
+  it('leaves the dial\'s voice on the account unless CABLE_STT_URL is set, with whisper-1 and no key as its defaults', () => {
+    const read = ['CABLE_STT_URL', 'CABLE_STT_MODEL', 'CABLE_STT_API_KEY']
+    const plain = load({}, read)
+    expect(plain.status, plain.stderr).toBe(0)
+    expect(plain.env).toEqual({ CABLE_STT_URL: '', CABLE_STT_MODEL: 'whisper-1', CABLE_STT_API_KEY: '' })
+    const set = load({ CABLE_STT_URL: 'http://127.0.0.1:8080/v1/audio/transcriptions', CABLE_STT_MODEL: 'small', CABLE_STT_API_KEY: 'k' }, read)
+    expect(set.env).toEqual({ CABLE_STT_URL: 'http://127.0.0.1:8080/v1/audio/transcriptions', CABLE_STT_MODEL: 'small', CABLE_STT_API_KEY: 'k' })
+  })
+
   it('ignores a store setting it cannot use, which under zod stopped every `harness` command as it loaded', () => {
     const loaded = load({ HARNESS_STORE_CATALOG_URL: 'not a url', HARNESS_STORE_REF: 'not a ref!' })
     expect(loaded.status, loaded.stderr).toBe(0)

@@ -804,6 +804,8 @@ export class DaemonCableHost implements CableHost {
    * sentence to a clock is the one failure the person cannot work around.
    */
   async transcribe(pcm: Buffer, sampleRate: number, lang: string): Promise<string> {
+    // The person's own transcription server, when they set one up: no account, so no sign-in to ask for.
+    if (env.CABLE_STT_URL) return this.transcribeLocal(env.CABLE_STT_URL, pcm, sampleRate, lang)
     // The text reaches the dial's glass as a toast, so it is addressed to the person holding it, not to
     // a terminal: signing in happens on the computer, and that is the one thing they need to know.
     const accessToken = this.wiring.accessToken
@@ -850,6 +852,67 @@ export class DaemonCableHost implements CableHost {
     return json.data?.transcript ?? ''
   }
 
+  /**
+   * Transcribe on a server the person runs (CABLE_STT_URL): an OpenAI-compatible `/v1/audio/transcriptions`.
+   *
+   * The same WAV as the account path, as a multipart form with the fields that API names. No account is involved,
+   * so none of its machinery is: no sign-in, no `x-autonomous-env`, no refresh on a 401. A 401 here means the key
+   * is wrong, and asking again with the same key says the same thing. The key, if there is one, goes in the
+   * request header and nowhere else: not the log, not the error that becomes the dial's toast.
+   *
+   * Every failure is a line addressed to the person, short enough for the glass; the cause goes to the log.
+   */
+  private async transcribeLocal(address: string, pcm: Buffer, sampleRate: number, lang: string): Promise<string> {
+    let url: URL
+    try { url = new URL(address) } catch { throw new Error('The voice server address is not a web address') }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('The voice server address is not a web address')
+
+    const boundary = `harness-${Math.random().toString(36).slice(2)}`
+    const body = multipart(wav(pcm, sampleRate), 'voice.wav', 'audio/wav', boundary, {
+      model: env.CABLE_STT_MODEL, ...(lang ? { language: lang } : {}), response_format: 'json',
+    })
+    const headers: Record<string, string> = { 'content-type': `multipart/form-data; boundary=${boundary}` }
+    if (env.CABLE_STT_API_KEY) headers.authorization = `Bearer ${env.CABLE_STT_API_KEY}`
+
+    // A hung server must not leave the dial on "transcribing" for ever. Long: a recording can be ten minutes, and a
+    // model on a CPU may take a fair part of that.
+    const abort = new AbortController()
+    let timedOut = false
+    const timer = setTimeout(() => { timedOut = true; abort.abort() }, LOCAL_STT_TIMEOUT_MS)
+    // Only the origin is ever written down: an address can carry a user name and a password.
+    const where = url.origin
+    try {
+      let res: Response
+      try {
+        res = await fetch(url, { method: 'POST', headers, body, signal: abort.signal })
+      } catch (error) {
+        if (timedOut) { this.wiring.log(`cable: stt (local) ${where} gave no answer in ${LOCAL_STT_TIMEOUT_MS / 1000} s`); throw new Error('The voice server took too long') }
+        const code = (error as { cause?: { code?: unknown } }).cause?.code
+        this.wiring.log(`cable: stt (local) cannot reach ${where}${typeof code === 'string' ? ` (${code})` : ''}`)
+        throw new Error("Can't reach the voice server")
+      }
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => {})
+        this.wiring.log(`cable: stt (local) HTTP ${res.status} from ${where}`)
+        throw new Error(res.status === 401 || res.status === 403 ? 'The voice server rejected the key'
+          : res.status === 404 ? 'The voice server has no transcription endpoint'
+          : res.status === 413 ? 'The voice server says the recording is too long'
+          : `The voice server failed (HTTP ${res.status})`)
+      }
+      const raw = await res.text().catch(() => '')
+      const text = (res.headers.get('content-type') ?? '').includes('text/plain') ? raw.trim() : jsonText(raw)
+      // An empty reply is no reply. An empty `text` in JSON is silence, which is the server's answer, and the
+      // session says "Didn't catch that" for it.
+      if (text === null || raw.trim() === '') {
+        this.wiring.log(`cable: stt (local) ${where} sent no text`)
+        throw new Error('The voice server sent no text')
+      }
+      return text
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   /** The control plane, derived from the socket URL the daemon already talks to. */
   private backendHttpBase(): string {
     return env.BACKEND_WS_URL.replace(/\/$/, '').replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
@@ -858,6 +921,17 @@ export class DaemonCableHost implements CableHost {
   log(line: string): void {
     this.wiring.log(line)
   }
+}
+
+/** How long the person's own transcription server has to answer (CABLE_STT_URL). */
+const LOCAL_STT_TIMEOUT_MS = 5 * 60_000
+
+/** The `text` of an OpenAI-style transcription reply, or null when the body is not one. */
+function jsonText(raw: string): string | null {
+  try {
+    const parsed = JSON.parse(raw) as { text?: unknown } | null
+    return typeof parsed?.text === 'string' ? parsed.text : null
+  } catch { return null }
 }
 
 /** Turn known service failures into short device instructions without reflecting response contents. */
@@ -917,10 +991,15 @@ export function wav(pcm: Buffer, sampleRate: number): Buffer {
  *
  * Every newline is CRLF: the format requires it, and a bare \n produces a body some parsers accept and
  * Fastify's does not — surfacing as "Missing audio file" for a request that plainly contains one.
+ *
+ * `fields` are text parts written before the file (the OpenAI transcription API's `model`, `language`...); with
+ * none, the body is what it has always been.
  */
-export function multipart(file: Buffer, filename: string, mimeType: string, boundary: string): Buffer {
+export function multipart(file: Buffer, filename: string, mimeType: string, boundary: string, fields: Record<string, string> = {}): Buffer {
+  const text = Object.entries(fields).map(([name, value]) =>
+    `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`).join('')
   const head = Buffer.from(
-    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\n` +
+    `${text}--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\n` +
       `Content-Type: ${mimeType}\r\n\r\n`,
     'utf8',
   )

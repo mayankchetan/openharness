@@ -390,6 +390,15 @@ const fields = {
   // leaves behind — no shared secret, because this repository is public. Path only: the host comes from
   // BACKEND_WS_URL, so a daemon pointed at a local backend transcribes against that one too.
   CABLE_STT_PATH: text('/api/voice/stt'),
+  // Transcription on this computer or this network instead of the account's. Set to the full URL of an OpenAI-compatible
+  // transcription endpoint (POST multipart form: file, model, language, response_format=json; reply {"text":"..."}), for
+  // example http://127.0.0.1:8080/v1/audio/transcriptions for whisper.cpp or faster-whisper-server. Unset (the default), voice
+  // goes through the account as above. Set, voice needs no sign-in, and the recording goes to that URL and nowhere else.
+  CABLE_STT_URL: text(''),
+  // The `model` field sent to CABLE_STT_URL. Many servers ignore it; OpenAI's own name is the one they accept.
+  CABLE_STT_MODEL: text('whisper-1'),
+  // Sent to CABLE_STT_URL as `Authorization: Bearer <key>` when set, for a server that wants one. Never logged or shown.
+  CABLE_STT_API_KEY: text(''),
   // Firmware for the dial: the SAME published manifest the device used to poll before it lost WiFi, so
   // `make upload-circle` remains the only way a release happens — this only changes who downloads.
   CABLE_FW_MANIFEST_URL: text('https://storage.googleapis.com/s3-autonomous-upgrade-3/harness/esp32/ota/metadata.json'),
