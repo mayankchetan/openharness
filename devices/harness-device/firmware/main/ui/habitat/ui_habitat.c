@@ -197,7 +197,7 @@ static EXT_RAM_BSS_ATTR struct {
     uint32_t memory_serial;
     int count, active, total;
     bool connected, window, loading, ready, dirty;
-    int bulk, offset;
+    int bulk, offset, reader_rows;   // reader_rows: the reader's text in rows, from its last render (0 = unknown)
     view_t view, voice_return;
     bool quiet, nap, focus_face, straight_title;
     ht_rect_t pressed_rect;   // the hit rect this contact went down on
@@ -2424,8 +2424,10 @@ bool habitat_scene_take(ht_scene_t *f)
     case READER: {
         agent_t *a = active();
         heading(f, "latest result");
-        if (a)
-            ui_wrap(f, FACE_CX(348), 125, 348, 5, s.offset, UI_FONT, FG, a->full);
+        if (a) {
+            int rows = ui_wrap(f, FACE_CX(348), 125, 348, 5, s.offset, UI_FONT, FG, a->full);
+            s.reader_rows = focus_skin() ? rows : 0;   // only the Focus skin's wrap counts the rows past the page
+        }
         control(f, 119, 387, 72, "<", A_UP, 0, s.offset > 0);
         control(f, 205, 366, 153, "[desktop]", A_DESKTOP, 0, s.connected);
         break;
@@ -3093,7 +3095,10 @@ static void dispatch(action_t a)
     case A_DOWN:
         if (s.view == INBOX)
             s.offset = s.notice_count ? (s.offset + 1) % s.notice_count : 0;
-        else s.offset += s.view == READER ? 5 : 3;
+        else if (s.view == READER) {
+            // Never past the last page: the next page has to start inside the text.
+            if (s.reader_rows <= 0 || s.offset + 5 < s.reader_rows) s.offset += 5;
+        } else s.offset += 3;
         change();
         break;
     case A_SETTINGS_SAVE:
@@ -3532,6 +3537,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                 view(HOME);
             else if (s.view == READER) {
                 int next = s.offset + (dy < 0 ? 5 : -5);
+                if (next >= s.reader_rows && s.reader_rows > 0) next = s.offset;   // no page past the text
                 s.offset = next < 0 ? 0 : next;
             } else if (s.view == INBOX && s.notice_count)
                 s.offset = (s.offset + (dy < 0 ? 1 : s.notice_count - 1)) % s.notice_count;
