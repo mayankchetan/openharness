@@ -3,6 +3,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { resetBoard } from './boardReset.js'
+import type { DebugFailure, DebugTouch, DoneResult, ShotResult } from './dialDebug.js'
 import { DialVerdicts } from './dialPortVerdicts.js'
 import { findDialPorts, portInUse, SerialLink, type DialPort } from './serial.js'
 import { isUsbConsoleUser } from './usbConsoleUser.js'
@@ -401,6 +402,27 @@ export class CableFleet {
     } catch (error) {
       this.host.log(`cable: ${entry.port.path} settings: ${String(error)}`)
       return { ok: false, error: 'The device did not take the change.' }
+    }
+  }
+
+  /**
+   * A screenshot or an injected touch (dialDebug.ts), addressed: the dial named by its serial (`id`) or its
+   * mac, otherwise the first one that is connected. A name that matches nothing, or a dial that is not
+   * connected, is an answer, never another dial: a tap that lands on the wrong robot is worse than none.
+   */
+  async debug(dial: string | undefined, request: { cmd: 'shot' } | DebugTouch): Promise<ShotResult | DoneResult> {
+    const none = (message: string): DebugFailure => ({ ok: false, kind: 'no_dial', message })
+    const wanted = dial?.trim().toUpperCase()
+    const entry = wanted
+      ? [...this.entries].find(([id, e]) => id.toUpperCase() === wanted || e.status.mac?.toUpperCase() === wanted)?.[1]
+      : [...this.entries.values()].find(e => e.attached && e.session.isConnected)
+    if (!entry) return none(wanted ? `No dial "${dial!.trim().slice(0, 64)}" is on this computer.` : 'No dial is connected.')
+    if (!entry.attached || !entry.session.isConnected) return none(`The dial "${dial}" is not connected.`)
+    try {
+      return request.cmd === 'shot' ? await entry.session.debugShot() : await entry.session.debugTouch(request)
+    } catch (error) {
+      this.host.log(`cable: ${entry.port.path} debug ${request.cmd}: ${String(error)}`)
+      return { ok: false, kind: 'gone', message: `The dial failed: ${error instanceof Error ? error.message : String(error)}` }
     }
   }
 

@@ -26,6 +26,7 @@ import { env } from './config/env.js'
 import { hookCredentialMatches, loadOrCreateHookCredential } from './lib/hookAuth.js'
 import { LOCAL_CREDENTIAL_REQUIRED, localCredentialMatches } from './lib/localCredential.js'
 import { routeStoreRequest, type StoreHandler } from './lib/storeProxy.js'
+import type { DialDebugReply } from './lib/dialDebugHttp.js'
 import type { HookTerminalHint } from './lib/terminalTypes.js'
 import { ENGINES, type AgentEngine } from './engines/types.js'
 import { isLoopbackRequest, loopbackHosts } from './lib/loopbackRequest.js'
@@ -202,6 +203,9 @@ export interface HookServerHandlers {
   /** /api/store/* — proxy the Harness Store's ratings and reviews to backend the same way: reads
    *  ungated like the machine list, writes (PUT/DELETE) CSRF-guarded like a rename. See storeProxy.ts. */
   onStore?: StoreHandler
+  /** POST /api/dial/debug/{shot,tap,press,swipe} — the dial's screenshot and injected touch (lib/dialDebugHttp.ts). Given
+   *  only with CABLE_DEBUG_API on: without it the routes are not there and answer 404 like any unknown route. */
+  onDialDebug?: (op: string, body: unknown) => Promise<DialDebugReply>
 }
 
 export { STORE_PATH_RE } from './lib/storeProxy.js'
@@ -1238,6 +1242,28 @@ export function startHookServer(
         if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
         if (!handlers.onRevokeAll) { json(503, { error: 'UNAVAILABLE' }); return }
         const out = await handlers.onRevokeAll(); json(out.status, out.body); return
+      }
+
+      // The dial's screenshot and injected touch, for testing the firmware (lib/dialDebugHttp.ts). Only where the
+      // daemon was given a handler (CABLE_DEBUG_API): otherwise this is not a route and falls through to the 404.
+      if (handlers.onDialDebug && url.startsWith('/api/dial/debug/')) {
+        if (req.method !== 'POST') { json(405, { error: 'METHOD_NOT_ALLOWED' }); return }
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        // A screenshot needs no body; the touches do, and say what is missing.
+        const raw = (await readBody(req)).trim()
+        let body: unknown
+        try { body = raw ? JSON.parse(raw) : undefined } catch { json(400, { error: 'Invalid JSON body', kind: 'bad_request' }); return }
+        let reply: DialDebugReply
+        try { reply = await handlers.onDialDebug(url.slice('/api/dial/debug/'.length), body) }
+        catch (e) {
+          console.error(`[hook] ${req.method} ${url} failed:`, e instanceof Error ? e.message : e)
+          json(502, { error: 'The dial debug request failed. See the daemon\'s log.', kind: 'unavailable' }); return
+        }
+        if ('png' in reply) {
+          res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': reply.png.length, 'Cache-Control': 'no-store' })
+          res.end(reply.png)
+        } else json(reply.status, reply.body)
+        return
       }
 
       json(404, { error: 'not found' })

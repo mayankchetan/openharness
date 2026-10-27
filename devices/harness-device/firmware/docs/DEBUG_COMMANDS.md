@@ -246,3 +246,92 @@ Host tests, no board (`make device-test`, or `test/run.sh`):
 | `test_debug_cmd_json.c` | Reading every request shape; the exact bytes of the replies; allocation failure at every point leaves no partial reply and no leak. Needs `IDF_PATH` (for cJSON), like `test_cable_features.c`. |
 | `test_touch_inject.py` | The production touch task with an injected gesture: tap and swipe reach `habitat_touch()` like a finger; stale ACKs; wake swallow while asleep; dead controller; no effect when nothing is armed. |
 | `test_cable_features.c` | The `debug` feature name. |
+
+## Through the daemon
+
+Only one process can own the dial's USB port. While the Harness daemon holds it, `dial_debug.py` cannot open
+the port. The daemon offers the same four commands on its local HTTP API (127.0.0.1:18473, the port of every
+other local route), so a script, an agent or `curl` can look at the face and touch it.
+
+Source: `cli/src/cable/dialDebug.ts` (ask and wait, one request at a time per dial), `cli/src/cable/png.ts`,
+`cli/src/lib/dialDebugHttp.ts` (the HTTP half), and the `dial_debug` request of `cli/src/services/devices.ts`.
+
+### Switch
+
+**Off by default.** Set the environment variable of the daemon, then restart it:
+
+```
+CABLE_DEBUG_API=true
+```
+
+Off, the four routes do not exist: they answer 404 exactly as an unknown route does. On, they still follow
+the rules of every other local route: a loopback `Host`, no foreign `Origin`, the local credential
+(`X-Harness-Local: <contents of the hook-credential file in the daemon's data directory>`) and the CSRF header
+`X-Adapter-Local: 1`. The request is for a process on this computer only.
+
+### Routes
+
+All `POST`, JSON body.
+
+| Route | Body | Answer |
+| --- | --- | --- |
+| `/api/dial/debug/shot` | optional `{"dial":"<mac or serial>"}` | `200 image/png`, the 466x466 face |
+| `/api/dial/debug/tap` | `{"x":233,"y":233}` | `200 {"ok":true}` after the dial's `debug.done` |
+| `/api/dial/debug/press` | `{"x":233,"y":233,"ms":700}` (`ms` 50..5000, default 700) | `200 {"ok":true}` |
+| `/api/dial/debug/swipe` | `{"x1":380,"y1":233,"x2":80,"y2":233,"ms":250}` (`ms` 20..3000, default 250) | `200 {"ok":true}` |
+
+Every route takes an optional `"dial"`: the dial's MAC (from its `hello`) or its USB serial, in any case.
+Without it the request goes to the first dial that is connected. A name that matches no dial is a 404; the
+request is never sent to another dial.
+
+Every point is a whole number from 0 to 465. The daemon turns away anything else with a 400 before the dial
+sees it. A point inside that square but off the round glass is the dial's to refuse (`range`).
+
+### Errors
+
+A failure is JSON, with the status below:
+
+```json
+{"error":"the dial refused: asleep","kind":"device","reason":"asleep"}
+```
+
+`error` is a sentence, `kind` is one word, and `reason` is the dial's own `debug.error.reason` when it gave one.
+
+| Status | `kind` | Meaning |
+| --- | --- | --- |
+| 400 | `bad_request` | The body is not JSON or a number is missing or out of range. Nothing was sent. |
+| 403 | | No `X-Adapter-Local` header, or a `Host` that is not loopback. |
+| 401 | | No local credential. |
+| 404 | `no_dial` | No dial is connected, or none has that MAC or serial. |
+| 409 | `busy` | A debug request for that dial is already waiting, or the dial answered `busy`. |
+| 502 | `device` | The dial refused (`reason`: `asleep`, `memory`, `shape`, `range`, `touch`, ...) or sent a `begin` that is not a picture. |
+| 502 | `incomplete` | A screenshot lost a chunk, repeated one, or has the wrong number of bytes. No image is returned. |
+| 502 | `checksum` | The CRC-32 over the pixels does not match the dial's `end`. No image is returned. |
+| 502 | `gone` | The link dropped, or the write failed. |
+| 503 | `unavailable` | The devices service did not answer. |
+| 504 | `timeout` | The dial did not finish: 20 s for a picture, 8 s for a tap, the gesture's `ms` plus 5 s otherwise. |
+
+A picture is returned only when it passes the four rules of "How the host detects loss" above, including the
+CRC-32. An `asleep` dial needs a tap first, then a second request.
+
+### One request at a time
+
+The daemon keeps one debug request in flight for each dial. A second request while the first waits is a 409
+at once, and is not sent. The dial's normal traffic (agent lists, pings, a voice turn) goes on while a picture
+is on its way. If the link drops the request ends as `gone`; a late reply is ignored by `id`.
+
+### Example
+
+```
+curl -s -X POST http://127.0.0.1:18473/api/dial/debug/tap \
+  -H "X-Harness-Local: $(cat "$DATA_DIR/hook-credential")" -H "X-Adapter-Local: 1" \
+  -d '{"x":233,"y":233}'
+curl -s -X POST http://127.0.0.1:18473/api/dial/debug/shot \
+  -H "X-Harness-Local: $(cat "$DATA_DIR/hook-credential")" -H "X-Adapter-Local: 1" -o face.png
+```
+
+Allow 50 to 100 ms between a `done` and the next `shot`, as above, for the screen to draw the result.
+`$DATA_DIR` is the daemon's data directory (`ADAPTER_DATA_DIR`).
+
+Not measured on a dial yet: the end-to-end time of a picture through the daemon, and the way the daemon's
+other traffic behaves during the 425 chunks. The tests drive a loopback port, not the board.

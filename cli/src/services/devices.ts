@@ -28,6 +28,7 @@ import { CableSession } from '../cable/cableSession.js'
 import { PetStore } from '../cable/pets/store.js'
 import { DialLog } from '../cable/dialLog.js'
 import { DialVerdicts } from '../cable/dialPortVerdicts.js'
+import { pngFromRgb565be } from '../cable/png.js'
 import { WindowForm } from '../cable/windowForm.js'
 import { createWindowRouter } from '../cable/windowRoute.js'
 import { WindowSelection } from '../cable/windowSelection.js'
@@ -571,8 +572,37 @@ export function startDevices(core: CoreApi, ports: CorePorts, deps: DevicesDeps)
   // Pets name files on this computer by path, so they are answered to a process here only, never the owner's relayed app.
   const local = (type: string) => (payload: Record<string, unknown>, asker: { local?: boolean; owner: boolean }) =>
     !asker.owner ? { error: 'OWNER_REQUIRED' } : asker.local ? harnessDevicesRequest(tab, type, payload) : { error: 'LOCAL_ONLY' }
+  // The firmware's debug commands, a screenshot and an injected touch (cable/dialDebug.ts). Reached through the core's
+  // /api/dial/debug routes (lib/dialDebugHttp.ts), which exist only with CABLE_DEBUG_API on; checked here too, since
+  // a process on this computer can route the request over the local socket without going through them.
+  const dialDebug = async (payload: Record<string, unknown>, asker: { local?: boolean; owner: boolean }): Promise<Record<string, unknown>> => {
+    if (!env.CABLE_DEBUG_API) return { error: 'DISABLED' }
+    if (!asker.owner) return { error: 'OWNER_REQUIRED' }
+    if (!asker.local) return { error: 'LOCAL_ONLY' }
+    const refuse = (message: string) => ({ ok: false, kind: 'device', message })
+    const whole = (...keys: string[]): boolean => keys.every((key) => Number.isInteger(payload[key]))
+    const n = (key: string): number => payload[key] as number
+    const dial = typeof payload.dial === 'string' && payload.dial ? payload.dial : undefined
+    const op = payload.op
+    const request: Parameters<CableFleet['debug']>[1] | null =
+      op === 'shot' ? { cmd: 'shot' }
+      : op === 'tap' && whole('x', 'y') ? { cmd: 'tap', x: n('x'), y: n('y') }
+      : op === 'press' && whole('x', 'y', 'ms') ? { cmd: 'press', x: n('x'), y: n('y'), ms: n('ms') }
+      : op === 'swipe' && whole('x1', 'y1', 'x2', 'y2', 'ms') ? { cmd: 'swipe', x1: n('x1'), y1: n('y1'), x2: n('x2'), y2: n('y2'), ms: n('ms') }
+      : null
+    if (!request) return refuse('That is not a debug request the dial knows.')
+    const result = await cable.debug(dial, request)
+    if (!result.ok) return { ...result }
+    if (!('pixels' in result)) return { ok: true }
+    try {
+      return { ok: true, png: pngFromRgb565be(result.width, result.height, result.pixels).toString('base64'), width: result.width, height: result.height }
+    } catch (error) {
+      return refuse(`The picture could not be made into a PNG: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
   return {
     harness_devices_list: answer('harness_devices_list'), harness_device_settings: answer('harness_device_settings'),
     pet_preview: local('pet_preview'), pet_apply: local('pet_apply'), pet_reset: local('pet_reset'), pet_status: local('pet_status'),
+    dial_debug: dialDebug,
   }
 }

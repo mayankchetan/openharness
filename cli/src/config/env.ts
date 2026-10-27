@@ -397,6 +397,12 @@ const fields = {
   // Set to 'true' to let this daemon own the dial from any session, not only the console one. For a single-user
   // PC reached over Remote Desktop, where the console session is empty and the dial would otherwise be released.
   CABLE_ANY_SESSION: flag('false'),
+  // Set to 'true' to switch on POST /api/dial/debug/{shot,tap,press,swipe} on the daemon's local API: a screenshot of
+  // the dial's face and an injected touch, for a developer or an agent testing the firmware's screens. The port is
+  // exclusive, so while the daemon holds the dial this is the only way to reach the firmware's debug commands. Off
+  // (the default), the routes do not exist and answer 404 as any unknown route does; on, they still want the local
+  // credential like every other route. See devices/harness-device/firmware/docs/DEBUG_COMMANDS.md.
+  CABLE_DEBUG_API: flag('false'),
 } satisfies Record<string, EnvField<unknown>>
 
 export type Env = EnvOf<typeof fields>

@@ -16,7 +16,7 @@ import type { DevicesDeps } from './devices.js'
 const seen = vi.hoisted(() => ({
   host: null as unknown as CableHostWiring,
   dial: null as unknown as { onDialStatus(status: unknown): void },
-  cable: null as unknown as { args: unknown[]; calls: Array<[string, unknown[]]>; setSettings: (id: string, patch: unknown) => Promise<{ ok: boolean; error?: string }> },
+  cable: null as unknown as { args: unknown[]; calls: Array<[string, unknown[]]>; setSettings: (id: string, patch: unknown) => Promise<{ ok: boolean; error?: string }>; debug: ReturnType<typeof import('vitest').vi.fn> },
   bridges: {} as Record<string, { wiring: Record<string, (...args: unknown[]) => unknown>; calls: Array<[string, unknown[]]> }>,
   fleet: null as null | { deps: FleetDeps; events: ((event: FleetEvent) => void) | null; fail: boolean },
   voice: { sessions: vi.fn(), connected: vi.fn(), shutdown: vi.fn() },
@@ -64,6 +64,9 @@ vi.mock('../cable/cableFleet.js', async (real) => {
     wantsStats() { return this.wants }
     petDial = () => ({ supported: false, held: [] as string[], sending: null })
     setSettings = vi.fn(async (id: string, _patch: unknown) => (id === 'usb' ? { ok: true } : { ok: false, error: 'That device is not plugged into this computer.' }))
+    // The firmware's debug commands (cable/cableFleet.ts debug): the picture is two pixels, red and green.
+    debug = vi.fn(async (_dial: string | undefined, request: { cmd: string }): Promise<unknown> =>
+      request.cmd === 'shot' ? { ok: true, width: 2, height: 1, pixels: Buffer.from([0xf8, 0x00, 0x07, 0xe0]) } : { ok: true })
   }
   return { ...actual, CableFleet: FakeCable }
 })
@@ -1150,5 +1153,72 @@ describe('the Devices tab', () => {
     // A changed mapping reaches every live dial.
     expect(await requests.pet_reset({ target: 'all' }, { local: true, owner: true })).toMatchObject({ ok: true })
     expect(calls('petsChanged')).toEqual([[]])
+  })
+})
+
+describe('the dial debug request', () => {
+  const owner = { local: true, owner: true }
+  /** CABLE_DEBUG_API, as the process read it at start: the devices check it themselves as well as the core's route. */
+  const withApi = async (on: boolean, run: () => Promise<void>) => {
+    const was = env.CABLE_DEBUG_API
+    ;(env as { CABLE_DEBUG_API: boolean }).CABLE_DEBUG_API = on
+    try { await run() } finally { (env as { CABLE_DEBUG_API: boolean }).CABLE_DEBUG_API = was }
+  }
+
+  it('is not answered at all while CABLE_DEBUG_API is off', async () => {
+    const { requests } = start()
+    await withApi(false, async () => {
+      expect(await requests.dial_debug({ op: 'shot' }, owner)).toEqual({ error: 'DISABLED' })
+    })
+    expect(seen.cable.debug).not.toHaveBeenCalled()
+  })
+
+  it('is answered to the owner on this computer only', async () => {
+    const { requests } = start()
+    await withApi(true, async () => {
+      expect(await requests.dial_debug({ op: 'shot' }, { local: false, owner: false })).toEqual({ error: 'OWNER_REQUIRED' })
+      expect(await requests.dial_debug({ op: 'shot' }, { local: true, owner: false })).toEqual({ error: 'OWNER_REQUIRED' })
+      expect(await requests.dial_debug({ op: 'shot' }, { local: false, owner: true })).toEqual({ error: 'LOCAL_ONLY' })
+    })
+    expect(seen.cable.debug).not.toHaveBeenCalled()
+  })
+
+  it('asks the fleet for a screenshot and answers a PNG of it, as base64', async () => {
+    const { requests } = start()
+    await withApi(true, async () => {
+      const answer = await requests.dial_debug({ op: 'shot', dial: 'aa:bb' }, owner)
+      expect(seen.cable.debug).toHaveBeenCalledWith('aa:bb', { cmd: 'shot' })
+      const png = Buffer.from(answer.png as string, 'base64')
+      expect(answer.ok).toBe(true)
+      expect(png.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a')
+      expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([2, 1])
+      expect(await requests.dial_debug({ op: 'shot' }, owner)).toMatchObject({ ok: true })
+      expect(seen.cable.debug).toHaveBeenLastCalledWith(undefined, { cmd: 'shot' })
+    })
+  })
+
+  it('asks the fleet to play a touch, with the numbers and nothing else', async () => {
+    const { requests } = start()
+    await withApi(true, async () => {
+      expect(await requests.dial_debug({ op: 'swipe', x1: 380, y1: 233, x2: 80, y2: 233, ms: 250, dial: 'usb', extra: 'ignored' }, owner)).toEqual({ ok: true })
+      expect(seen.cable.debug).toHaveBeenCalledWith('usb', { cmd: 'swipe', x1: 380, y1: 233, x2: 80, y2: 233, ms: 250 })
+      await requests.dial_debug({ op: 'tap', x: 1, y: 2 }, owner)
+      expect(seen.cable.debug).toHaveBeenLastCalledWith(undefined, { cmd: 'tap', x: 1, y: 2 })
+      await requests.dial_debug({ op: 'press', x: 3, y: 4, ms: 700 }, owner)
+      expect(seen.cable.debug).toHaveBeenLastCalledWith(undefined, { cmd: 'press', x: 3, y: 4, ms: 700 })
+    })
+  })
+
+  it('passes a failure on as it is, and refuses what it does not know without asking the fleet', async () => {
+    const { requests } = start()
+    await withApi(true, async () => {
+      const failure = { ok: false, kind: 'device', reason: 'asleep', message: 'the dial refused: asleep' }
+      seen.cable.debug.mockResolvedValueOnce(failure)
+      expect(await requests.dial_debug({ op: 'shot' }, owner)).toEqual(failure)
+      seen.cable.debug.mockClear()
+      expect(await requests.dial_debug({ op: 'reboot' }, owner)).toMatchObject({ ok: false, kind: 'device' })
+      expect(await requests.dial_debug({ op: 'tap', x: 'a', y: 2 }, owner)).toMatchObject({ ok: false, kind: 'device' })
+      expect(seen.cable.debug).not.toHaveBeenCalled()
+    })
   })
 })

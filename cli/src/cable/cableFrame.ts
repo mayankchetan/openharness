@@ -54,6 +54,7 @@ export const CableType = {
   Fw: 0x03, // one slice of a firmware image, daemon → dial only
   Log: 0x04, // one ESP_LOG line, dial → daemon, raw bytes (no JSON escaping)
   Pet: 0x05, // one slice of a custom pet pack, daemon → dial only (same credit window as Fw)
+  Shot: 0x06, // one chunk of a screenshot, dial → daemon: id:u16le | index:u16le | RGB565 big-endian pixels (dialDebug.ts)
 } as const
 
 /**

@@ -23,6 +23,7 @@ import { readCompanionIdentity, type CompanionIdentity } from './companionProtoc
 //      why rule 2 has to exist at all.
 
 import { CABLE_MAX_PAYLOAD, CableDecoder, CableType, encodeCableFrame } from './cableFrame.js'
+import { DialDebug, type DebugTouch, type DoneResult, type ShotResult } from './dialDebug.js'
 import { DialLog } from './dialLog.js'
 import { FirmwareTransfer, otaKeyFor } from './fwPush.js'
 import { PACK_VERSION } from './pets/pack.js'
@@ -816,6 +817,8 @@ export class CableSession {
   private readonly questionInbox = new QuestionInbox()
   private voiceGeneration = 0
   private voiceUploadId = ''
+  /** The host debug commands: a screenshot and injected touch, one at a time (dialDebug.ts). */
+  private readonly debug = new DialDebug({ send: (msg) => this.send(msg), log: (line) => this.log(line) })
 
   constructor(
     private readonly host: CableHost,
@@ -848,6 +851,7 @@ export class CableSession {
     this.stopped = true
     if (this.timer) clearInterval(this.timer)
     this.timer = null
+    this.debug.abort('the daemon is stopping')
     await this.link?.close('daemon stopping')
     this.link = null
   }
@@ -1052,6 +1056,7 @@ export class CableSession {
   private onClosed(why: string): void {
     if (this.traffic.rx || this.traffic.tx) this.logLink('link at close')
     this.log(`cable: closed (${why})`)
+    this.debug.abort('the dial went away')
     this.cancelFormVoice()
     this.cancelSearchVoice()
     this.passageCarry.clear()
@@ -1191,8 +1196,15 @@ export class CableSession {
         } catch {
           return // unreadable payloads are counted by the decoder, never fatal
         }
+        // A debug reply is answered here, in the order it arrived: the picture's begin, chunks and end must be
+        // seen as the dial sent them, and onMessage is async. (It is also nothing the vocabulary below knows.)
+        if (this.debug.message(msg)) return
         // Its failure is this dial's: a rejection left unhandled would end the whole devices process.
         void this.onMessage(msg).catch((error: unknown) => this.fault(error))
+        return
+      }
+      if (frame.type === CableType.Shot) {
+        this.debug.chunk(frame.payload)
         return
       }
       if (frame.type === CableType.Log) {
@@ -2344,6 +2356,21 @@ export class CableSession {
     const sent = await this.send({ t: 'settings.set', ...Object.fromEntries(fields) })
     if (!sent) this.log('cable: settings change not written — the device is not on the wire')
     return sent
+  }
+
+  /**
+   * The picture on the dial's face (`debug.shot`), whole or not at all. Resolves when the last chunk is in and
+   * its checksum holds; the rest of the conversation goes on while it is on its way.
+   */
+  async debugShot(): Promise<ShotResult> {
+    if (!this.isConnected) return { ok: false, kind: 'gone', message: 'the dial is not connected' }
+    return this.debug.shot()
+  }
+
+  /** A tap, a long press or a swipe on the dial's face, resolved on the dial's `debug.done`. */
+  async debugTouch(request: DebugTouch): Promise<DoneResult> {
+    if (!this.isConnected) return { ok: false, kind: 'gone', message: 'the dial is not connected' }
+    return this.debug.touch(request)
   }
 
   private async send(msg: Message): Promise<boolean> {

@@ -14,11 +14,11 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 
 const READ = ['NODE_ENV', 'PORT', 'WEB_URL', 'HARNESS_STORE_REF', 'HARNESS_STORE_CATALOG_URL', 'HOOK_INSTALL_ENGINES', 'TERMINAL_BACKENDS', 'RECAP_WITHOUT_DEVICE', 'DISABLE_HOOK_INSTALL', 'TERMINAL_RECONCILE_INTERVAL_MS', 'ADAPTER_DATA_DIR']
 
-function load(variables: Record<string, string>) {
+function load(variables: Record<string, string>, read: readonly string[] = READ) {
   const home = mkdtempSync(join(tmpdir(), 'harness-env-'))
   roots.push(home)
   const childEnv: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: home, ADAPTER_DATA_DIR: join(home, 'data'), ...variables }
-  const script = `import { env } from ${JSON.stringify(module)}; console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(READ)}.map((k) => [k, env[k] instanceof Set ? [...env[k]] : env[k] ?? null]))))`
+  const script = `import { env } from ${JSON.stringify(module)}; console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(read)}.map((k) => [k, env[k] instanceof Set ? [...env[k]] : env[k] ?? null]))))`
   const run = spawnSync(process.execPath, [tsx, '--eval', script], { cwd: home, env: childEnv, encoding: 'utf8', timeout: 20_000 })
   return { status: run.status, stderr: run.stderr, env: run.status === 0 ? JSON.parse(run.stdout) as Record<string, unknown> : null, home }
 }
@@ -42,6 +42,15 @@ describe('the environment, as env.ts reads it', () => {
       HOOK_INSTALL_ENGINES: ['claude', 'codex'], TERMINAL_BACKENDS: ['tmux'], RECAP_WITHOUT_DEVICE: false, DISABLE_HOOK_INSTALL: true,
       TERMINAL_RECONCILE_INTERVAL_MS: 6000,
     })
+  })
+
+  it('keeps the dial\'s debug API off unless it is switched on', () => {
+    const off = load({}, ['CABLE_DEBUG_API'])
+    expect(off.status, off.stderr).toBe(0)
+    expect(off.env).toEqual({ CABLE_DEBUG_API: false })
+    expect(load({ CABLE_DEBUG_API: 'true' }, ['CABLE_DEBUG_API']).env).toEqual({ CABLE_DEBUG_API: true })
+    // Only the word 'true' turns it on.
+    expect(load({ CABLE_DEBUG_API: '1' }, ['CABLE_DEBUG_API']).env).toEqual({ CABLE_DEBUG_API: false })
   })
 
   it('ignores a store setting it cannot use, which under zod stopped every `harness` command as it loaded', () => {
