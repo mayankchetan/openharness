@@ -116,6 +116,12 @@ String _joinPath(String parent, String child) =>
 /// wants. It used to swallow the code, so a `harness start` that failed
 /// outright looked like one that worked.
 Future<void> runHarnessStart(HarnessCliRunner runner) async {
+  // Fork: the app attaches to a daemon that is already running and never starts or stops one. The CLI it
+  // would start is the stock one under ~/.harness/cli, which lacks this fork's flags. HARNESS_NO_SPAWN=false
+  // at launch (or --dart-define=HARNESS_NO_SPAWN=false) brings the stock behaviour back. The callers catch.
+  if (_neverSpawn) {
+    throw StateError('the app does not start daemons (HARNESS_NO_SPAWN)');
+  }
   final result = await runner.run(['start']);
   if (result.exitCode != 0) {
     throw ProcessException(
@@ -131,7 +137,12 @@ Future<void> runHarnessStart(HarnessCliRunner runner) async {
 
 Future<void> _defaultSpawnCommand() => runHarnessStart(HarnessCliRunner());
 
+final bool _neverSpawn = Platform.environment['HARNESS_NO_SPAWN'] != null
+    ? Platform.environment['HARNESS_NO_SPAWN'] == 'true'
+    : const bool.fromEnvironment('HARNESS_NO_SPAWN', defaultValue: true);
+
 Future<void> _defaultStopCommand() async {
+  if (_neverSpawn) return;
   await HarnessCliRunner().run(['stop']);
 }
 
