@@ -394,6 +394,9 @@ const fields = {
   // `make upload-circle` remains the only way a release happens — this only changes who downloads.
   CABLE_FW_MANIFEST_URL: text('https://storage.googleapis.com/s3-autonomous-upgrade-3/harness/esp32/ota/metadata.json'),
   CABLE_FW_DISABLE: flag('false'),
+  // Set to 'true' to let this daemon own the dial from any session, not only the console one. For a single-user
+  // PC reached over Remote Desktop, where the console session is empty and the dial would otherwise be released.
+  CABLE_ANY_SESSION: flag('false'),
 } satisfies Record<string, EnvField<unknown>>
 
 export type Env = EnvOf<typeof fields>

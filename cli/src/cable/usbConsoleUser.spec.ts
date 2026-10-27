@@ -20,6 +20,14 @@ describe('physical USB ownership', () => {
     expect(isUsbConsoleUser({ platform: 'darwin', uid: 501, consoleUid: () => { throw new Error('unavailable') } })).toBe(false)
   })
 
+  it('lets any session own the dial when CABLE_ANY_SESSION is set (Remote Desktop, empty console)', () => {
+    const windowsConsole = vi.fn(() => false)
+    expect(isUsbConsoleUser({ platform: 'win32', windowsConsole, anySession: true })).toBe(true)
+    expect(windowsConsole).not.toHaveBeenCalled()
+    expect(isUsbConsoleUser({ platform: 'darwin', uid: 502, consoleUid: () => 501, anySession: true })).toBe(true)
+    expect(isUsbConsoleUser({ platform: 'win32', windowsConsole, anySession: false })).toBe(false)
+  })
+
   it('does not require a desktop login on Linux', () => {
     const consoleUid = vi.fn(() => { throw new Error('no macOS console') })
     expect(isUsbConsoleUser({ platform: 'linux', uid: 1000, consoleUid })).toBe(true)
