@@ -1295,6 +1295,11 @@ class AppNotifier extends ChangeNotifier {
   // `docs/research/2026-10-08-onboarding-redesign/index.html`, section 1b.
   bool _signInStep = false;
 
+  static final bool _localOnly =
+      Platform.environment['HARNESS_LOCAL_ONLY'] != null
+      ? Platform.environment['HARNESS_LOCAL_ONLY'] == 'true'
+      : const bool.fromEnvironment('HARNESS_LOCAL_ONLY', defaultValue: true);
+
   /// Whether the sign-in step comes after setup: this computer holds no
   /// account. Only meaningful once [status] has left
   /// setup — [signedIn] is presumed true until the CLI has been asked.
@@ -1303,6 +1308,10 @@ class AppNotifier extends ChangeNotifier {
   /// Whether RootShell shows the sign-in step in place of the workspace: from
   /// the moment setup (and its tour) hands over, until an account arrives.
   bool get signInStepShowing {
+    // Fork: the workspace opens with no account, for a computer that runs the
+    // daemon signed out. HARNESS_LOCAL_ONLY=false at launch (or a build with
+    // --dart-define=HARNESS_LOCAL_ONLY=false) brings the sign-in step back.
+    if (!kIsWeb && _localOnly) return false;
     if (!_signInStep || viewer != null || setupTourShowing) return false;
     final signingInHere = status == AppStatus.bootstrapping && signingIn;
     if (status != AppStatus.authenticated && !signingInHere) return false;
