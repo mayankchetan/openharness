@@ -1483,6 +1483,11 @@ static void render_home(ht_scene_t *f)
     if (bell && !told) s.hits[s.hit_count++] = (hit_t){{83, bell_y - 18, 300, 84}, A_INBOX, 0, unread > 0};
     // The pet's bell bubble opens it too, with a finger's margin round it.
     if (told && bubble.w) s.hits[s.hit_count++] = (hit_t){{bubble.x - 14, bubble.y - 14, bubble.w + 28, bubble.h + 28}, A_INBOX, 0, true};
+    // Fork: a tap on the recap card opens the whole result in the reader (scroll with a vertical swipe,
+    // a sideways swipe closes it). The card is cut to four lines on the glass; the rest of the face still
+    // talks. An open question owns the card, so it gets no target.
+    if (focus_face && a && recap && recap != asked && a->full[0])
+        s.hits[s.hit_count++] = (hit_t){{41, 176, 384, 200}, A_READER, 0, true};
     // The bell and the creature never share a target, even when the bell is
     // hidden or its count changes under a finger. Centre always starts voice. On Focus the whole face
     // below the name does, down to the bottom edge; the bell's target, registered above, wins there.
@@ -3454,6 +3459,12 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
             if (result == HT_TOUCH_TAP || (on_target && now - s.touch_started < 1800))
                 dispatch(pressed_action);
             change();
+        } else if (surface && pressed_action.kind == A_READER && !gesture.guarded &&
+                   dx * dx + dy * dy < 24 * 24 && now - s.touch_started < 650) {
+            // The recap card is pressed like the face is: a thumb that drifted past ht_gesture_end()'s 12 px
+            // still opens the reader. A scroll or a longer hold never reaches here.
+            ht_gesture_guard(&gesture, now);
+            dispatch(pressed_action);
         } else if (surface && character.id == HT_CHARACTER_FOCUS && pressed_action.kind == A_PET &&
                    !gesture.guarded && dx * dx + dy * dy < 24 * 24 && now - s.touch_started < 650) {
             /*
