@@ -36,8 +36,10 @@ static volatile uint64_t s_json_fallback_bytes;
 static volatile uint32_t s_psram_failure_count;
 static volatile uint64_t s_psram_failure_bytes;
 static uint32_t s_periodic_count;
+static volatile int s_mmap_remain_cached = -1;   // -1 = not sampled yet
+static int64_t s_mmap_next_us;                   // background task only
 #ifdef DEVICE_RAM_REGIONS
-static int64_t s_regions_last_us;
+static int64_t s_regions_next_us = 61LL * 1000000LL;   // first t5min line 61 s after boot; background task only
 static void alloc_failed_cb(size_t size, uint32_t caps, const char *function_name);
 #endif
 
@@ -173,14 +175,6 @@ void ram_telemetry_checkpoint(const char *tag)
 void ram_telemetry_periodic(const char *tag)
 {
     ram_telemetry_checkpoint(tag);
-#ifdef DEVICE_RAM_REGIONS
-    // Every 5 minutes, from this background task (not the render loop).
-    int64_t now_us = esp_timer_get_time();
-    if (now_us - s_regions_last_us >= 300LL * 1000000LL) {
-        s_regions_last_us = now_us;
-        ram_telemetry_regions("t5min");
-    }
-#endif
     if (++s_periodic_count % 10 != 0) return;
 
     for (size_t i = 0; i < sizeof(k_hwm_tasks) / sizeof(k_hwm_tasks[0]); i++) log_task_stack(k_hwm_tasks[i]);
@@ -211,6 +205,30 @@ bool ram_flash_mmap_remain(void)
 #else
     return false;
 #endif
+}
+
+int ram_flash_mmap_remain_cached(void)
+{
+    return __atomic_load_n(&s_mmap_remain_cached, __ATOMIC_RELAXED);
+}
+
+void ram_telemetry_background_tick(void)
+{
+    int64_t now_us = esp_timer_get_time();
+    if (now_us >= s_mmap_next_us) {
+        s_mmap_next_us = now_us + 10LL * 1000000LL;
+        // May wait for another task's flash write or mapping; that is why this runs here and not in the renderer.
+        __atomic_store_n(&s_mmap_remain_cached, ram_flash_mmap_remain() ? 1 : 0, __ATOMIC_RELAXED);
+        now_us = esp_timer_get_time();
+    }
+#ifdef DEVICE_RAM_REGIONS
+    if (now_us >= s_regions_next_us) {
+        s_regions_next_us += 300LL * 1000000LL;
+        if (s_regions_next_us <= now_us) s_regions_next_us = now_us + 300LL * 1000000LL;   // never burst after a stall
+        ram_telemetry_regions("t5min");
+    }
+#endif
+    ram_telemetry_alloc_fail_flush();
 }
 
 #ifdef DEVICE_RAM_REGIONS

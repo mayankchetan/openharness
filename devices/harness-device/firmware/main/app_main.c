@@ -158,6 +158,10 @@ static void refresh_task(void *arg)
         // correct; this makes it quick.
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
 
+        // Telemetry that must not run in the render task: the flash mmap sample (can wait for a flash write)
+        // and the 61 s / 300 s RAM_REGIONS lines. Cheap when nothing is due.
+        ram_telemetry_background_tick();
+
         // Chip and settings actions, tapped on the LVGL task and executed here off it.
         ui_service_model_picker();
 

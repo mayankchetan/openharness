@@ -35,9 +35,20 @@ void ram_telemetry_hwm(void);
 
 // True while a persistent flash mmap exists. The flash driver keeps the cache on for a flash write only when
 // this is false and the app runs from PSRAM (spi_flash_os_func_app.c:239). Takes the driver's mmap freeze lock
-// for the duration of the read, so it can wait for a flash write in another task; call it at most once a minute
-// from a task that may wait.
+// (flash_mmap_lock_freeze(), which waits with portMAX_DELAY, spi_flash/flash_mmap.c:148-165) and so can block
+// for as long as another task holds a mapping or writes flash. NEVER call it from the render task or any
+// task that must stay live; the alive line prints the cached value from ram_flash_mmap_remain_cached().
 bool ram_flash_mmap_remain(void);
+
+// Last value sampled by ram_telemetry_background_tick(): 0 or 1, or -1 before the first sample. Lock-free.
+int ram_flash_mmap_remain_cached(void);
+
+// Call from ONE background task about once a second (the refresh task's loop in app_main.c). It
+//  - samples ram_flash_mmap_remain() into the cache every 10 s (this call may wait for a flash write);
+//  - logs RAM_REGIONS tag=t5min first 61 s after boot, then every 300 s;
+//  - flushes the failed-allocation ring.
+// It is cheap when nothing is due. Do not call it from the render task.
+void ram_telemetry_background_tick(void);
 
 // Internal heap, one record per registered heap region (the five/eight regions of the boot log).
 typedef struct {
@@ -53,7 +64,7 @@ typedef struct {
 int ram_telemetry_region_snapshot(ram_region_t *out, int max);
 
 // Log one "RAM_REGIONS tag=.. idx=i/n start=.. size=.. free=.. largest=.. min_free=.." line per region.
-// Boot tags and a 5 minute timer call it. Never call it from the 20 ms render loop.
+// Boot tags and ram_telemetry_background_tick() (61 s, then every 300 s) call it. Never call it from the 20 ms render loop.
 void ram_telemetry_regions(const char *tag);
 
 // Failed heap allocations. The IDF callback only counts and records (it can run in any context); the log

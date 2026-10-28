@@ -346,7 +346,7 @@ static void heartbeat(void)
              (int)audio_notify_is_muted(), (unsigned long)perf.raster_max_us,
              (unsigned long)perf.frame_max_us, (unsigned long)cable_link_dropped_logs(),
              (unsigned)uxTaskGetStackHighWaterMark(NULL),
-             (int)ram_flash_mmap_remain(), ram_telemetry_alloc_fail_count(),
+             ram_flash_mmap_remain_cached(), ram_telemetry_alloc_fail_count(),
              touch.controller_ok ? "" : " TOUCH-DEAD",
              display_is_asleep() ? " asleep" : "");
     // The other nine tasks' stack high-water marks, on their own line (the alive line sits near the 512 B log limit).
