@@ -69,3 +69,18 @@ with tempfile.TemporaryDirectory(prefix='harness-render-guard-') as folder:
                     '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'), str(folder / 'guard.c'),
                     '-o', str(folder / 'guard')], check=True)
     subprocess.run([str(folder / 'guard')], check=True)
+
+
+# The render task's stack: 10,240 B when no illustrated companion can draw (the ROM inflater is dead code then),
+# 24,576 B when it can. One named constant, used by the task create.
+stack = re.search(r'#ifdef HABITAT_NO_COMPANION_ART\s+#define RENDER_STACK_BYTES (\d+)\s+#else\s+#define RENDER_STACK_BYTES (\d+)\s+#endif',
+                  source)
+assert stack and (stack[1], stack[2]) == ('10240', '24576'), 'RENDER_STACK_BYTES block'
+assert re.search(r'xTaskCreatePinnedToCore\(render_task, "habitat_render", RENDER_STACK_BYTES,', source)
+for flag, expect in (([], '24576'), (['-DHABITAT_NO_COMPANION_ART=1'], '10240')):
+    with tempfile.TemporaryDirectory(prefix='harness-render-stack-') as folder:
+        probe = Path(folder) / 'stack.c'
+        probe.write_text(stack[0] + '\nint render_stack_probe = RENDER_STACK_BYTES;\n')
+        expanded = subprocess.run(['cc', '-E', '-P'] + flag + [str(probe)], check=True, capture_output=True, text=True).stdout
+        assert f'render_stack_probe = {expect};' in expanded, (flag, expanded)
+print('render stack: RENDER_STACK_BYTES is 10240 without companion art and 24576 with it PASS')

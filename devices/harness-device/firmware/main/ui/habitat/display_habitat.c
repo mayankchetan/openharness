@@ -40,6 +40,18 @@ void cable_transport_benchmark(void);
 #endif
 
 #define STRIP_LINES 24
+
+// Stack of the render task. The ROM inflater keeps its Huffman tables on the calling task's stack, and an
+// illustrated companion can become active at any time over the USB link, so a build that can draw one keeps
+// 24,576 B. HABITAT_NO_COMPANION_ART (main/CMakeLists.txt, with HABITAT_FOCUS_ONLY) removes every path to the
+// inflater: measured idle peak use there is 2,700 B (stack_free 21,876 of 24,576). 10,240 B is the interim
+// value until the load measurement (reader paging, animation, recap, pet packs, OTA) names the real peak;
+// the rule is peak + 4,096 B margin, rounded up to 1,024 B. Change it here only.
+#ifdef HABITAT_NO_COMPANION_ART
+#define RENDER_STACK_BYTES 10240
+#else
+#define RENDER_STACK_BYTES 24576
+#endif
 static esp_lcd_panel_handle_t panel;
 static SemaphoreHandle_t model_lock, dma_done;
 static TaskHandle_t renderer;
@@ -559,9 +571,7 @@ void display_init(void)
         assert(pixels[i]);
     }
     display_bump_activity();
-    // The ROM inflater keeps its Huffman tables on the calling task's stack.
-    // Illustrated companions can become active at any time over the USB link.
-    assert(xTaskCreatePinnedToCore(render_task, "habitat_render", 24576, NULL, 5, &renderer, 1) ==
+    assert(xTaskCreatePinnedToCore(render_task, "habitat_render", RENDER_STACK_BYTES, NULL, 5, &renderer, 1) ==
            pdPASS);
     touch_init();
     ESP_LOGI("habitat", "direct C renderer on a %dpx face: two %d-byte internal DMA buffers over %s",
