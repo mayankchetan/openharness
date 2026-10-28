@@ -11,6 +11,7 @@ main = Path(__file__).resolve().parent / '../main'
 
 MOVED = [  # (file, task name, macro, plain create that the #else branch keeps)
     ('ptt.c', 'ptt', 'TASK_STACK_PSRAM_PTT', 'xTaskCreate'),
+    ('audio_capture.c', 'beep', 'TASK_STACK_PSRAM_BEEP', 'xTaskCreate'),
 ]
 STAYS_INTERNAL = ['habitat_render', 'habitat_touch', 'habitat_actions', 'cable_link', 'cable_session',
                   'voice_capture', 'voice_send']

@@ -11,6 +11,7 @@
 #include "freertos/semphr.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "task_util.h"
 #include <string.h>
 #include <stdatomic.h>
 
@@ -161,7 +162,12 @@ void audio_notify_init(void)
 
     // The full codec-open path retained only 688 B on a 3 KiB stack during
     // event stress. Four KiB restores the 25% and 1 KiB safety margins.
+#if TASK_STACK_PSRAM_BEEP
+    // Stack in PSRAM (task_util.h); the tone loop runs forever and touches no flash API.
+    if (task_create_psram(beep_task, "beep", 4096, NULL, 5, &s_beep_task, tskNO_AFFINITY) != pdPASS) {
+#else
     if (xTaskCreate(beep_task, "beep", 4096, NULL, 5, &s_beep_task) != pdPASS) {
+#endif
         s_beep_task = NULL;
         notify_init_failed("task allocation");
         return;

@@ -25,6 +25,8 @@ code = r'''
 #define DEVICE_HABITAT 1
 #define ESP_OK 0
 #define pdPASS 1
+#define tskNO_AFFINITY 0x7FFFFFFF
+#define TASK_STACK_PSRAM_BEEP 1   /* the default in task_util.h */
 #define ESP_LOGI(...) ((void)0)
 static void log_ignore(const char *fmt,...) { (void)fmt; }
 #define ESP_LOGW(tag,...) log_ignore(__VA_ARGS__)
@@ -93,8 +95,10 @@ static void config_save_muted(bool on) { assert(on); }
 bool audio_notify_is_muted(void) { return atomic_load(&s_muted); }
 static bool rx_overrun(void *a,void *b,void *c) { (void)a;(void)b;(void)c;return false; }
 static void beep_task(void *arg) { (void)arg; }
-static int xTaskCreate(void (*fn)(void *),const char *name,int stack,void *arg,int priority,resource **task) {
-    (void)name;(void)arg;(void)priority;assert(fn==beep_task&&stack==4096);
+// The beep task's stack is in PSRAM (task_create_psram falls back to an internal stack by itself).
+static unsigned psram_creates;
+static int task_create_psram(void (*fn)(void *),const char *name,unsigned stack,void *arg,unsigned priority,resource **task,int core) {
+    (void)name;(void)arg;assert(fn==beep_task&&stack==4096&&priority==5&&core==tskNO_AFFINITY);psram_creates++;
     if(fail())return 0;*task=acquire(8,NULL);return pdPASS;
 }
 '''
@@ -113,7 +117,7 @@ int main(void) {
         operation=fail_at=0;assert(audio_capture_init());capture_init_failed("retry cleanup");assert_mic_empty();
     }
     operation=fail_at=0;assert(audio_capture_init());unsigned mic_live=live;
-    operation=0;audio_notify_init();unsigned speaker_steps=operation;assert(s_beep_task&&live==mic_live+5);
+    operation=0;audio_notify_init();unsigned speaker_steps=operation;assert(s_beep_task&&live==mic_live+5&&psram_creates==1);
     before=operation;audio_notify_init();assert(operation==before);
     release(s_beep_task);s_beep_task=NULL;notify_init_failed("test cleanup");assert(live==mic_live);
     for(unsigned step=1;step<=speaker_steps;step++) {
