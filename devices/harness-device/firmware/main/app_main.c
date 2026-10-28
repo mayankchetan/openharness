@@ -34,6 +34,9 @@
 #include "ptt.h"
 #include "ram_telemetry.h"
 #include "task_util.h"
+#ifdef DEVICE_UI_METRICS
+#include "ui/habitat/ui_metrics.h"
+#endif
 #ifdef DEVICE_XIP_PROBE
 #include "xip_probe.h"
 #endif
@@ -162,6 +165,9 @@ static void refresh_task(void *arg)
         // Telemetry that must not run in the render task: the flash mmap sample (can wait for a flash write)
         // and the 61 s / 300 s RAM_REGIONS lines. Cheap when nothing is due.
         ram_telemetry_background_tick();
+#ifdef DEVICE_UI_METRICS
+        uim_tick();   // the per-view UIM line (at most one a second); heap walk and log call stay off the renderer
+#endif
 
         // Chip and settings actions, tapped on the LVGL task and executed here off it.
         ui_service_model_picker();

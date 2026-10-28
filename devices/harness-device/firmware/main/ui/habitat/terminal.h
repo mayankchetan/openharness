@@ -274,6 +274,20 @@ void ht_raster_fast_ascii(bool enabled);
 void ht_glyph_cache_enable(bool enabled);
 uint32_t ht_glyph_cache_builds(void);
 size_t ht_glyph_cache_bytes(void);
+#ifdef DEVICE_UI_METRICS
+// Measurements for the per-view UIM log line (ui_metrics.c). Counters only; they are written by whichever task
+// rasterizes (the renderer), so ht_metrics_take and ht_metrics_scene belong to that task too.
+typedef struct {
+    uint16_t arc_mask_max[2];   // largest arc mask in use: [0] upper arc, [1] lower arc
+    uint16_t arc_cap;           // ARC_MASK_BYTES
+    uint16_t cols_max;          // widest cell-sprite row unpacked (frame columns, buffer is HT_CELL_COLS_MAX)
+    uint32_t glyph_hits, glyph_miss;   // small-ASCII glyph cache (24 slots): rasterized glyphs found / built
+} ht_metrics_t;
+// Add what the scene itself shows: the mask of each arc run whose text is the one cached, and its sprites' rows.
+void ht_metrics_scene(const ht_scene_t *scene);
+// Return what the scene scan and the raster counted since the last take, and clear it.
+void ht_metrics_take(ht_metrics_t *out);
+#endif
 // Consume one word-wrapped UTF-8 line; shared by rectangular and round reading areas.
 const char *ht_take_line(const char **cursor, int cells);
 // Display-only normalization, before measuring/wrapping. Bounded, no allocation;

@@ -38,6 +38,9 @@ void cable_transport_benchmark(void);
 #ifdef DEVICE_RENDER_STRESS
 #include "audio_client.h"
 #endif
+#ifdef DEVICE_UI_METRICS
+#include "ui_metrics.h"
+#endif
 
 #define STRIP_LINES 24
 
@@ -325,6 +328,9 @@ static uint32_t paint(const ht_scene_t *next, const ht_damage_t *damage)
         input_us = 0;
     }
     portEXIT_CRITICAL(&stats_lock);
+#ifdef DEVICE_UI_METRICS
+    uim_paint(raster_us, (uint32_t)(finished - started));
+#endif
     return raster_us;
 }
 static void heartbeat(void)
@@ -463,6 +469,9 @@ static void render_task(void *arg)
 #endif
         habitat_tick();
         bool fresh = habitat_scene_take(&scenes[front ^ 1]);
+#ifdef DEVICE_UI_METRICS
+        if (fresh) uim_scene(habitat_view_name(), &scenes[front ^ 1]);   // counters only; the line is written elsewhere
+#endif
         uint32_t receipt = habitat_scene_receipt();
         uint32_t wake_ms = habitat_next_wake_ms();
 #ifdef DEVICE_RENDER_STRESS

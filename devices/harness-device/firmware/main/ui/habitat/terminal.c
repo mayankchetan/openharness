@@ -1249,6 +1249,17 @@ static uint32_t glyph_builds;
 void ht_glyph_cache_enable(bool enabled) { glyph_cache_enabled = enabled; }
 uint32_t ht_glyph_cache_builds(void) { return glyph_builds; }
 size_t ht_glyph_cache_bytes(void) { return sizeof glyph_cache; }
+#ifdef DEVICE_UI_METRICS
+static ht_metrics_t ui_metrics;
+static void metric_cols(unsigned cols) { if (cols > ui_metrics.cols_max) ui_metrics.cols_max = (uint16_t)cols; }
+static void metric_arc(unsigned index, unsigned bytes)
+{
+    if (bytes > ui_metrics.arc_mask_max[index]) ui_metrics.arc_mask_max[index] = (uint16_t)bytes;
+}
+#else
+#define metric_cols(cols) ((void)0)
+#define metric_arc(index, bytes) ((void)0)
+#endif
 
 static bool glyph_cache_prepare(const ht_font_t *f, uint16_t fg, uint16_t bg)
 {
@@ -1266,7 +1277,15 @@ static const uint16_t *glyph_cached(uint32_t c, const uint8_t *glyph,
                                     const uint16_t palette[4])
 {
     unsigned code = c - 32;
-    if (glyph_cache.index[code]) return glyph_cache.pixels[glyph_cache.index[code] - 1];
+    if (glyph_cache.index[code]) {
+#ifdef DEVICE_UI_METRICS
+        ui_metrics.glyph_hits++;
+#endif
+        return glyph_cache.pixels[glyph_cache.index[code] - 1];
+    }
+#ifdef DEVICE_UI_METRICS
+    ui_metrics.glyph_miss++;
+#endif
     unsigned slot = glyph_cache.next;
     glyph_cache.next = (slot + 1) % GLYPH_SLOTS;
     if (glyph_cache.code[slot]) glyph_cache.index[glyph_cache.code[slot] - 1] = 0;
@@ -1535,6 +1554,7 @@ static void arc_raster(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
 {
     arc_cache_t *cache = &arc_caches[r->arc == 2];
     arc_prepare(r, cache);
+    metric_arc(r->arc == 2, cache->mask_bytes);
     if (!cache->mask_bytes) return;
     // Colour a cached mask: no glyph rotation, allocations or extra text runs. The 4-bit (proportional)
     // masks mix in fifteenths; both tables are 16 wide so one loop reads either.
@@ -1592,6 +1612,7 @@ static void sprite_raster(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
         // Zoomed: in units where a frame pixel is `zoom` wide and a glass pixel 8, each glass pixel is the mean of the
         // frame pixels it overlaps, weighted by the overlap (a transparent one counts as the black ground).
         int cols=s->src_w/s->cell,z=s->zoom;
+        metric_cols((unsigned)cols);
         static uint8_t unpacked[9][HT_CELL_COLS_MAX];   // the frame rows one glass row covers (8 / zoom + 1 at most)
         for(int y=top;y<bottom;y++){
             int v0=(y-r->y)*8,v1=v0+8;
@@ -1622,6 +1643,7 @@ static void sprite_raster(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
     if(s->cells){
         // Cells: a run of `cell` px per palette index, 0 leaves the frame as it is.
         int cols=s->width/s->cell;
+        metric_cols((unsigned)cols);
         static uint8_t unpacked[HT_CELL_COLS_MAX];
         for(int y=top;y<bottom;y++){
             const uint8_t *row=cell_row(s->cells,s->row_at,cols,(y-r->y)/s->cell,unpacked);
@@ -1874,3 +1896,26 @@ void ht_raster(const ht_scene_t *s, ht_rect_t clip, uint16_t *out)
         }
     }
 }
+
+#ifdef DEVICE_UI_METRICS
+void ht_metrics_scene(const ht_scene_t *scene)
+{
+    for (int i = 0; i < scene->count; i++) {
+        const ht_run_t *r = &scene->runs[i];
+        if (r->sprite.width && r->sprite.cells && r->sprite.cell)
+            metric_cols(r->sprite.zoom ? (unsigned)(r->sprite.src_w / r->sprite.cell)
+                                       : (unsigned)(r->sprite.width / r->sprite.cell));
+        if (!r->arc || r->sprite.width || r->ring.set || r->box.h) continue;
+        // The mask is known without building it only when the cached text is this run's text; a different text
+        // is built (and counted) by arc_raster when its pixels are damaged.
+        const arc_cache_t *cache = &arc_caches[r->arc == 2];
+        if ((cache->face || cache->prop) && !strcmp(cache->text, r->text)) metric_arc(r->arc == 2, cache->mask_bytes);
+    }
+}
+void ht_metrics_take(ht_metrics_t *out)
+{
+    *out = ui_metrics;
+    out->arc_cap = ARC_MASK_BYTES;
+    memset(&ui_metrics, 0, sizeof ui_metrics);
+}
+#endif

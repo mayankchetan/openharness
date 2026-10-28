@@ -73,6 +73,10 @@ static void display_lock(void) {
 static void display_unlock(void) {}
 static void habitat_tick(void) { ticks++; }
 static bool habitat_scene_take(ht_scene_t *out) { (void)out; return mode==4 || mode==5; }
+#ifdef DEVICE_UI_METRICS
+static const char *habitat_view_name(void) { return "test"; }
+static void uim_scene(const char *view, const ht_scene_t *scene) { (void)view; (void)scene; }
+#endif
 static unsigned receipts;
 static uint32_t habitat_scene_receipt(void) { return mode==4 || mode==5 ? 77 : 0; }
 static void habitat_scene_presented(uint32_t receipt) { assert(receipt==77 && panel_on && frames>0); receipts++; }

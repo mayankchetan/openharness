@@ -2464,6 +2464,46 @@ bool habitat_scene_take(ht_scene_t *f)
     return true;
 }
 
+#ifdef DEVICE_UI_METRICS
+// The name the UIM log line gives the screen: the view_t enum, with HOME split by what render_home draws. Render task
+// only (display lock held), like habitat_scene_take.
+const char *habitat_view_name(void)
+{
+    switch (s.view) {
+    case HOME: {
+        if (!s.connected || s.loading) return "brand";
+        if (swarm_mode()) return "swarm";
+        if (workspace.touching && workspace.moved && !workspace.cancelled) return "workspace";
+        agent_t *a = active();
+        if (!a) return "home_rest";
+        if (is_question(a->id)) return "home_question";
+        if (a->busy) return "home_busy";
+        return a->recap_ready ? "home_recap" : "home";
+    }
+    case AGENTS: return "panes";
+    case AGENT: return "agent";
+    case READER: return "reader";
+    case QUESTION: return "question";
+    case CHOICE: return "choice";
+    case ANSWER_REVIEW: return "answer_review";
+    case INBOX: return "inbox";
+    case TABS: return "tabs";
+    case MACHINES: return "machines";
+    case VOICE: return "voice";
+    case SELECTION: return "selection";
+    case FORM: return "form";
+    case DRAFT: return "draft";
+    case DRAFT_OPTIONS: return "draft_options";
+    case SETTINGS: return "settings";
+    case STOP: return "stop";
+    case MODELS: return "models";
+    case MESSAGE: return "message";
+    case OTA: return "ota";
+    }
+    return "unknown";
+}
+#endif
+
 static bool queue(action_t a)
 {
 #ifdef DEVICE_CREATURE_GALLERY

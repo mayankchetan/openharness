@@ -166,6 +166,14 @@ if(DEVICE_RAM_REGIONS)
     target_include_directories(${COMPONENT_LIB} PRIVATE "${heap_dir}")
 endif()
 
+# Per-view UI measurements: -DDEVICE_UI_METRICS=1 adds counters on the render path (runs per scene, arc mask bytes,
+# sprite columns, glyph cache hits) and one "UIM view=..." log line (tag uim) when the view changes and every 10 s
+# (ui/habitat/ui_metrics.c). Off by default; not for a daily image.
+if(DEVICE_UI_METRICS)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_UI_METRICS=1)
+    target_sources(${COMPONENT_LIB} PRIVATE "ui/habitat/ui_metrics.c")
+endif()
+
 # XiP probe (diagnostic, never part of a daily image): PSRAM-stack tasks calling NVS, OTA and flash reads.
 # -DDEVICE_XIP_PROBE=1 compiles main/xip_probe.c and the guarded calls in app_main.c. It writes and erases the
 # inactive OTA slot and the NVS namespace "xipprobe", so it also needs a second, explicit flag:
