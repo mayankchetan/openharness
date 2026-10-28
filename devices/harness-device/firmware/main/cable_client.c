@@ -22,6 +22,7 @@
 #include "fw_update.h"
 #include "last_words.h"
 #include "pet_store.h"
+#include "ram_telemetry.h"
 #include "board/board.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -1629,7 +1630,7 @@ bool cable_client_start(void)
     if (s_started) return true;
     TaskHandle_t hello_task = NULL;
     cable_machines_init(&s_machines);
-    s_agents = calloc(CABLE_MAX_AGENTS, sizeof(cable_agent_t));
+    s_agents = ram_psram_calloc(CABLE_MAX_AGENTS, sizeof(cable_agent_t), "s_agents");   // PSRAM: read under s_agents_lock, never by DMA or an ISR
     s_agents_lock = xSemaphoreCreateMutex();
     s_models_sem = xSemaphoreCreateBinary();
     if (!s_agents || !s_agents_lock || !s_models_sem) {

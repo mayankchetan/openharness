@@ -101,6 +101,10 @@ static void *tracked_calloc(size_t n,size_t size) {
     void *p=calloc(n,size);assert(p);live++;return p;
 }
 static void tracked_free(void *p) { if(p){assert(live);live--;free(p);} }
+// The agent list lives in PSRAM on the board (ram_psram_calloc); the host stub counts the calls and keeps the
+// leak accounting of tracked_calloc.
+static unsigned psram_calls;
+static void *ram_psram_calloc(size_t n,size_t size,const char *owner) { (void)owner;psram_calls++;return tracked_calloc(n,size); }
 static void *xSemaphoreCreateMutex(void) { return tracked_calloc(1,1); }
 static void *xSemaphoreCreateBinary(void) { return tracked_calloc(1,1); }
 static void vSemaphoreDelete(void *lock) { assert(lock);tracked_free(lock); }
@@ -146,6 +150,7 @@ int main(void) {
         assert(!s_running&&!driver&&!hellos&&!live&&!notifications);
     }
     attempts=fail_at=0;
+    assert(psram_calls>=1); // s_agents comes from ram_psram_calloc, not from the internal-first calloc
     now = 91; assert(cable_client_start());
     assert(new_task_ready && s_running && connected && s_session && notifications==1);
     unsigned calls=attempts;assert(cable_client_start());assert(calls==attempts&&notifications==1);
