@@ -393,11 +393,13 @@ static void controller(void *arg)
         }
         ESP_LOGW(TAG, "SKIP reset_reason=%d (crash reboot: probe not run; power-cycle or flash again to run)", (int)rr);
         ESP_LOGI(TAG, "SUMMARY pass=0 fail=0 skipped=1");
+        xip_probe_banner();
         ESP_LOGI(TAG, "DONE");
         vTaskDelete(NULL);
         return;
     }
     while (esp_timer_get_time() < (int64_t)XIP_START_DELAY_S * 1000000) vTaskDelay(pdMS_TO_TICKS(1000));
+    xip_probe_banner();
     ESP_LOGI(TAG, "START reset_reason=%d idf=%s delay_s=%d (display should be IDLE for phases 1 and 2)", (int)rr,
              esp_get_idf_version(), XIP_START_DELAY_S);
     ram_telemetry_checkpoint("xip_start");
@@ -425,8 +427,18 @@ static void controller(void *arg)
 
     ram_telemetry_checkpoint("xip_end");
     ESP_LOGI(TAG, "SUMMARY pass=%d fail=%d skipped=0", s_pass, s_fail);
+    xip_probe_banner();
     ESP_LOGI(TAG, "DONE");
     vTaskDelete(NULL);
+}
+
+void xip_probe_banner(void)
+{
+    ESP_LOGE(TAG, "################################################################");
+    ESP_LOGE(TAG, "XIP PROBE BUILD - NOT FOR PRODUCTION");
+    ESP_LOGE(TAG, "diagnostic image: erases the inactive OTA slot, writes NVS 'xipprobe'");
+    ESP_LOGE(TAG, "reflash a normal build when the run is done");
+    ESP_LOGE(TAG, "################################################################");
 }
 
 void xip_probe_start(void)

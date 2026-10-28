@@ -166,8 +166,15 @@ if(DEVICE_RAM_REGIONS)
 endif()
 
 # XiP probe (diagnostic, never part of a daily image): PSRAM-stack tasks calling NVS, OTA and flash reads.
-# -DDEVICE_XIP_PROBE=1 compiles main/xip_probe.c and the one guarded call in app_main.c.
+# -DDEVICE_XIP_PROBE=1 compiles main/xip_probe.c and the guarded calls in app_main.c. It writes and erases the
+# inactive OTA slot and the NVS namespace "xipprobe", so it also needs a second, explicit flag:
+# -DDEVICE_XIP_PROBE_ACK=1. Without it the configure step stops. The probe image prints
+# "XIP PROBE BUILD - NOT FOR PRODUCTION" at boot (xip_probe_banner).
 if(DEVICE_XIP_PROBE)
+    if(NOT "${DEVICE_XIP_PROBE_ACK}" STREQUAL "1")
+        message(FATAL_ERROR "DEVICE_XIP_PROBE builds a diagnostic image that erases the inactive OTA slot and "
+                "writes NVS 'xipprobe'; it must never ship. Add -DDEVICE_XIP_PROBE_ACK=1 to confirm.")
+    endif()
     target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_XIP_PROBE=1)
     target_sources(${COMPONENT_LIB} PRIVATE "xip_probe.c")
 endif()

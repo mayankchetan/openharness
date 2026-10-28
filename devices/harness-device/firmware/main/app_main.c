@@ -185,6 +185,9 @@ static void refresh_task(void *arg)
 
 void app_main(void)
 {
+#ifdef DEVICE_XIP_PROBE
+    xip_probe_banner();   // diagnostic build only: first thing on the console
+#endif
     ram_telemetry_init();   // cJSON nodes and strings go to PSRAM; before any cJSON use (internal fallback is kept)
     ram_telemetry_checkpoint("boot");
     last_words_boot();   // before the first log line, so the previous boot's ring is read, not overwritten
