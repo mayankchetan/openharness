@@ -105,6 +105,11 @@ static int axp_charge_state(void)   // 0/1/2, or -1 on read error
     return s < 0 ? -1 : (s >> 5) & 0x07;
 }
 
+int power_charge_state(void)
+{
+    return axp_charge_state();
+}
+
 bool power_is_charging(void)
 {
     return axp_charge_state() == 1;   // actively topping up the battery (drives the charge bolt)

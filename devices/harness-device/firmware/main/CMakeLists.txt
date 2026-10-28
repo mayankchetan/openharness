@@ -19,6 +19,8 @@ set(BOARD_SRCS
     "app_main.c"
     "ram_telemetry.c"
     "task_util.c"
+    "battery.c"
+    "battery_ring.c"
     "config_store.c"
     "device_mac.c"
     "cable_frame.c"

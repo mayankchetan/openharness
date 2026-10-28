@@ -134,6 +134,15 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -DDEVICE_UI_METRICS=1 -fsanitize="${SAN
    -I "$here/host_stubs" -I "$here/../main/ui/habitat" -o "$out/test_uim" "$here/test_uim.c" \
    "$here/../main/ui/habitat/uim.c" "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" -lm
 "$out/test_uim"
+# The battery cache and its 30 s schedule, the NVS sample ring (against memory), and the alive line's width.
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" -o "$out/test_battery" \
+   "$here/test_battery.c" "$here/../main/battery.c"
+"$out/test_battery"
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" -o "$out/test_battery_ring" \
+   "$here/test_battery_ring.c" "$here/../main/battery_ring.c"
+"$out/test_battery_ring"
+python3 "$here/test_alive_line.py"
+
 # The UI gallery's tour table: names, holds, and that every view_t value and home face has an item.
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -I "$here/../main/ui/habitat" -o "$out/test_ui_gallery_items" "$here/test_ui_gallery_items.c"
 "$out/test_ui_gallery_items"

@@ -50,6 +50,9 @@ static const char *cable_fw_version(void) { return "0.0.99"; }
 static bool device_mac_str(char *o,size_t n) { snprintf(o,n,"aa:bb");return true; }
 static void msg_settings(cJSON **root) { (void)root; }
 static size_t pet_store_held(char ids[][17],size_t max) { (void)ids;(void)max;return 0; }
+static int bat_pct=-1,bat_chg=-1;   // battery.c's cache: -1 until the PMIC poll has run (or there is no PMIC)
+static int battery_pct(void) { return bat_pct; }
+static int battery_chg(void) { return bat_chg; }
 
 static unsigned beeps, ids_calls, card_calls, recap_calls, focus_calls, wait_calls, close_calls, question_calls, qclose_calls;
 static bool beep_next;
@@ -82,7 +85,7 @@ static bool ui_question_show(const char *a,const char *n,const char *m,const cha
 }
 static void ui_question_close(const char *a,const char *r) { (void)a;(void)r;qclose_calls++; }
 '''
-for name in ['str_of', 'msg', 'msg_check', 'msg_string', 'msg_number', 'msg_array', 'send_hello', 'id_fits',
+for name in ['str_of', 'msg', 'msg_check', 'msg_string', 'msg_number', 'msg_bool', 'msg_array', 'send_hello', 'id_fits',
              'handle_supertabs', 'handle_supertab', 'handle_supertab_recap', 'handle_supertab_focus',
              'handle_question', 'handle_question_close', 'cable_client_supertab_send']:
     code += function(name)
@@ -102,6 +105,15 @@ int main(void) {
     send_hello();
     assert(sends==1 && !strcmp(field(wire[0],"swarmCard"),"v1") && !strcmp(field(wire[0],"superTab"),"wait-v1"));
     assert(!strcmp(field(wire[0],"product"),"harness"));
+    // The battery rides on the hello only when it is known: absent on a dial without a PMIC or before the first poll.
+    assert(!strcmp(field(wire[0],"battery"),"<absent>") && !strstr(wire[0],"charging"));
+    bat_pct=73;bat_chg=2;send_hello();
+    assert(strstr(wire[1],"\"battery\":73") && strstr(wire[1],"\"charging\":false"));
+    bat_pct=100;bat_chg=1;send_hello();
+    assert(strstr(wire[2],"\"battery\":100") && strstr(wire[2],"\"charging\":true"));
+    bat_pct=-1;bat_chg=0;send_hello();   // percent unknown, state known: standby is not charging
+    assert(!strstr(wire[3],"battery") && strstr(wire[3],"\"charging\":false"));
+    bat_pct=bat_chg=-1;sends=1;
 
     // supertabs: ids in order, the bad and the repeated skipped, at most 16.
     feed(handle_supertabs,"{\"ids\":[\"s1\",\"\",7,\"s2\",\"s1\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"]}");

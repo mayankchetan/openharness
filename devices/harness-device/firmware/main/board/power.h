@@ -13,6 +13,11 @@ int power_battery_pct(void);
 // True while the battery is actively charging (drives the charge bolt). False if unknown.
 bool power_is_charging(void);
 
+// The AXP2101's battery activity: 0 standby (on external power, full or idle), 1 charging, 2 discharging (on battery).
+// -1 when unknown (no PMIC, read error). Reads the bus: call it from one task at a slow rate (ptt.c polls every 30 s
+// into battery.c; everything else reads that cache).
+int power_charge_state(void);
+
 // True while plugged into external power — actively charging OR full/standby. Use this (not
 // power_is_charging) to decide "on the charger", so a full battery still counts as plugged in.
 bool power_is_on_external(void);

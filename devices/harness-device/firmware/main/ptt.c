@@ -2,6 +2,7 @@
 #include "ui/ui_screens.h"
 #include "ui/display.h"
 #include "board/power.h"
+#include "battery.h"
 #include "board/board_pins.h"
 #include "board/board.h"
 #include "audio_client.h"
@@ -47,8 +48,13 @@ static void ptt_task(void *arg)
     int64_t press_start_us = 0;
     bool long_fired = false;
     const bool pwr_key = board()->has_pmic;
+    battery_poll_t battery_poll = {0};
 
     while (1) {
+        // The one place the battery is read: percent and charge state, every 30 s, into battery.c's cache (the alive
+        // line and the hello frame read that). Only a dial with the PMIC; the other boards keep -1 = unknown.
+        if (pwr_key && battery_poll_due(&battery_poll, (uint32_t)(esp_timer_get_time() / 1000)))
+            battery_set(power_battery_pct(), power_charge_state());
         if (pwr_key && power_take_pwrkey_tap()) screen_toggle("PWR tap");
 
         int boot_now = gpio_get_level(BSP_BOOT_BUTTON);

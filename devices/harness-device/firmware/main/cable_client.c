@@ -18,6 +18,7 @@
 #include "esp_log.h"
 #include "audio_capture.h"   // audio_notify_done() — the completion beep
 #include "audio_client.h"
+#include "battery.h"
 #include "esp_timer.h"
 #include "fw_update.h"
 #include "last_words.h"
@@ -342,6 +343,10 @@ static void send_hello(void)
     // Carried on every greeting so the app's pane opens on what the device holds rather than on what
     // this computer last sent it — which after a reboot, a reset or a second window is not the same.
     msg_settings(&root);
+    // The battery, when this dial has a PMIC and has read it (battery.c, polled by ptt.c every 30 s): the percent, and
+    // whether it is charging right now (a full battery on the charger is not charging). Absent, not zero, otherwise.
+    if (battery_pct() >= 0) msg_number(&root, "battery", battery_pct());
+    if (battery_chg() >= 0) msg_bool(&root, "charging", battery_chg() == 1);
     // Custom pets: the newest pack version this build reads (2: a pack may carry a relaxing scene, pet_store.c; it
     // still reads 1), and these packs are already held, so the daemon sends only what is missing.
     msg_number(&root, "pets", 2);

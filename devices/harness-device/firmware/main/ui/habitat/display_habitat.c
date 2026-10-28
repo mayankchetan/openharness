@@ -14,6 +14,7 @@ void cable_transport_benchmark(void);
 #include "audio_capture.h"
 #include "cable_link.h"
 #include "ram_telemetry.h"
+#include "battery.h"
 #include "board_pins.h"
 #include "board.h"
 #include "esp_lcd_panel_io.h"
@@ -353,7 +354,7 @@ static void heartbeat(void)
     ESP_LOGI("habitat",
              "alive up=%lus heap=%u/%u psram=%u touches=%lu read_fails=%lu inferred=%lu "
              "frames=%lu bytes=%lu input_last_us=%lu muted=%d raster_max_us=%lu frame_max_us=%lu log_drops=%lu stack_free=%u "
-             "mmap_remain=%d alloc_fail=%u%s%s",
+             "mmap_remain=%d alloc_fail=%u bat=%d chg=%d%s%s",
              (unsigned long)(now / 1000),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
@@ -365,6 +366,7 @@ static void heartbeat(void)
              (unsigned long)perf.frame_max_us, (unsigned long)cable_link_dropped_logs(),
              (unsigned)uxTaskGetStackHighWaterMark(NULL),
              ram_flash_mmap_remain_cached(), ram_telemetry_alloc_fail_count(),
+             battery_pct(), battery_chg(),   // -1 = unknown (no PMIC, or not polled yet); chg 0 standby, 1 charging, 2 on battery
              touch.controller_ok ? "" : " TOUCH-DEAD",
              display_is_asleep() ? " asleep" : "");
     // The other nine tasks' stack high-water marks, on their own line (the alive line sits near the 512 B log limit).
