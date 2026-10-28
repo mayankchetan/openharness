@@ -4862,7 +4862,7 @@ static void swarms_apply(void)
 {
     // A tab with no agent (only shells or viewers, or nothing) is not listed: nothing on the dial can drive it. A
     // Swarm's desk tab is, whatever it counts: its project's Lead may run on another machine.
-    static cable_swarm_t shown[SWARMS_MAX];   // static: too large for the reader task's stack; single writer
+    static EXT_RAM_BSS_ATTR cable_swarm_t shown[SWARMS_MAX];   // static: too large for the reader task's stack; single writer
     int bounded=0;
     for (int i=0;i<desk_row_count;i++)
         if (desk_rows[i].agents>0 || ht_supertabs_for_desk(&swarm,desk_rows[i].id)) shown[bounded++]=desk_rows[i];

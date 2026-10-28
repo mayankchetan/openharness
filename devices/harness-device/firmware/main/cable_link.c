@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "driver/usb_serial_jtag.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "last_words.h"
@@ -101,7 +102,9 @@ static SemaphoreHandle_t s_tx_lock;
 // Full-size on purpose, even though nothing sends anything close: at CABLE_MAX_FRAME the encoder can
 // never fail for lack of room here, so a -1 from cable_frame_encode means exactly one thing — the payload
 // is over the protocol's own limit — instead of two things that need telling apart.
-static uint8_t s_tx_frame[CABLE_MAX_FRAME];
+// In PSRAM (EXT_RAM_BSS_ATTR): usb_serial_jtag_write_bytes copies it into its ring buffer from task context,
+// so the USB peripheral never reads this array and the DMA/cache-off rules do not apply.
+static EXT_RAM_BSS_ATTR uint8_t s_tx_frame[CABLE_MAX_FRAME];
 
 // ── log framing ─────────────────────────────────────────────────────────────────────────────────────
 

@@ -23,6 +23,7 @@ code = r'''
 #define _POSIX_C_SOURCE 200809L
 #include <limits.h>
 enum { native_name_max = NAME_MAX };
+#define EXT_RAM_BSS_ATTR   /* handle_swarms keeps its scratch in PSRAM on the board; plain BSS here */
 #include "cable_client.h"
 #include <assert.h>
 #include <stdbool.h>

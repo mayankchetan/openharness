@@ -65,7 +65,7 @@ static SemaphoreHandle_t  s_agents_lock;
 // question that matters — did anything actually change — BEFORE any display lock is taken, so an
 // unchanged list costs a memcmp on the reader task instead of a full rebuild. See cable_machines.h for
 // the measurement that made that necessary.
-static cable_machines_t  s_machines;
+static EXT_RAM_BSS_ATTR cable_machines_t  s_machines;   // PSRAM: reader task only, copied into the UI model
 static char              s_machine_id[MACHINE_ID_MAX];
 
 static atomic_bool       s_session;
@@ -888,7 +888,7 @@ static void handle_swarms(const cJSON *p)
 {
     const cJSON *items = cJSON_GetObjectItemCaseSensitive(p, "items");
     if (!cJSON_IsArray(items)) return;
-    static cable_swarm_t rows[SWARMS_MAX];   // static: 24 × ~96 B is too much for the reader task's stack
+    static EXT_RAM_BSS_ATTR cable_swarm_t rows[SWARMS_MAX];   // static: 24 × ~96 B is too much for the reader task's stack
     int n = 0;
     const cJSON *it = NULL;
     cJSON_ArrayForEach(it, items) {
@@ -1222,7 +1222,7 @@ static void handle_notifications(const cJSON *p)
 {
     const cJSON *items = cJSON_GetObjectItemCaseSensitive(p, "items");
     if (!cJSON_IsArray(items)) return;
-    static cable_notif_t rows[8];   // static: too much for the reader task's stack
+    static EXT_RAM_BSS_ATTR cable_notif_t rows[8];   // static: too much for the reader task's stack
     int n = 0;
     const cJSON *it = NULL;
     cJSON_ArrayForEach(it, items) {

@@ -5,6 +5,7 @@
 #include <string.h>
 
 #ifdef ESP_PLATFORM
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -24,6 +25,9 @@ static void unlock(void) { pthread_mutex_unlock(&s_mutex); }
 #ifndef PET_MALLOC
 #define PET_MALLOC(n) malloc(n)
 #endif
+#endif
+#ifndef EXT_RAM_BSS_ATTR
+#define EXT_RAM_BSS_ATTR   // host build: ordinary BSS
 #endif
 // Hooks the host test overrides to count allocations.
 #ifndef PET_CALLOC
@@ -167,7 +171,7 @@ typedef struct { uint8_t n; uint16_t ms; int16_t dx, dy; uint16_t idx[255]; } sc
 
 // parse's working arrays (~3.7 KB), kept off the 6 KiB cable reader task's stack. parse runs only on the cable
 // task (from pet_store_finish), one at a time, so one static copy is enough.
-static struct { uint16_t small[LOOPS][255]; scene_raw_t sc[SCENES]; } s_scratch;
+static EXT_RAM_BSS_ATTR struct { uint16_t small[LOOPS][255]; scene_raw_t sc[SCENES]; } s_scratch;
 
 static unsigned gcd(unsigned a, unsigned b) { while (b) { unsigned t = a % b; a = b; b = t; } return a; }
 

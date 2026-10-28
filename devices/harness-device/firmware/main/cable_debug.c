@@ -6,6 +6,7 @@
 #include "cJSON.h"
 #include "cable_link.h"
 #include "debug_cmd.h"
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -21,7 +22,7 @@ static const char *TAG = "cable_debug";
 
 // One chunk's frame body. Static because only the reader task sends a screenshot, and the reader's 6 KiB
 // stack already carries the JSON parse that got us here.
-static uint8_t s_chunk[DBG_SHOT_HEADER + DBG_SHOT_CHUNK];
+static EXT_RAM_BSS_ATTR uint8_t s_chunk[DBG_SHOT_HEADER + DBG_SHOT_CHUNK];   // PSRAM: copied by cable_link_send
 
 // The gesture in flight, for the reply that comes later from the tick. Reader task only: it is written
 // right after a successful arm, on the same task whose tick reads it, so the two cannot interleave.

@@ -30,7 +30,7 @@ static esp_reset_reason_t s_reason;
 static bool s_abnormal;
 // The previous boot's lines, copied out before this boot starts overwriting the ring. Static rather than
 // heap: 4 KB of BSS is cheaper than a failed allocation at the one moment it would matter.
-static char s_previous[RING_BYTES + 1];
+static EXT_RAM_BSS_ATTR char s_previous[RING_BYTES + 1];   // PSRAM: boot-time copy, task context only
 static size_t s_previous_len;
 static bool s_reported;
 
