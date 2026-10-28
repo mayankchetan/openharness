@@ -308,6 +308,10 @@ static bool spawn(job_t *j, TaskFunction_t fn, uint32_t prio)
     return true;
 }
 
+// Set by wait_job() on the first timeout. A timed-out worker may still be running and may still own the shared
+// buffers (s_buf) and the xipprobe NVS handle, so the controller stops the sequence instead of reusing them.
+static const char *s_timeout_case;
+
 static bool wait_job(job_t *j, uint32_t timeout_ms)
 {
     // Two workers can notify the controller in the D/E cases, so poll the done flag instead of trusting one take.
@@ -315,6 +319,7 @@ static bool wait_job(job_t *j, uint32_t timeout_ms)
     if (!j->done) {
         ESP_LOGE(TAG, "TIMEOUT case=%s after %u ms (ops=%u)", j->name, (unsigned)timeout_ms, (unsigned)j->ops);
         j->fail++;
+        if (!s_timeout_case) s_timeout_case = j->name;
         return false;
     }
     return true;
@@ -411,20 +416,32 @@ static void controller(void *arg)
     b  = (job_t){.name = "B", .core = tskNO_AFFINITY, .psram_stack = true, .stack_bytes = 5120};
     c  = (job_t){.name = "C", .core = tskNO_AFFINITY, .psram_stack = true, .stack_bytes = 6144};
 
+    s_timeout_case = NULL;
+// After any case that timed out, stop: its task may still hold the shared buffers.
+#define STOP_AFTER_TIMEOUT() do { if (s_timeout_case) goto finish; } while (0)
+
     ESP_LOGI(TAG, "PHASE1 display idle: A (NVS), B (OTA write), C (read+SHA)");
     run_simple(&a0, worker_nvs, 120000, NVS_OPS);
+    STOP_AFTER_TIMEOUT();
     run_simple(&a1, worker_nvs, 120000, NVS_OPS);
+    STOP_AFTER_TIMEOUT();
     run_simple(&b, worker_ota_write, 300000, OTA_OPS);
+    STOP_AFTER_TIMEOUT();
     run_simple(&c, worker_sha, 300000, SHA_OPS);
+    STOP_AFTER_TIMEOUT();
 
     ESP_LOGI(TAG, "PHASE2 display idle: NVS write concurrent with esp_ota_end");
     run_concurrent("D1", false);
+    STOP_AFTER_TIMEOUT();
     run_concurrent("D2", true);
+    STOP_AFTER_TIMEOUT();
 
     ESP_LOGI(TAG, "PHASE3 animate_now wait_s=25 (start the display load now; case E repeats D2)");
     vTaskDelay(pdMS_TO_TICKS(25000));
     run_concurrent("E", true);
 
+finish:
+    if (s_timeout_case) ESP_LOGE(TAG, "ABORT after timeout case=%s (remaining cases not run)", s_timeout_case);
     ram_telemetry_checkpoint("xip_end");
     ESP_LOGI(TAG, "SUMMARY pass=%d fail=%d skipped=0", s_pass, s_fail);
     xip_probe_banner();
