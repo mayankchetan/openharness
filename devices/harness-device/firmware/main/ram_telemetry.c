@@ -256,7 +256,16 @@ int ram_telemetry_region_snapshot(ram_region_t *out, int max)
 void ram_telemetry_regions(const char *tag)
 {
     ram_region_t regions[16];
+    // multi_heap_get_info() walks the TLSF pool of each region inside a critical section, so the cost grows
+    // with the number of allocated blocks. Measure the first call once and log it (RAM_REGIONS cost_us=).
+    static bool s_cost_logged;
+    int64_t t0 = s_cost_logged ? 0 : esp_timer_get_time();
     int n = ram_telemetry_region_snapshot(regions, 16);
+    if (!s_cost_logged) {
+        s_cost_logged = true;
+        ESP_LOGI(TAG, "RAM_REGIONS cost_us=%u regions=%d tag=%s (snapshot only, first call)",
+                 (unsigned)(esp_timer_get_time() - t0), n, tag ? tag : "unknown");
+    }
     for (int i = 0; i < n && i < 16; i++) {
         ESP_LOGI(TAG, "RAM_REGIONS tag=%s idx=%d/%d start=0x%08x size=%u free=%u largest=%u min_free=%u",
                  tag ? tag : "unknown", i, n, (unsigned)regions[i].start, (unsigned)regions[i].size,

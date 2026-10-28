@@ -63,6 +63,8 @@ typedef struct {
 // Built only with DEVICE_RAM_REGIONS (CMake option, default ON on fw-ram-diet-2); returns 0 without it.
 int ram_telemetry_region_snapshot(ram_region_t *out, int max);
 
+// Each call walks the heap (multi_heap_get_info() runs a TLSF walk in a critical section per region); the
+// first call also logs "RAM_REGIONS cost_us=<N> regions=<n> tag=<tag>" with the measured cost of the snapshot.
 // Log one "RAM_REGIONS tag=.. idx=i/n start=.. size=.. free=.. largest=.. min_free=.." line per region.
 // Boot tags and ram_telemetry_background_tick() (61 s, then every 300 s) call it. Never call it from the 20 ms render loop.
 void ram_telemetry_regions(const char *tag);
