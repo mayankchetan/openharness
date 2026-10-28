@@ -120,6 +120,11 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
    -o "$out/test_voice_buffer_threads" "$here/test_voice_buffer_threads.c" "$here/../main/voice_buffer.c"
 "$out/test_voice_buffer_threads"
 
+# task_create_psram(): the PSRAM-stack create and its internal fallback, against fake IDF create calls.
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
+   -I "$here/host_stubs" -I "$here/../main" -o "$out/test_task_util" "$here/test_task_util.c" "$here/../main/task_util.c"
+"$out/test_task_util"
+
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -o "$out/test_scroll" "$here/test_scroll.c" "$here/../main/ui/habitat/scroll.c" -lm
 "$out/test_scroll"
