@@ -113,6 +113,7 @@ idf_component_register(
         "ui"
         "board"
     REQUIRES ${BOARD_REQUIRES}
+    PRIV_REQUIRES spi_flash   # esp_private/flash_mmap.h: flash_mmap_remain() in the alive line (ram_telemetry.c)
     EMBED_FILES ${COMPANION_ART}
 )
 
@@ -150,6 +151,18 @@ endif()
 
 if(DEVICE_PERF_BENCH)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_PERF_BENCH=1)
+endif()
+
+# RAM diet 2 telemetry: one RAM_REGIONS line per internal heap region (free, largest, min_free) at the boot tags
+# and every 5 minutes, plus the failed-allocation hook (ram_telemetry.c). ON unless -DDEVICE_RAM_REGIONS=0.
+# It reads the heap component's private region list (heap_private.h), hence the extra include directory.
+if(NOT DEFINED DEVICE_RAM_REGIONS)
+    set(DEVICE_RAM_REGIONS ON)
+endif()
+if(DEVICE_RAM_REGIONS)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_RAM_REGIONS=1)
+    idf_component_get_property(heap_dir heap COMPONENT_DIR)
+    target_include_directories(${COMPONENT_LIB} PRIVATE "${heap_dir}")
 endif()
 
 # Event-tagged A/B profiling of the connected octopus. Never part of a daily image.

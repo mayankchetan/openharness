@@ -13,6 +13,7 @@ void cable_transport_benchmark(void);
 #include "ui_perf.h"
 #include "audio_capture.h"
 #include "cable_link.h"
+#include "ram_telemetry.h"
 #include "board_pins.h"
 #include "board.h"
 #include "esp_lcd_panel_io.h"
@@ -333,7 +334,8 @@ static void heartbeat(void)
     // so a live cable cannot mask a stalled UI. Nothing is drawn for this once-a-minute report.
     ESP_LOGI("habitat",
              "alive up=%lus heap=%u/%u psram=%u touches=%lu read_fails=%lu inferred=%lu "
-             "frames=%lu bytes=%lu input_last_us=%lu muted=%d raster_max_us=%lu frame_max_us=%lu log_drops=%lu stack_free=%u%s%s",
+             "frames=%lu bytes=%lu input_last_us=%lu muted=%d raster_max_us=%lu frame_max_us=%lu log_drops=%lu stack_free=%u "
+             "mmap_remain=%d alloc_fail=%u%s%s",
              (unsigned long)(now / 1000),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
@@ -344,8 +346,12 @@ static void heartbeat(void)
              (int)audio_notify_is_muted(), (unsigned long)perf.raster_max_us,
              (unsigned long)perf.frame_max_us, (unsigned long)cable_link_dropped_logs(),
              (unsigned)uxTaskGetStackHighWaterMark(NULL),
+             (int)ram_flash_mmap_remain(), ram_telemetry_alloc_fail_count(),
              touch.controller_ok ? "" : " TOUCH-DEAD",
              display_is_asleep() ? " asleep" : "");
+    // The other nine tasks' stack high-water marks, on their own line (the alive line sits near the 512 B log limit).
+    ram_telemetry_hwm();
+    ram_telemetry_alloc_fail_flush();
 }
 #ifdef HARNESS_DEBUG_COMMANDS
 // THE SCREENSHOT. The panel is write-only, so there is nothing to read back; the picture is the scene the
