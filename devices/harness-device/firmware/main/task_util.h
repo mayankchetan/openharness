@@ -16,10 +16,13 @@ BaseType_t task_create_psram(TaskFunction_t fn, const char *name, uint32_t stack
                              UBaseType_t priority, TaskHandle_t *out, BaseType_t core);
 
 // Per-task switches (compile with -DTASK_STACK_PSRAM_<X>=0 to put that task's stack back in internal RAM).
-// Stack bytes moved out of internal RAM at the default: ptt 4,096, beep 4,096.
+// Stack bytes moved out of internal RAM at the default: ptt 4,096, beep 4,096, proj_refresh 7,168.
 #ifndef TASK_STACK_PSRAM_PTT
 #define TASK_STACK_PSRAM_PTT 1
 #endif
 #ifndef TASK_STACK_PSRAM_BEEP
 #define TASK_STACK_PSRAM_BEEP 1
+#endif
+#ifndef TASK_STACK_PSRAM_PROJ
+#define TASK_STACK_PSRAM_PROJ 1
 #endif

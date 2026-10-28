@@ -33,6 +33,7 @@
 #include "freertos/task.h"
 #include "ptt.h"
 #include "ram_telemetry.h"
+#include "task_util.h"
 #ifdef DEVICE_XIP_PROBE
 #include "xip_probe.h"
 #endif
@@ -242,7 +243,13 @@ void app_main(void)
     // Create the refresh task BEFORE the first tiles exist: tile creation fragments the remaining internal
     // heap enough that a contiguous stack allocation can fail afterwards, which would leave the carousel on
     // the loading spinner forever because nobody drains ui_request_agent_reload().
+#if TASK_STACK_PSRAM_PROJ
+    // Stack in PSRAM (task_util.h). No config_/nvs_/esp_ota/esp_partition/esp_flash/spi_flash call is reachable
+    // from refresh_task (call-graph grep, 2026-10-28), and it never exits.
+    BaseType_t rt_ok = task_create_psram(refresh_task, "proj_refresh", 7168, NULL, 4, NULL, tskNO_AFFINITY);
+#else
     BaseType_t rt_ok = xTaskCreate(refresh_task, "proj_refresh", 7168, NULL, 4, NULL);
+#endif
     if (rt_ok != pdPASS) {
         ESP_LOGE(TAG, "refresh task create failed (%d), free_int=%u largest_int=%u; rebooting",
                  (int)rt_ok,
