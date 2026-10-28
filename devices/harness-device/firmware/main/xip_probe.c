@@ -9,14 +9,23 @@
 // (spi_flash/cache_utils.c:141) therefore fires only on the cache-disable path. This file runs the real
 // operations from tasks whose stacks are in PSRAM and logs what happens.
 //
-// Cases (each task is created with xTaskCreate*WithCaps(..., MALLOC_CAP_SPIRAM); each logs its stack address):
-//   A_core0, A_core1  1,000 x NVS blob write + commit in the test namespace "xipprobe"
+// Cases (a PSRAM stack is made with xTaskCreate*WithCaps(..., MALLOC_CAP_SPIRAM); each logs its stack address).
+// XIP_CASES (compile option, CMake -DDEVICE_XIP_CASES=<letters>, default "ACDE") picks the cases; the code of
+// every case stays in the file. "XIP CONFIG cases=.." is logged at start.
+//   A  (A_core0, A_core1)  1,000 x NVS blob write + commit in the test namespace "xipprobe", PSRAM stack
 //   B                 1,000 x esp_ota_write of 4 KB to the inactive OTA slot (sequential-erase mode, so every
-//                     write also erases a sector). The slot content is lost; the board still boots the active slot.
-//   C                 1,000 x esp_partition_read of 64 KB of the running slot + SHA-256 (as fw_update.c:160)
-//   D1                NVS writer on an INTERNAL stack while a PSRAM-stack task copies the running image into the
-//                     inactive slot and runs esp_ota_end (image verify: bootloader_mmap with BLOCKS_WRITE)
-//   D2                the same with the NVS writer on a PSRAM stack
+//                     write also erases a sector), PSRAM stack. NOT in the default run: hardware showed that
+//                     esp_ota_begin -> read_otadata -> esp_partition_mmap -> esp_mmu_map asserts
+//                     s_task_stack_is_sane_when_cache_frozen (esp_cache_utils.c:96) on a PSRAM stack: any
+//                     esp_ota_* or mmap call needs an INTERNAL stack. The slot content is lost; the board still
+//                     boots the active slot.
+//   C                 1,000 x esp_partition_read of 64 KB of the running slot + SHA-256 (as fw_update.c:160),
+//                     PSRAM stack
+//   D  (D1, D2)       the OTA task (INTERNAL stack: it maps flash) copies the running image into the inactive
+//                     slot and runs esp_ota_end (image verify: bootloader_mmap with BLOCKS_WRITE) while a
+//                     concurrent NVS writer commits. D1: writer on an INTERNAL stack (control). D2: writer on a
+//                     PSRAM stack: does an NVS write on a PSRAM stack survive while another task holds a flash
+//                     mapping or runs image verify?
 //   E                 D2 again, after a pause (XIP PHASE3) so the host can animate the display; the habitat
 //                     frame counters are logged before and after
 // flash_mmap_remain() is logged before and after every op (counted; one progress line per 100 ops).
@@ -52,7 +61,11 @@
 #include "ram_telemetry.h"
 #include "ui/habitat/runtime.h"
 
+#ifndef XIP_CASES
+#define XIP_CASES "ACDE"
+#endif
 #define XIP_START_DELAY_S 75
+#define XIP_OTA_STACK_BYTES 10240   // internal: esp_ota_end verify and esp_image_get_metadata run on it
 #define NVS_OPS 1000
 #define OTA_OPS 1000
 #define SHA_OPS 1000
@@ -88,6 +101,18 @@ typedef struct {
 
 static volatile int s_end_phase;    // 1 while esp_ota_end runs
 static volatile int s_stop_writer;
+
+static bool case_on(char c)
+{
+    return strchr(XIP_CASES, c) != NULL;
+}
+
+// End the calling worker: PSRAM-stack tasks must be deleted with the caps variant.
+static void end_task(const job_t *j)
+{
+    if (j->psram_stack) vTaskDeleteWithCaps(NULL);
+    else vTaskDelete(NULL);
+}
 
 static void mark_running(const char *name)
 {
@@ -176,8 +201,7 @@ static void worker_nvs_concurrent(void *arg)   // runs until s_stop_writer; PSRA
     nvs_ops(j, 0, true, 5);
     j->done = true;
     xTaskNotifyGive(j->waiter);
-    if (j->psram_stack) vTaskDeleteWithCaps(NULL);
-    else vTaskDelete(NULL);
+    end_task(j);
 }
 
 static void worker_ota_write(void *arg)
@@ -240,7 +264,7 @@ static void worker_sha(void *arg)
     vTaskDeleteWithCaps(NULL);
 }
 
-// D/E ota task: copy the running image to the inactive slot, then esp_ota_end (verify = bootloader_mmap with
+// D/E ota task (internal stack): copy the running image to the inactive slot, then esp_ota_end (verify = bootloader_mmap with
 // SPI_FLASH_MMAP_FLAG_BLOCKS_WRITE, bootloader_flash.c:69) while the NVS writer keeps committing.
 static void worker_ota_end(void *arg)
 {
@@ -284,7 +308,7 @@ static void worker_ota_end(void *arg)
     }
     j->done = true;
     xTaskNotifyGive(j->waiter);
-    vTaskDeleteWithCaps(NULL);
+    end_task(j);
 }
 
 // ---- runner ----------------------------------------------------------------------------------------
@@ -364,11 +388,11 @@ static void run_concurrent(const char *name, bool writer_psram)
     char oname[16], wname[16];
     snprintf(oname, sizeof oname, "%s_ota", name);
     snprintf(wname, sizeof wname, "%s_nvs", name);
-    ota.name = oname; ota.core = tskNO_AFFINITY; ota.psram_stack = true; ota.stack_bytes = 8192;
+    ota.name = oname; ota.core = tskNO_AFFINITY; ota.psram_stack = false; ota.stack_bytes = XIP_OTA_STACK_BYTES;
     wr.name = wname;  wr.core = tskNO_AFFINITY;  wr.psram_stack = writer_psram; wr.stack_bytes = 6144;
     s_stop_writer = 0;
     s_end_phase = 0;
-    ESP_LOGI(TAG, "CASE %s begin (ota task PSRAM stack; NVS writer %s stack)", name, writer_psram ? "PSRAM" : "internal");
+    ESP_LOGI(TAG, "CASE %s begin (ota task internal stack; NVS writer %s stack)", name, writer_psram ? "PSRAM" : "internal");
     perf_line("before", name);
     mark_running(name);
     // The writer reports completion to this task as well, so give it its own waiter slot: both notify us.
@@ -380,7 +404,7 @@ static void run_concurrent(const char *name, bool writer_psram)
     if (ok_w) wait_job(&wr, 30000);
     mark_idle();
     perf_line("after", name);
-    result(&ota, ota.end_rc == 0 && ota.stack_in_psram, "role=ota_end");
+    result(&ota, ota.end_rc == 0 && !ota.stack_in_psram, "role=ota_end");
     result(&wr, wr.ops > 0 && (!writer_psram || wr.stack_in_psram), "role=nvs_writer");
 }
 
@@ -407,6 +431,7 @@ static void controller(void *arg)
     xip_probe_banner();
     ESP_LOGI(TAG, "START reset_reason=%d idf=%s delay_s=%d (display should be IDLE for phases 1 and 2)", (int)rr,
              esp_get_idf_version(), XIP_START_DELAY_S);
+    ESP_LOGI(TAG, "CONFIG cases=%s", XIP_CASES);
     ram_telemetry_checkpoint("xip_start");
 
     static job_t a0, a1, b, c;
@@ -420,25 +445,35 @@ static void controller(void *arg)
 // After any case that timed out, stop: its task may still hold the shared buffers.
 #define STOP_AFTER_TIMEOUT() do { if (s_timeout_case) goto finish; } while (0)
 
-    ESP_LOGI(TAG, "PHASE1 display idle: A (NVS), B (OTA write), C (read+SHA)");
-    run_simple(&a0, worker_nvs, 120000, NVS_OPS);
-    STOP_AFTER_TIMEOUT();
-    run_simple(&a1, worker_nvs, 120000, NVS_OPS);
-    STOP_AFTER_TIMEOUT();
-    run_simple(&b, worker_ota_write, 300000, OTA_OPS);
-    STOP_AFTER_TIMEOUT();
-    run_simple(&c, worker_sha, 300000, SHA_OPS);
-    STOP_AFTER_TIMEOUT();
+    ESP_LOGI(TAG, "PHASE1 display idle: A (NVS), B (OTA write), C (read+SHA); only the cases in CONFIG run");
+    if (case_on('A')) {
+        run_simple(&a0, worker_nvs, 120000, NVS_OPS);
+        STOP_AFTER_TIMEOUT();
+        run_simple(&a1, worker_nvs, 120000, NVS_OPS);
+        STOP_AFTER_TIMEOUT();
+    }
+    if (case_on('B')) {
+        run_simple(&b, worker_ota_write, 300000, OTA_OPS);
+        STOP_AFTER_TIMEOUT();
+    }
+    if (case_on('C')) {
+        run_simple(&c, worker_sha, 300000, SHA_OPS);
+        STOP_AFTER_TIMEOUT();
+    }
 
-    ESP_LOGI(TAG, "PHASE2 display idle: NVS write concurrent with esp_ota_end");
-    run_concurrent("D1", false);
-    STOP_AFTER_TIMEOUT();
-    run_concurrent("D2", true);
-    STOP_AFTER_TIMEOUT();
+    if (case_on('D')) {
+        ESP_LOGI(TAG, "PHASE2 display idle: NVS write concurrent with esp_ota_end (OTA task on an internal stack)");
+        run_concurrent("D1", false);
+        STOP_AFTER_TIMEOUT();
+        run_concurrent("D2", true);
+        STOP_AFTER_TIMEOUT();
+    }
 
-    ESP_LOGI(TAG, "PHASE3 animate_now wait_s=25 (start the display load now; case E repeats D2)");
-    vTaskDelay(pdMS_TO_TICKS(25000));
-    run_concurrent("E", true);
+    if (case_on('E')) {
+        ESP_LOGI(TAG, "PHASE3 animate_now wait_s=25 (start the display load now; case E repeats D2)");
+        vTaskDelay(pdMS_TO_TICKS(25000));
+        run_concurrent("E", true);
+    }
 
 finish:
     if (s_timeout_case) ESP_LOGE(TAG, "ABORT after timeout case=%s (remaining cases not run)", s_timeout_case);

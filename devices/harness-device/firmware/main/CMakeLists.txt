@@ -176,6 +176,10 @@ if(DEVICE_XIP_PROBE)
                 "writes NVS 'xipprobe'; it must never ship. Add -DDEVICE_XIP_PROBE_ACK=1 to confirm.")
     endif()
     target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_XIP_PROBE=1)
+    # -DDEVICE_XIP_CASES=<letters from A B C D E> picks the cases (default ACDE; B crashes on a PSRAM stack).
+    if(DEVICE_XIP_CASES)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE XIP_CASES="${DEVICE_XIP_CASES}")
+    endif()
     target_sources(${COMPONENT_LIB} PRIVATE "xip_probe.c")
 endif()
 
