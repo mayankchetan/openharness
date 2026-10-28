@@ -19,6 +19,17 @@
 #include "esp_private/flash_mmap.h"
 #endif
 #ifdef DEVICE_RAM_REGIONS
+// This code reads the heap component's PRIVATE heap_t / registered_heaps (heap_private.h). Its layout is not an
+// API: it changes with the IDF version (5.5.6: heap/heap_private.h:26-37) and with CONFIG_HEAP_TASK_TRACKING
+// (adds a `name` field in front of caps[]). Fail the build, not the dial, when either changes.
+#include "esp_idf_version.h"
+#include "sdkconfig.h"
+#if ESP_IDF_VERSION != ESP_IDF_VERSION_VAL(5, 5, 6)
+#error "DEVICE_RAM_REGIONS reads heap_private.h (heap_t, registered_heaps), checked only against ESP-IDF 5.5.6; re-check the layout, then update this guard, or build with -DDEVICE_RAM_REGIONS=0"
+#endif
+#if CONFIG_HEAP_TASK_TRACKING
+#error "DEVICE_RAM_REGIONS needs CONFIG_HEAP_TASK_TRACKING off (it adds a field to heap_t); build with -DDEVICE_RAM_REGIONS=0 or turn tracking off"
+#endif
 // registered_heaps: the per-region heap handles, for min_free per region. heap_caps_get_info() only sums them.
 // The include path is added in main/CMakeLists.txt under the same flag. The heap component defines
 // MULTI_HEAP_FREERTOS for its own sources (it selects the portMUX lock type in heap_t); repeat that here.
