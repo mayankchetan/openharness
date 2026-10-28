@@ -11,7 +11,10 @@ CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
 CONFIG_SPIRAM_RODATA=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+# Allocations up to this size try internal RAM first; bigger ones go to PSRAM. 1,024 B is the value the bench
+# images ran with (bench6); 16,384 B kept mid-size blocks in the 150 KB internal heap. Queues, task control
+# blocks and stacks of the tasks still created with xTaskCreate stay internal whatever this says.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 
@@ -20,6 +23,16 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
 # --- WiFi (STA for commander, AP for provisioning portal) ---
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
+# Buffer counts, explicit. While SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y (above) and PSRAM is found, the IDF defaults
+# are 16 static RX and a 16-frame block-ack window, and the static TX count stays at 16: 14 more 1.6 KB
+# buffers than the bench images used (10 RX, 8 TX); in the bench the main internal region had 0 B free after
+# the Wi-Fi start. 6/6 with a 12-frame window is the memory-saving profile Espressif's Wi-Fi guide lists (the
+# compile-time checks in esp_wifi/src/wifi_init.c need BA_WIN <= 2 x STATIC_RX and <= DYNAMIC_RX = 32).
+# Voice is 8 KB/s of ADPCM, so throughput is not the limit; the bench gate (round-trip p95, bulk kbit/s)
+# decides if 6 is too low, in which case go back towards the bench values 10/8.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=6
+CONFIG_ESP_WIFI_RX_BA_WIN=12
 
 # --- HTTP server (captive portal) ---
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
@@ -40,8 +53,13 @@ CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 
 # --- LWIP: room for commander WS + HTTP client + DNS concurrently ---
 CONFIG_LWIP_MAX_SOCKETS=16
-# Larger TCP send/recv buffers so continuous voice PCM streaming tolerates WiFi jitter
-# (default ~5.7KB fills in ~180ms at 32KB/s → esp_websocket_client tears down on write-0).
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65534
-CONFIG_LWIP_TCP_WND_DEFAULT=65534
+# The LAN is IPv4 only; the IPv6 stack costs about 2 KB at boot and 7 KB while running (Espressif docs figure,
+# not measured on this build).
+CONFIG_LWIP_IPV6=n
+# TCP send/receive buffers: 11,520 B, twice the 5,760 B IDF default. Voice over the wireless path is IMA ADPCM
+# at 64 kbit/s = 8 KB/s, so 11,520 B holds about 1.4 s of it; the bench voice-rate stream saw a worst round
+# trip of 452-497 ms. (This was 65,534 B for PCM voice over TCP at 32 KB/s; that path is gone. OTA and pet
+# packs travel over the USB cable today.)
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=11520
+CONFIG_LWIP_TCP_WND_DEFAULT=11520
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=16
