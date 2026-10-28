@@ -33,6 +33,9 @@
 #include "freertos/task.h"
 #include "ptt.h"
 #include "ram_telemetry.h"
+#ifdef DEVICE_XIP_PROBE
+#include "xip_probe.h"
+#endif
 #include "ui/display.h"
 #include "ui/touch.h"
 #include "ui/ui_screens.h"
@@ -242,5 +245,8 @@ void app_main(void)
         esp_restart();
     }
     ram_telemetry_checkpoint("app_ready");
+#ifdef DEVICE_XIP_PROBE
+    xip_probe_start();   // diagnostic build only; see xip_probe.c
+#endif
     vTaskDelete(NULL);
 }

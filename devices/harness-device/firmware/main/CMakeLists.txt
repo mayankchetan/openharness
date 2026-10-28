@@ -165,6 +165,13 @@ if(DEVICE_RAM_REGIONS)
     target_include_directories(${COMPONENT_LIB} PRIVATE "${heap_dir}")
 endif()
 
+# XiP probe (diagnostic, never part of a daily image): PSRAM-stack tasks calling NVS, OTA and flash reads.
+# -DDEVICE_XIP_PROBE=1 compiles main/xip_probe.c and the one guarded call in app_main.c.
+if(DEVICE_XIP_PROBE)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_XIP_PROBE=1)
+    target_sources(${COMPONENT_LIB} PRIVATE "xip_probe.c")
+endif()
+
 # Event-tagged A/B profiling of the connected octopus. Never part of a daily image.
 if(DEVICE_OCTOPUS_BENCH)
     if(NOT DEVICE_PERF_BENCH OR DEVICE_CREATURE_GALLERY)
