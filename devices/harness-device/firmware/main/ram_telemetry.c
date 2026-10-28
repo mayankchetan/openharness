@@ -282,7 +282,11 @@ void ram_telemetry_regions(const char *tag)
 // stores; logging waits for ram_telemetry_alloc_fail_flush(). s_af_bytes wraps at 4 GiB.
 #define AF_RING 8
 #define AF_LOG_PER_FLUSH 4
+// Publish order: a writer takes index i = s_af_count++, invalidates the slot (seq = 0), writes the record,
+// then publishes seq = i + 1 with release order. A reader accepts index i only if the slot's seq is i + 1
+// before AND after it copies the fields (seqlock), so it never prints a half-written or recycled record.
 typedef struct {
+    volatile uint32_t seq;   // 0 = empty or being written, else the record's index + 1
     uint32_t size, caps;
     int64_t t_us;
     const char *fn;
@@ -290,18 +294,22 @@ typedef struct {
 static af_rec_t s_af[AF_RING];
 static volatile uint32_t s_af_count;
 static volatile uint32_t s_af_bytes;
-static uint32_t s_af_reported;
-static uint32_t s_af_last_flush_ms;
+static volatile uint32_t s_af_reported;    // next index to print; moves forward only, under s_af_busy
+static volatile uint32_t s_af_busy;        // flush try-lock (1 = a flusher is running)
+static uint32_t s_af_last_flush_ms;        // under s_af_busy
 
 static void IRAM_ATTR alloc_failed_cb(size_t size, uint32_t caps, const char *function_name)
 {
     uint32_t seq = __atomic_fetch_add(&s_af_count, 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&s_af_bytes, (uint32_t)size, __ATOMIC_RELAXED);
     af_rec_t *r = &s_af[seq % AF_RING];
+    __atomic_store_n(&r->seq, 0, __ATOMIC_RELAXED);          // invalidate the old record in this slot
+    __atomic_thread_fence(__ATOMIC_RELEASE);
     r->size = (uint32_t)size;
     r->caps = caps;
     r->fn = function_name;
     r->t_us = esp_timer_get_time();
+    __atomic_store_n(&r->seq, seq + 1, __ATOMIC_RELEASE);    // publish
 }
 
 unsigned ram_telemetry_alloc_fail_count(void)
@@ -311,29 +319,48 @@ unsigned ram_telemetry_alloc_fail_count(void)
 
 void ram_telemetry_alloc_fail_flush(void)
 {
-    uint32_t total = __atomic_load_n(&s_af_count, __ATOMIC_RELAXED);
-    if (total == s_af_reported) return;
-    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
-    if (s_af_last_flush_ms && now_ms - s_af_last_flush_ms < 1000) return;   // rate limit: one flush per second
-    s_af_last_flush_ms = now_ms ? now_ms : 1;
+    if (__atomic_load_n(&s_af_count, __ATOMIC_RELAXED) == __atomic_load_n(&s_af_reported, __ATOMIC_RELAXED)) return;
+    // Try-lock: if another task is flushing, skip. Two flushers would print the same records twice and one of
+    // them could store a smaller s_af_reported over the other's.
+    if (__atomic_exchange_n(&s_af_busy, 1, __ATOMIC_ACQUIRE)) return;
 
+    uint32_t total = __atomic_load_n(&s_af_count, __ATOMIC_ACQUIRE);
     uint32_t first = s_af_reported;
-    uint32_t lost = 0;
-    if (total - first > AF_RING) {
-        lost = total - first - AF_RING;
-        first = total - AF_RING;
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    if (total != first && !(s_af_last_flush_ms && now_ms - s_af_last_flush_ms < 1000)) {   // one flush per second
+        s_af_last_flush_ms = now_ms ? now_ms : 1;
+
+        uint32_t lost = 0;
+        if (total - first > AF_RING) {
+            lost = total - first - AF_RING;
+            first = total - AF_RING;
+        }
+        uint32_t last = first + AF_LOG_PER_FLUSH;
+        if (last > total) last = total;
+        uint32_t seq = first;
+        for (; seq < last; seq++) {
+            const af_rec_t *r = &s_af[seq % AF_RING];
+            uint32_t want = seq + 1;
+            uint32_t s1 = __atomic_load_n(&r->seq, __ATOMIC_ACQUIRE);
+            if (s1 == want) {
+                af_rec_t c = { .size = r->size, .caps = r->caps, .t_us = r->t_us, .fn = r->fn };
+                __atomic_thread_fence(__ATOMIC_ACQUIRE);
+                if (__atomic_load_n(&r->seq, __ATOMIC_RELAXED) == want) {
+                    ESP_LOGW(TAG, "ALLOC_FAIL seq=%u t_ms=%u size=%u caps=0x%08x fn=%s total=%u bytes=%u",
+                             (unsigned)seq, (unsigned)(c.t_us / 1000), (unsigned)c.size, (unsigned)c.caps,
+                             c.fn ? c.fn : "?", (unsigned)total,
+                             (unsigned)__atomic_load_n(&s_af_bytes, __ATOMIC_RELAXED));
+                    continue;
+                }
+                s1 = 0;   // recycled while copying: fall through as lost
+            }
+            if (s1 == 0 || (int32_t)(s1 - want) < 0) break;   // writer has not published it yet: retry next flush
+            lost++;                                           // slot already holds a newer record
+        }
+        if (lost) ESP_LOGW(TAG, "ALLOC_FAIL overwritten=%u (ring of %d)", (unsigned)lost, AF_RING);
+        if ((int32_t)(seq - s_af_reported) > 0) s_af_reported = seq;   // never backwards
     }
-    uint32_t last = first + AF_LOG_PER_FLUSH;
-    if (last > total) last = total;
-    for (uint32_t seq = first; seq < last; seq++) {
-        const af_rec_t *r = &s_af[seq % AF_RING];
-        ESP_LOGW(TAG, "ALLOC_FAIL seq=%u t_ms=%u size=%u caps=0x%08x fn=%s total=%u bytes=%u",
-                 (unsigned)seq, (unsigned)(r->t_us / 1000), (unsigned)r->size, (unsigned)r->caps,
-                 r->fn ? r->fn : "?", (unsigned)total,
-                 (unsigned)__atomic_load_n(&s_af_bytes, __ATOMIC_RELAXED));
-    }
-    if (lost) ESP_LOGW(TAG, "ALLOC_FAIL overwritten=%u (ring of %d)", (unsigned)lost, AF_RING);
-    s_af_reported = last;
+    __atomic_store_n(&s_af_busy, 0, __ATOMIC_RELEASE);
 }
 
 #else   // !DEVICE_RAM_REGIONS
