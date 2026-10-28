@@ -275,7 +275,7 @@ void ht_glyph_cache_enable(bool enabled);
 uint32_t ht_glyph_cache_builds(void);
 size_t ht_glyph_cache_bytes(void);
 #ifdef DEVICE_UI_METRICS
-// Measurements for the per-view UIM log line (ui_metrics.c). Counters only; they are written by whichever task
+// Measurements for the per-view UIM log line (uim.c). Counters only; they are written by whichever task
 // rasterizes (the renderer), so ht_metrics_take and ht_metrics_scene belong to that task too.
 typedef struct {
     uint16_t arc_mask_max[2];   // largest arc mask in use: [0] upper arc, [1] lower arc

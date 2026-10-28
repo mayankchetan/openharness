@@ -44,6 +44,18 @@ static ht_gallery_t gallery;
 #include <stdatomic.h>
 #include <assert.h>
 
+#ifdef DEVICE_UI_GALLERY
+// The UI gallery (ui_gallery.inc, DEVICE_UI_GALLERY) shows the voice screens without a microphone: these three stand in
+// for the recorder's state, so the real render and tick code runs on a state the person never has to speak into. The
+// real audio_client_* functions are never called by the gallery.
+static bool gallery_recording, gallery_active;
+static unsigned gallery_level;
+static void (*gallery_synthetic)(ht_scene_t *);   // a scene drawn instead of the model's (the arc worst case)
+#define audio_client_recording() (gallery_recording)
+#define audio_client_active() (gallery_recording || gallery_active)
+#define audio_client_input_level() (gallery_level)
+#endif
+
 #define NOTICES 24
 #define QUESTION_MAX 4
 #define OPTION_MAX 6
@@ -748,6 +760,10 @@ static void workspace_failed(const char *message)
 }
 static void tab_request(const char *id, bool browsing)
 {
+#ifdef DEVICE_UI_GALLERY
+    (void)id; (void)browsing;
+    return;   // browsing the tab pages must not ask a desktop that is not there (the failed queue shows a message)
+#endif
     if (!s.connected || s.voice_open || (!browsing && s.loading) || workspace_index(id)<0) return;
     if (workspace.phase!=HT_WORKSPACE_IDLE) {
         if (!browsing || !strcmp(id,workspace.pending)) return;
@@ -2379,6 +2395,9 @@ bool habitat_scene_take(ht_scene_t *f)
     // staged pet mapping, so every pet lookup while building this scene sees one snapshot.
     pet_store_release_frame();
     ht_scene_clear(f, BG);
+#ifdef DEVICE_UI_GALLERY
+    if (gallery_synthetic) { gallery_synthetic(f); return true; }
+#endif
     switch (s.view) {
     case FORM:
         render_form(f);
@@ -2469,6 +2488,9 @@ bool habitat_scene_take(ht_scene_t *f)
 // only (display lock held), like habitat_scene_take.
 const char *habitat_view_name(void)
 {
+#ifdef DEVICE_UI_GALLERY
+    if (gallery_synthetic) return "synthetic";
+#endif
     switch (s.view) {
     case HOME: {
         if (!s.connected || s.loading) return "brand";
@@ -2506,6 +2528,10 @@ const char *habitat_view_name(void)
 
 static bool queue(action_t a)
 {
+#ifdef DEVICE_UI_GALLERY
+    (void)a;
+    return true;   // the gallery has no desktop and no microphone: a touch during the tour does nothing
+#endif
 #ifdef DEVICE_CREATURE_GALLERY
     (void)a;
     return false; // Never enqueue a desktop or audio action in the visual study.
@@ -5813,4 +5839,8 @@ bool habitat_bench_pressed(void)
 {
     return s.touch_down && character.motion.reaction.pose.pressed;
 }
+#endif
+
+#ifdef DEVICE_UI_GALLERY
+#include "ui_gallery.inc"
 #endif

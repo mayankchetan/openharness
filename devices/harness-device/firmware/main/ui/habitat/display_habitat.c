@@ -39,7 +39,7 @@ void cable_transport_benchmark(void);
 #include "audio_client.h"
 #endif
 #ifdef DEVICE_UI_METRICS
-#include "ui_metrics.h"
+#include "uim.h"
 #endif
 
 #define STRIP_LINES 24

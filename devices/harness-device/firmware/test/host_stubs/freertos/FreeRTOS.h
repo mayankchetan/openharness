@@ -9,7 +9,7 @@ typedef void (*TaskFunction_t)(void *);
 #define errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY (-1)
 #define tskNO_AFFINITY 0x7FFFFFFF
 #define MALLOC_CAP_SPIRAM (1u << 10)
-// critical sections and the stack mark (ui_metrics.c)
+// critical sections and the stack mark (uim.c)
 typedef int portMUX_TYPE;
 #define portMUX_INITIALIZER_UNLOCKED 0
 #define portENTER_CRITICAL(mux) ((void)(mux))

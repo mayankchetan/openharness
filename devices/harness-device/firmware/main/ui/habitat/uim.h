@@ -17,6 +17,11 @@ void uim_paint(uint32_t raster_us, uint32_t frame_us);
 // Called about once a second from one background task.
 void uim_tick(void);
 
+// The UI gallery (DEVICE_UI_GALLERY): one record per tour item, named for the item whatever views its scenes report.
+// uim_item_end() writes the item's line (kind=item) at once on the caller's task. Between items nothing is recorded.
+void uim_item_begin(const char *name);
+void uim_item_end(void);
+
 // The name of the view the model is on (ui_habitat.c): the view_t enum, with the home face split by what it shows.
 const char *habitat_view_name(void);
 

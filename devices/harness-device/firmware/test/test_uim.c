@@ -1,4 +1,4 @@
-// ui_metrics.c (DEVICE_UI_METRICS): per-view maxima, the one-line-per-tick rate limit, the 10 s line, the ring and the
+// uim.c (DEVICE_UI_METRICS): per-view maxima, the one-line-per-tick rate limit, the 10 s line, the ring and the
 // 512 B log-line limit. The IDF calls are fakes (test/host_stubs); terminal.c is the real renderer.
 #include <assert.h>
 #include <stdarg.h>
@@ -8,7 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "terminal.h"
-#include "ui_metrics.h"
+#include "uim.h"
 
 static int64_t clock_us;
 static unsigned stack_free = 5000;
@@ -115,6 +115,30 @@ int main(void)
     assert(line_count == before + 8);
     uim_tick();
     assert(line_count == before + 8);                       // ring empty, the current view is fresh
+
+    // The gallery's items: an item names its own record whatever view the scenes come from, closes at once with one
+    // synchronous "item" line, and nothing is recorded between items (the setup scenes of the next item are not a view).
+    int mark = line_count;
+    uim_item_begin("idle_claude");
+    uim_scene("home", &home);
+    ht_raster(&home, whole, out);
+    uim_paint(700, 1500);
+    uim_scene("brand", &reader);     // a second scene during the item still belongs to it
+    uim_paint(900, 1200);
+    assert(line_count == mark);      // nothing yet
+    uim_item_end();
+    assert(line_count == mark + 1 && !strncmp(lines[mark], "UIM view=idle_claude n=2 ", 25) && strstr(lines[mark], "kind=item"));
+    assert(field(lines[mark], "raster_max_us") == 900 && field(lines[mark], "arc0_mask_max") > 0);
+    uim_scene("home", &home);        // between items: ignored, and the counters are discarded
+    uim_paint(5, 5);
+    uim_tick();
+    assert(line_count == mark + 1);
+    uim_item_begin("reader_p1");
+    uim_scene("reader", &reader);
+    uim_paint(100, 200);
+    uim_item_end();
+    assert(line_count == mark + 2 && !strncmp(lines[mark + 1], "UIM view=reader_p1 n=1 ", 23));
+    assert(field(lines[mark + 1], "arc0_mask_max") == 0 && field(lines[mark + 1], "raster_max_us") == 100);
 
     // The 512 B limit (cable_link.c): the longest record the formatter can make.
     uim_record_t big;

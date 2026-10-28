@@ -35,7 +35,10 @@
 #include "ram_telemetry.h"
 #include "task_util.h"
 #ifdef DEVICE_UI_METRICS
-#include "ui/habitat/ui_metrics.h"
+#include "ui/habitat/uim.h"
+#endif
+#ifdef DEVICE_UI_GALLERY
+#include "ui/habitat/ui_gallery.h"
 #endif
 #ifdef DEVICE_XIP_PROBE
 #include "xip_probe.h"
@@ -190,6 +193,37 @@ static void refresh_task(void *arg)
 
 // ── boot ────────────────────────────────────────────────────────────────────────────────────────────
 
+#ifdef DEVICE_UI_GALLERY
+// THE UI GALLERY BOOT (ui/habitat/ui_gallery.inc): the display, the renderer, touch, the UI and the cable link, and
+// nothing else. No audio or codecs, no ptt, no beep, no refresh task, no agent logic, no OTA confirmation, no radio, no
+// factory-reset check (it writes NVS).
+//
+// DEVICE_UI_GALLERY_NO_DISPLAY is the same image with the display, renderer, touch, the UI model and the tour not
+// STARTED. It is a volatile run-time switch on purpose: a compile-time #if would let the linker drop the whole UI and the
+// two images would no longer have the same static memory. RAM tag=gallery_ready is logged at the same point in both, so
+// the difference in int_free between the two boots is what starting the UI costs in internal RAM (the static part is
+// the same in both and is in `idf.py size`). The tour task starts after that line; its own stack is not counted.
+#ifdef DEVICE_UI_GALLERY_NO_DISPLAY
+static volatile bool s_gallery_ui = false;
+#else
+static volatile bool s_gallery_ui = true;
+#endif
+static void gallery_main(void)
+{
+    ESP_LOGW(TAG, "UI GALLERY image, ui=%d: not a product build", (int)s_gallery_ui);
+    if (s_gallery_ui) {
+        display_init();
+        ui_init();
+        ui_set_brightness(config_load_brightness());
+        ram_telemetry_checkpoint("ui_ready");
+    }
+    if (!cable_client_start()) ESP_LOGE(TAG, "cable link did not start: no daemon can see this dial");
+    ram_telemetry_checkpoint("gallery_ready");
+    if (s_gallery_ui) ui_gallery_start();
+    vTaskDelete(NULL);
+}
+#endif
+
 void app_main(void)
 {
 #ifdef DEVICE_XIP_PROBE
@@ -200,6 +234,11 @@ void app_main(void)
     last_words_boot();   // before the first log line, so the previous boot's ring is read, not overwritten
     board_detect();      // which dial this is — the panel's reset pin comes from here, so before display_init
     config_store_init();
+
+#ifdef DEVICE_UI_GALLERY
+    gallery_main();
+    return;
+#endif
 
     if (boot_button_held()) {
         ESP_LOGW(TAG, "BOOT held — factory reset");

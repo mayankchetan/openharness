@@ -1,4 +1,4 @@
-#include "ui_metrics.h"
+#include "uim.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -16,6 +16,8 @@ enum { RING = 8, PERIODIC_MS = 10000 };
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static uim_record_t s_cur;         // the view on screen; written by the render task
 static bool s_started;
+static char s_item[20];            // the gallery item being shown: names the record whatever the scenes' views are
+static volatile bool s_item_active, s_item_mode;   // mode: items are in use, so nothing is recorded between them
 static uint32_t s_cur_log_ms;      // when the current view was last logged (render task sets it at the start, tick after)
 static uim_record_t s_ring[RING];  // finished views waiting for the tick
 static unsigned s_ring_head, s_ring_count, s_ring_lost;
@@ -38,6 +40,11 @@ void uim_scene(const char *view, const ht_scene_t *scene)
 {
     uint32_t stack = (uint32_t)uxTaskGetStackHighWaterMark(NULL);   // bytes, the render task's lowest free so far
     uint32_t now = now_ms();
+    if (s_item_mode && !s_item_active) {   // between gallery items: the setup scenes are not a view
+        ht_metrics_t dropped;
+        ht_metrics_take(&dropped);
+        return;
+    }
     // The counters belong to the render task, so they are read outside the lock. What a screenshot raster counted
     // since the last frame belongs to the view that was on screen; what the new scene shows belongs to the new one.
     ht_metrics_t before, shown;
@@ -46,6 +53,7 @@ void uim_scene(const char *view, const ht_scene_t *scene)
     ht_metrics_take(&shown);
     portENTER_CRITICAL(&s_lock);
     fold(&before);
+    if (s_item[0]) view = s_item;   // an item names its record
     if (!s_started || strncmp(s_cur.view, view, sizeof s_cur.view - 1) != 0) {
         if (s_started) {
             s_ring[(s_ring_head + s_ring_count) % RING] = s_cur;
@@ -53,7 +61,7 @@ void uim_scene(const char *view, const ht_scene_t *scene)
             else { s_ring_head = (s_ring_head + 1) % RING; s_ring_lost++; }
         }
         memset(&s_cur, 0, sizeof s_cur);
-        strncpy(s_cur.view, view, sizeof s_cur.view - 1);
+        snprintf(s_cur.view, sizeof s_cur.view, "%s", view);
         s_started = true;
         s_cur_log_ms = now;
     }
@@ -68,6 +76,7 @@ void uim_paint(uint32_t raster_us, uint32_t frame_us)
     uint32_t stack = (uint32_t)uxTaskGetStackHighWaterMark(NULL);
     ht_metrics_t m;
     ht_metrics_take(&m);
+    if (s_item_mode && !s_item_active) return;
     portENTER_CRITICAL(&s_lock);
     fold(&m);
     s_cur.n++;
@@ -124,4 +133,30 @@ void uim_tick(void)
     portEXIT_CRITICAL(&s_lock);
     if (lost) ESP_LOGW(TAG, "UIM lost=%u views (more than %d changes in a second)", lost, RING);
     if (kind) emit(&record, kind);
+}
+
+void uim_item_begin(const char *name)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_ring_count = 0;   // gallery images have no tick; whatever view was recorded before the first item is not wanted
+    memset(&s_cur, 0, sizeof s_cur);
+    snprintf(s_cur.view, sizeof s_cur.view, "%s", name);
+    snprintf(s_item, sizeof s_item, "%s", name);
+    s_started = true;
+    s_item_mode = true;
+    s_item_active = true;
+    s_cur_log_ms = now_ms();
+    portEXIT_CRITICAL(&s_lock);
+}
+
+void uim_item_end(void)
+{
+    uim_record_t record;
+    portENTER_CRITICAL(&s_lock);
+    record = s_cur;
+    s_item_active = false;
+    s_item[0] = 0;
+    s_started = false;
+    portEXIT_CRITICAL(&s_lock);
+    emit(&record, "item");   // here and now, on the caller's task: the gallery has no tick
 }

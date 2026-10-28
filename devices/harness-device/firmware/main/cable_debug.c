@@ -120,6 +120,9 @@ void cable_debug_tick(void)
     else if (outcome < 0) refuse(s_touch_cmd, s_touch_id, DBG_E_TOUCH);
 }
 
+static volatile uint32_t s_commands_done;
+uint32_t cable_debug_commands_done(void) { return s_commands_done; }
+
 bool cable_debug_handle(const char *t, const cJSON *p)
 {
     dbg_request_t request;
@@ -128,5 +131,6 @@ bool cable_debug_handle(const char *t, const cJSON *p)
     if (err) refuse(request.cmd, request.id, err);
     else if (request.cmd == DBG_CMD_SHOT) shot(request.id);
     else touch(&request);
+    s_commands_done++;   // after the work: a screenshot is finished (picture sent) when this moves
     return true;
 }

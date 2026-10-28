@@ -6,6 +6,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 typedef struct cJSON cJSON;
 
@@ -17,6 +18,10 @@ typedef struct cJSON cJSON;
 // full speed, during which the reader does not drain the port. The 32 KiB receive ring holds what a host
 // sends meanwhile; see the sizing note in cable_link.c.
 bool cable_debug_handle(const char *t, const cJSON *p);
+
+// How many debug.* commands have been handled to the end (a screenshot: the whole picture sent). The UI gallery's tour
+// waits on it after UIM_TOUR shot_ready, so it never changes the screen while a capture is still being read.
+uint32_t cable_debug_commands_done(void);
 
 // From the reader's tick: report an injected gesture that has finished (or failed). Cheap when idle.
 void cable_debug_tick(void);

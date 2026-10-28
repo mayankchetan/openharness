@@ -125,15 +125,18 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
    -I "$here/host_stubs" -I "$here/../main" -o "$out/test_task_util" "$here/test_task_util.c" "$here/../main/task_util.c"
 "$out/test_task_util"
 
-# DEVICE_UI_METRICS: the renderer's counters (terminal.c) and the per-view log line logic (ui_metrics.c, fake IDF calls).
+# DEVICE_UI_METRICS: the renderer's counters (terminal.c) and the per-view log line logic (uim.c, fake IDF calls).
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -DDEVICE_UI_METRICS=1 -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -I "$here/../main/ui/habitat" -o "$out/test_terminal_metrics" "$here/test_terminal_metrics.c" \
    "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" -lm
 "$out/test_terminal_metrics"
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -DDEVICE_UI_METRICS=1 -fsanitize="${SANITIZERS:-undefined,bounds}" \
-   -I "$here/host_stubs" -I "$here/../main/ui/habitat" -o "$out/test_ui_metrics" "$here/test_ui_metrics.c" \
-   "$here/../main/ui/habitat/ui_metrics.c" "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" -lm
-"$out/test_ui_metrics"
+   -I "$here/host_stubs" -I "$here/../main/ui/habitat" -o "$out/test_uim" "$here/test_uim.c" \
+   "$here/../main/ui/habitat/uim.c" "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" -lm
+"$out/test_uim"
+# The UI gallery's tour table: names, holds, and that every view_t value and home face has an item.
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -I "$here/../main/ui/habitat" -o "$out/test_ui_gallery_items" "$here/test_ui_gallery_items.c"
+"$out/test_ui_gallery_items"
 
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -o "$out/test_scroll" "$here/test_scroll.c" "$here/../main/ui/habitat/scroll.c" -lm

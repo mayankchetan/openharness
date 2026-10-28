@@ -166,12 +166,31 @@ if(DEVICE_RAM_REGIONS)
     target_include_directories(${COMPONENT_LIB} PRIVATE "${heap_dir}")
 endif()
 
+# The UI gallery (ui/habitat/ui_gallery.inc): a UI-only image that walks every screen and animation of the firmware on a
+# fixture model, with the UIM line per item. Boots the display, renderer, touch, UI and the cable link only (no audio, no
+# voice tasks, no ptt/beep/refresh, no OTA confirmation, no NVS writes). Implies DEVICE_UI_METRICS.
+#   -DDEVICE_UI_GALLERY=1                          the tour, 20 s after boot, repeated
+#   -DDEVICE_UI_GALLERY=1 -DDEVICE_UI_GALLERY_NO_DISPLAY=1   the same image without display, renderer, touch and UI
+#                                                  (the baseline for the UI's internal RAM)
+if(DEVICE_UI_GALLERY)
+    if(DEVICE_PERF_BENCH OR DEVICE_CREATURE_GALLERY OR DEVICE_LAYOUT_BENCH OR DEVICE_OCTOPUS_BENCH OR DEVICE_XIP_PROBE)
+        message(FATAL_ERROR "DEVICE_UI_GALLERY is its own image; it cannot be combined with a bench, the creature gallery or the XiP probe")
+    endif()
+    set(DEVICE_UI_METRICS ON)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_UI_GALLERY=1)
+    if(DEVICE_UI_GALLERY_NO_DISPLAY)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_UI_GALLERY_NO_DISPLAY=1)
+    endif()
+elseif(DEVICE_UI_GALLERY_NO_DISPLAY)
+    message(FATAL_ERROR "DEVICE_UI_GALLERY_NO_DISPLAY needs DEVICE_UI_GALLERY=1")
+endif()
+
 # Per-view UI measurements: -DDEVICE_UI_METRICS=1 adds counters on the render path (runs per scene, arc mask bytes,
 # sprite columns, glyph cache hits) and one "UIM view=..." log line (tag uim) when the view changes and every 10 s
-# (ui/habitat/ui_metrics.c). Off by default; not for a daily image.
+# (ui/habitat/uim.c). Off by default; not for a daily image.
 if(DEVICE_UI_METRICS)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_UI_METRICS=1)
-    target_sources(${COMPONENT_LIB} PRIVATE "ui/habitat/ui_metrics.c")
+    target_sources(${COMPONENT_LIB} PRIVATE "ui/habitat/uim.c")
 endif()
 
 # XiP probe (diagnostic, never part of a daily image): PSRAM-stack tasks calling NVS, OTA and flash reads.

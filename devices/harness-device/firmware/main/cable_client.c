@@ -1023,6 +1023,17 @@ static void handle_question_close(const cJSON *p, const char *agent_id)
     else ui_question_close(agent_id, request);
 }
 
+#ifdef DEVICE_UI_GALLERY
+// The gallery's whole session: the daemon is there (logs flow to its dial log, debug.shot answers), nothing else.
+static void gallery_session_up(void)
+{
+    if (s_session) return;
+    s_session = true;
+    cable_link_set_log_framing(true);
+    ESP_LOGI(TAG, "gallery session up (greeting answered; no roster, no turns)");
+}
+#endif
+
 static void session_up(const cJSON *p)
 {
     atomic_store(&s_features, cable_features_parse(p));
@@ -1066,6 +1077,12 @@ static void pet_forget_transfer(void);
 static void session_down(const char *why)
 {
     if (!s_session) return;
+#ifdef DEVICE_UI_GALLERY
+    s_session = false;   // the fixtures stay: a silent daemon must not clear the tour's model
+    cable_link_set_log_framing(false);
+    ESP_LOGI(TAG, "gallery session down (%s)", why);
+    return;
+#endif
     s_session = false;
     atomic_store(&s_features, 0);
 
@@ -1356,6 +1373,14 @@ static void handle_message(const cJSON *root)
     if (cable_debug_handle(t, p)) return;
 #endif
 
+#ifdef DEVICE_UI_GALLERY
+    // The UI gallery answers the greeting and the keepalive and nothing else: the daemon's rosters, turns and
+    // notices would overwrite the tour's fixtures. (debug.* was handled above: debug.shot is what the host uses.)
+    if (strcmp(t, "welcome") == 0) { gallery_session_up(); return; }
+    if (strcmp(t, "ping") == 0) { send_json(msg("pong")); return; }
+    s_unknown++;
+    return;
+#endif
     if (strcmp(t, "welcome") == 0) { session_up(p); return; }
     if (strcmp(t, "ping") == 0) { send_json(msg("pong")); return; }
     if (strcmp(t, "agents.begin") == 0) { handle_agents_begin(); return; }
@@ -1557,6 +1582,9 @@ static void on_frame(uint8_t version, uint8_t type, const uint8_t *payload, size
 {
     (void)version;
     (void)ctx;
+#ifdef DEVICE_UI_GALLERY
+    if (type != CABLE_TYPE_JSON) { s_unknown++; return; }   // no firmware slices, no pet packs in the gallery
+#endif
     if (type == CABLE_TYPE_FW) {
         s_last_rx_us = esp_timer_get_time();
         // Straight to flash, on this task. That is deliberate and it is what the credit window is sized
