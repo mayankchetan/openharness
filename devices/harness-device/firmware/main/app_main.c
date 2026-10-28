@@ -40,6 +40,9 @@
 #ifdef DEVICE_UI_GALLERY
 #include "ui/habitat/ui_gallery.h"
 #endif
+#ifdef DEVICE_BATTERY_LOG
+#include "battery_log.h"
+#endif
 #ifdef DEVICE_XIP_PROBE
 #include "xip_probe.h"
 #endif
@@ -303,6 +306,9 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(1000));
         esp_restart();
     }
+#ifdef DEVICE_BATTERY_LOG
+    battery_log_start();   // after the cable link, so a dump reaches the daemon's dial log
+#endif
     ram_telemetry_checkpoint("app_ready");
 #ifdef DEVICE_XIP_PROBE
     xip_probe_start();   // diagnostic build only; see xip_probe.c

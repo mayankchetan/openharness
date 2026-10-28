@@ -168,6 +168,14 @@ if(DEVICE_RAM_REGIONS)
     target_include_directories(${COMPONENT_LIB} PRIVATE "${heap_dir}")
 endif()
 
+# Battery history (battery_log.c): -DDEVICE_BATTERY_LOG=1, default OFF. While the dial runs on its battery, one sample a
+# minute ({boot, uptime_s, percent}) goes into an NVS ring of 1,440 samples (24 blobs of 360 B, about 10 KB of the 24 KB NVS partition); back on
+# external power with the cable session up, the new samples are logged once as "BATLOG" lines. Writes NVS: not a daily image.
+if(DEVICE_BATTERY_LOG)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_BATTERY_LOG=1)
+    target_sources(${COMPONENT_LIB} PRIVATE "battery_log.c")
+endif()
+
 # The UI gallery (ui/habitat/ui_gallery.inc): a UI-only image that walks every screen and animation of the firmware on a
 # fixture model, with the UIM line per item. Boots the display, renderer, touch, UI and the cable link only (no audio, no
 # voice tasks, no ptt/beep/refresh, no OTA confirmation, no NVS writes). Implies DEVICE_UI_METRICS.
