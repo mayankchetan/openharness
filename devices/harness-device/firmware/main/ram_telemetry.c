@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -40,7 +41,7 @@ static volatile int s_mmap_remain_cached = -1;   // -1 = not sampled yet
 static int64_t s_mmap_next_us;                   // background task only
 #ifdef DEVICE_RAM_REGIONS
 static int64_t s_regions_next_us = 61LL * 1000000LL;   // first t5min line 61 s after boot; background task only
-static void alloc_failed_cb(size_t size, uint32_t caps, const char *function_name);
+static void alloc_failed_cb(size_t size, uint32_t caps, const char *function_name);   // defined below, IRAM_ATTR there
 #endif
 
 static void note_psram_failure(const char *owner, size_t bytes)
@@ -273,29 +274,34 @@ void ram_telemetry_regions(const char *tag)
     }
 }
 
-// Failed-allocation record. The IDF hook (heap_caps.c heap_caps_alloc_failed) can run from any task, so it
-// only stores; logging waits for ram_telemetry_alloc_fail_flush().
+// Failed-allocation record. The IDF hook (heap_caps.c heap_caps_alloc_failed) can run from any task, and
+// heap_caps_alloc_failed is itself HEAP_IRAM_ATTR (IRAM unless CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH), so the
+// callback is IRAM_ATTR and may call only IRAM code: 32-bit atomics (inline S32C1I; a 64-bit __atomic_* is a
+// libatomic call that lives in flash), plain stores, and esp_timer_get_time(), which is
+// ESP_TIMER_IRAM_ATTR (esp_timer/src/esp_timer_impl_systimer.c:68; CONFIG_ESP_TIMER_IN_IRAM=y). It only
+// stores; logging waits for ram_telemetry_alloc_fail_flush(). s_af_bytes wraps at 4 GiB.
 #define AF_RING 8
 #define AF_LOG_PER_FLUSH 4
 typedef struct {
-    uint32_t size, caps, t_ms;
+    uint32_t size, caps;
+    int64_t t_us;
     const char *fn;
 } af_rec_t;
 static af_rec_t s_af[AF_RING];
 static volatile uint32_t s_af_count;
-static volatile uint64_t s_af_bytes;
+static volatile uint32_t s_af_bytes;
 static uint32_t s_af_reported;
 static uint32_t s_af_last_flush_ms;
 
-static void alloc_failed_cb(size_t size, uint32_t caps, const char *function_name)
+static void IRAM_ATTR alloc_failed_cb(size_t size, uint32_t caps, const char *function_name)
 {
     uint32_t seq = __atomic_fetch_add(&s_af_count, 1, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&s_af_bytes, (uint64_t)size, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&s_af_bytes, (uint32_t)size, __ATOMIC_RELAXED);
     af_rec_t *r = &s_af[seq % AF_RING];
     r->size = (uint32_t)size;
     r->caps = caps;
     r->fn = function_name;
-    r->t_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    r->t_us = esp_timer_get_time();
 }
 
 unsigned ram_telemetry_alloc_fail_count(void)
@@ -321,10 +327,10 @@ void ram_telemetry_alloc_fail_flush(void)
     if (last > total) last = total;
     for (uint32_t seq = first; seq < last; seq++) {
         const af_rec_t *r = &s_af[seq % AF_RING];
-        ESP_LOGW(TAG, "ALLOC_FAIL seq=%u t_ms=%u size=%u caps=0x%08x fn=%s total=%u bytes=%llu",
-                 (unsigned)seq, (unsigned)r->t_ms, (unsigned)r->size, (unsigned)r->caps,
+        ESP_LOGW(TAG, "ALLOC_FAIL seq=%u t_ms=%u size=%u caps=0x%08x fn=%s total=%u bytes=%u",
+                 (unsigned)seq, (unsigned)(r->t_us / 1000), (unsigned)r->size, (unsigned)r->caps,
                  r->fn ? r->fn : "?", (unsigned)total,
-                 (unsigned long long)__atomic_load_n(&s_af_bytes, __ATOMIC_RELAXED));
+                 (unsigned)__atomic_load_n(&s_af_bytes, __ATOMIC_RELAXED));
     }
     if (lost) ESP_LOGW(TAG, "ALLOC_FAIL overwritten=%u (ring of %d)", (unsigned)lost, AF_RING);
     s_af_reported = last;
