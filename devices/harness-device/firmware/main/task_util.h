@@ -14,3 +14,9 @@
 // Each caller has a TASK_STACK_PSRAM_* macro; 0 puts it back on xTaskCreate*.
 BaseType_t task_create_psram(TaskFunction_t fn, const char *name, uint32_t stack_bytes, void *arg,
                              UBaseType_t priority, TaskHandle_t *out, BaseType_t core);
+
+// Per-task switches (compile with -DTASK_STACK_PSRAM_<X>=0 to put that task's stack back in internal RAM).
+// Stack bytes moved out of internal RAM at the default: ptt 4,096.
+#ifndef TASK_STACK_PSRAM_PTT
+#define TASK_STACK_PSRAM_PTT 1
+#endif

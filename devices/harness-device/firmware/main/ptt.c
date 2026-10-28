@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "task_util.h"
 
 static const char *TAG = "ptt";
 #define POLL_MS      100               // key poll cadence (latency only — the PMIC key event latches; BOOT is level-read)
@@ -71,5 +72,10 @@ static void ptt_task(void *arg)
 void ptt_start(void)
 {
     // Priority 3 — below the LVGL task (4) so button polling never preempts UI rendering.
+#if TASK_STACK_PSRAM_PTT
+    // Stack in PSRAM (task_util.h): the poll loop runs forever and calls no flash API (checked 2026-10-28).
+    task_create_psram(ptt_task, "ptt", 4096, NULL, 3, NULL, tskNO_AFFINITY);
+#else
     xTaskCreate(ptt_task, "ptt", 4096, NULL, 3, NULL);
+#endif
 }
