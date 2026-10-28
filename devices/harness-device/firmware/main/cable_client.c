@@ -19,6 +19,9 @@
 #include "audio_capture.h"   // audio_notify_done() — the completion beep
 #include "audio_client.h"
 #include "battery.h"
+#ifdef DEVICE_UI_GALLERY
+#include "ui/habitat/ui_gallery.h"
+#endif
 #include "esp_timer.h"
 #include "fw_update.h"
 #include "last_words.h"
@@ -1036,6 +1039,7 @@ static void gallery_session_up(void)
     s_session = true;
     cable_link_set_log_framing(true);
     ESP_LOGI(TAG, "gallery session up (greeting answered; no roster, no turns)");
+    gallery_ram_report();   // the boot-time line went to the console, before the daemon could file it
 }
 #endif
 
@@ -1633,6 +1637,16 @@ static void session_tick(void *ctx)
     fw_update_tick();
 #ifdef HARNESS_DEBUG_COMMANDS
     cable_debug_tick();
+#endif
+#ifdef DEVICE_UI_GALLERY
+    {   // RAM tag=gallery_ready every 30 s while a daemon is listening: the UI's internal RAM, readable from the dial log
+        static int64_t next_us;
+        const int64_t now_us = esp_timer_get_time();
+        if (s_session && now_us >= next_us) {
+            next_us = now_us + 30LL * 1000000LL;
+            gallery_ram_report();
+        }
+    }
 #endif
     if (s_session && esp_timer_get_time() - s_last_rx_us > (int64_t)SILENCE_MS * 1000) {
         session_down("silence");

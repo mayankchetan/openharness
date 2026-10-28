@@ -146,6 +146,7 @@ python3 "$here/test_alive_line.py"
 # The UI gallery's tour table: names, holds, and that every view_t value and home face has an item.
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -I "$here/../main/ui/habitat" -o "$out/test_ui_gallery_items" "$here/test_ui_gallery_items.c"
 "$out/test_ui_gallery_items"
+python3 "$here/test_ui_gallery_source.py"
 
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -o "$out/test_scroll" "$here/test_scroll.c" "$here/../main/ui/habitat/scroll.c" -lm

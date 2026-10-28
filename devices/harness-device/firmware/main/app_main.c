@@ -206,13 +206,19 @@ static void refresh_task(void *arg)
 // two images would no longer have the same static memory. RAM tag=gallery_ready is logged at the same point in both, so
 // the difference in int_free between the two boots is what starting the UI costs in internal RAM (the static part is
 // the same in both and is in `idf.py size`). The tour task starts after that line; its own stack is not counted.
-#ifdef DEVICE_UI_GALLERY_NO_DISPLAY
-static volatile bool s_gallery_ui = false;
-#else
+// The same initial value in both images (so the variable sits in the same section and the static memory is identical);
+// the NO_DISPLAY image clears it first thing in gallery_main.
 static volatile bool s_gallery_ui = true;
-#endif
+void gallery_ram_report(void)
+{
+    ram_telemetry_checkpoint("gallery_ready");
+    ESP_LOGI(TAG, "GALLERY ui=%d tour_stack_b=%d", (int)s_gallery_ui, s_gallery_ui ? UI_GALLERY_TOUR_STACK : 0);
+}
 static void gallery_main(void)
 {
+#ifdef DEVICE_UI_GALLERY_NO_DISPLAY
+    s_gallery_ui = false;
+#endif
     ESP_LOGW(TAG, "UI GALLERY image, ui=%d: not a product build", (int)s_gallery_ui);
     if (s_gallery_ui) {
         display_init();
@@ -221,7 +227,7 @@ static void gallery_main(void)
         ram_telemetry_checkpoint("ui_ready");
     }
     if (!cable_client_start()) ESP_LOGE(TAG, "cable link did not start: no daemon can see this dial");
-    ram_telemetry_checkpoint("gallery_ready");
+    gallery_ram_report();   // before the daemon session: console only; the cable client logs it again once the session is up
     if (s_gallery_ui) ui_gallery_start();
     vTaskDelete(NULL);
 }

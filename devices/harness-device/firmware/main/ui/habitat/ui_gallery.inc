@@ -346,8 +346,9 @@ SETUP(visit_footer)
 }
 SETUP(workspace_preview)
 {
-    LOCKED(workspace.touching = workspace.moved = true; workspace.cancelled = false; workspace.choice = 1;
-           workspace.origin = 0; workspace.count = s.tab_count; view(HOME));
+    // view(HOME) first: it calls input_cancel(), which clears the drag flags (the first run landed on plain "home").
+    LOCKED(view(HOME); workspace.touching = workspace.moved = true; workspace.cancelled = false; workspace.choice = 1;
+           workspace.origin = 0; workspace.count = s.tab_count);
 }
 
 // ── Swarms ──────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -797,5 +798,5 @@ void ui_gallery_start(void)
 {
     ESP_LOGW(TAG_TOUR, "UI GALLERY BUILD: %d items, first tour %d s after boot; touch does nothing; no audio, no NVS writes",
              G_COUNT, UI_GALLERY_START_S);
-    assert(xTaskCreate(tour_task, "ui_tour", 8192, NULL, 3, NULL) == pdPASS);
+    assert(xTaskCreate(tour_task, "ui_tour", UI_GALLERY_TOUR_STACK, NULL, 3, NULL) == pdPASS);
 }
