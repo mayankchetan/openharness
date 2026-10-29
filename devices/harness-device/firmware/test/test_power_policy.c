@@ -12,7 +12,8 @@
 typedef struct {
     pp_t p;
     pp_in_t in;
-    int pmic;               // what the PMIC would answer right now
+    int pmic;               // what the PMIC would answer right now (REG 0x01 direction: 0 standby, 1 charge, 2 discharge, -1 read error)
+    int status0;            // ... and REG 0x00 (bit 5 VBUS good, bit 3 battery present; -1 read error). Default: on battery.
     unsigned reads;         // fresh reads taken
     pp_action_t last_action;
     unsigned actions[5];    // count per action
@@ -26,6 +27,7 @@ static void rig_init(rig_t *r, uint32_t start_ms)
     r->in.capable = true;
     r->in.chg = -1;
     r->pmic = 2;
+    r->status0 = PP_PMU_BATT_PRESENT;
 }
 static pp_state_t step(rig_t *r, uint32_t dt_ms)
 {
@@ -33,6 +35,7 @@ static pp_state_t step(rig_t *r, uint32_t dt_ms)
     r->in.chg_fresh = false;
     if (pp_wants_read(&r->p, &r->in)) {
         r->in.chg = r->pmic;
+        r->in.status0 = r->status0;
         r->in.chg_fresh = true;
         r->reads++;
     }
@@ -77,6 +80,7 @@ int main(void)
     assert(power_chg_from_status2(0xC0) == 2 && power_chg_from_status2(0xA0) == 1 && power_chg_from_status2(0x80) == 0);   // bit 7 is reserved: masked off
     assert(power_chg_from_status2(0x5F) == 2 && power_chg_from_status2(0x1F) == 0);                    // the low bits (charging status) do not leak in
     assert(power_chg_from_status2(-1) == -1);
+    assert(PP_PMU_VBUS_GOOD == POWER_STATUS0_VBUS_GOOD && PP_PMU_BATT_PRESENT == POWER_STATUS0_BATT_PRESENT);   // the policy's copies agree
 
     // --- S0 is the resting state, and the cheap one ---
     rig_init(&r, 1000);
@@ -111,7 +115,7 @@ int main(void)
     // Exactly 1999 ms between the reads is not enough (a direct step sequence, no wants_read gating).
     {
         pp_t p; pp_init(&p);
-        pp_in_t in = {.now_ms = 0, .chg = 2, .chg_fresh = true, .capable = true};
+        pp_in_t in = {.now_ms = 0, .chg = 2, .chg_fresh = true, .capable = true, .status0 = PP_PMU_BATT_PRESENT};
         pp_out_t out;
         pp_step(&p, &in, &out); assert(out.state == PP_S0);
         in.now_ms = 1999; pp_step(&p, &in, &out); assert(out.state == PP_S0 && out.action == PP_ACT_NONE);
@@ -222,6 +226,49 @@ int main(void)
     rig_init(&r, 0); to_s1(&r);
     r.in.capable = false;
     assert(step(&r, 100) == PP_S0);
+
+    // --- "On the battery" is three facts on one fresh read: VBUS not good, battery present, direction discharge ---
+    // VBUS good with a discharging direction (a charger that is not charging) stays in S0, forever, and the PMIC is still read every 2 s
+    rig_init(&r, 0); r.status0 = PP_PMU_VBUS_GOOD | PP_PMU_BATT_PRESENT; r.in.chg = 2;
+    run(&r, 60000);
+    assert(r.p.state == PP_S0 && r.reads >= 29 && r.actions[PP_ACT_ENTER_S1] == 0);
+    // no battery (bit 3 clear): S0
+    rig_init(&r, 0); r.status0 = 0; r.in.chg = 2;
+    run(&r, 60000);
+    assert(r.p.state == PP_S0 && r.actions[PP_ACT_ENTER_S1] == 0);
+    // a failed read of REG 0x00 (-1) with a good direction: S0, and it recovers when the read does
+    rig_init(&r, 0); r.status0 = -1; r.in.chg = 2;
+    run(&r, 30000);
+    assert(r.p.state == PP_S0 && r.actions[PP_ACT_ENTER_S1] == 0);
+    r.status0 = PP_PMU_BATT_PRESENT;
+    run(&r, 2500);
+    assert(r.p.state == PP_S1);
+    // an interrupted confirmation starts again: VBUS good on the second read
+    rig_init(&r, 0); r.in.chg = 2;
+    step(&r, 100); r.status0 = PP_PMU_VBUS_GOOD | PP_PMU_BATT_PRESENT;
+    run(&r, 2100); assert(r.p.state == PP_S0);
+    r.status0 = PP_PMU_BATT_PRESENT; run(&r, 1900); assert(r.p.state == PP_S0);   // the count restarted at the VBUS-good read
+    run(&r, 3000); assert(r.p.state == PP_S1);
+    // from S1 and S2, one fresh read that fails any of the three drops to S0 at once
+    {
+        static const int bad[] = {PP_PMU_VBUS_GOOD | PP_PMU_BATT_PRESENT, 0, -1, PP_PMU_VBUS_GOOD};
+        for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+            for (int asleep = 0; asleep < 2; asleep++) {
+                rig_init(&r, 0); to_s1(&r);
+                if (asleep) { r.in.screen_asleep = true; run(&r, PP_SETTLE_MS + 200); assert(r.p.state == PP_S2); }
+                r.status0 = bad[i];
+                pp_state_t s = r.p.state;
+                for (int k = 0; k < 25 && s != PP_S0; k++) s = step(&r, 100);
+                assert(s == PP_S0 && r.last_action == PP_ACT_ENTER_S0);
+            }
+        }
+    }
+    // a stale status byte is not a reason to leave: only a fresh read counts
+    rig_init(&r, 0); to_s2(&r);
+    {
+        pp_out_t out; r.in.now_ms += 100; r.in.chg_fresh = false; r.in.status0 = PP_PMU_VBUS_GOOD; pp_step(&r.p, &r.in, &out);
+        assert(out.state == PP_S2 && out.action == PP_ACT_NONE);
+    }
 
     // --- The PMIC read schedule in S1 and S2: every 2 s, no more ---
     rig_init(&r, 0); to_s2(&r);

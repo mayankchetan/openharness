@@ -75,6 +75,7 @@ static pp_state_t  s_applied;          // what the render task has applied
 static bool        s_pm_battery;       // power management is configured for battery (frequency scaling, maybe light sleep)
 static bool        s_audio_idle;       // the I2S channels are stopped (audio_capture_idle)
 static bool        s_s2_live;          // the S2 steps that let the chip sleep are done: touch wake armed, pollers relaxed, lock released
+static int         s_last_status0 = -1, s_last_status1 = -1;   // the raw AXP2101 bytes of the last fresh read (-1: it failed), for the log
 static bool        s_touch_warned;     // "touch wake not armed" is logged once per boot, not once per retry
 
 static int resolve_gpio(int gpio)
@@ -200,17 +201,22 @@ void power_sleep_poll(void)
         .screen_asleep = display_is_asleep(),
         .holds = holds_now(),
     };
+    int status1 = -1;
     if (pp_wants_read(&s_pp, &in)) {
-        in.chg = power_charge_state();
+        // One fresh read of REG 0x00 (VBUS good, battery present) and REG 0x01 (battery current direction), on this task's own I2C
+        // path. "On the battery" needs all three (power_policy.h); a failed read of either is not.
+        in.chg = power_pmu_read(&in.status0, &status1);
         in.chg_fresh = true;
+        s_last_status0 = in.status0;
+        s_last_status1 = status1;
         battery_set(battery_pct_raw(), in.chg);   // the 30 s cache follows what was just read: alive line, hello frame, battery log
     }
     pp_out_t out;
     pp_step(&s_pp, &in, &out);
     if (out.action == PP_ACT_NONE) return;
 
-    ESP_LOGI(TAG, "%s -> %s (chg=%d sof=%d asleep=%d holds=0x%x) int_free=%u largest=%u", pp_state_name(out.from),
-             pp_state_name(out.state), in.chg, (int)in.sof, (int)in.screen_asleep, (unsigned)in.holds,
+    ESP_LOGI(TAG, "%s -> %s (chg=%d reg00=%#x reg01=%#x sof=%d asleep=%d holds=0x%x) int_free=%u largest=%u", pp_state_name(out.from),
+             pp_state_name(out.state), in.chg, (unsigned)s_last_status0, (unsigned)s_last_status1, (int)in.sof, (int)in.screen_asleep, (unsigned)in.holds,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     atomic_store(&s_want, out.state);
     if (out.action == PP_ACT_LEAVE_S2 || out.action == PP_ACT_ENTER_S0) {

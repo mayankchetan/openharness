@@ -13,9 +13,12 @@
 // Deep sleep (S3, plan Stage 2) is not here.
 //
 // Rules, first match wins, in this order every step:
-//   * Any state to S0 at once: no capable board, a USB host (SOF), or a FRESH charge-state read that is not 2 (that
-//     includes -1: when in doubt, never sleep). A stale value (cache) never leaves S1 or S2, a fresh one always does.
-//   * S0 to S1: two fresh reads of 2, PP_CONFIRM_MS apart, no host, and PP_DWELL_MS since the last drop to S0.
+//   * Any state to S0 at once: no capable board, a USB host (SOF), or a FRESH read that is not "on the battery" (see below; a
+//     failed read of either register counts: when in doubt, never sleep). A stale value (cache) never leaves S1 or S2, a fresh one always does.
+//   * S0 to S1: two fresh "on the battery" reads PP_CONFIRM_MS apart, no host, and PP_DWELL_MS since the last drop to S0.
+//   * ON THE BATTERY is three facts from one fresh read of the AXP2101 (datasheet V1.4 p.31): REG 0x00 bit 5 VBUS good = 0, REG 0x00
+//     bit 3 battery present = 1, and REG 0x01 bits 6:5 battery current direction = 2 (discharge). A charger that is not charging
+//     (VBUS good, direction discharge or standby) is external power; a dial with no cell is external power.
 //   * S1 to S2: screen asleep for PP_SETTLE_MS without a break, and no hold bit.
 //   * S2 to S1: the screen woke, or a hold bit was set.
 #include <stdbool.h>
@@ -45,10 +48,15 @@ typedef enum {
 #define PP_HOLD_SESSION  (1u << 2)   // a cable session is up (a host whose SOF flickers)
 #define PP_HOLD_LINK     (1u << 3)   // a transport with traffic (reserved for Wi-Fi or BLE modes)
 
+// AXP2101 REG 0x00 PMU status1 bits (datasheet V1.4 p.31); board/power.h has the same two numbers, test_power_policy.c checks they agree.
+#define PP_PMU_VBUS_GOOD     0x20   // bit 5: 1 = VBUS good (external power is there)
+#define PP_PMU_BATT_PRESENT  0x08   // bit 3: 1 = a battery is present
+
 typedef struct {
     uint32_t now_ms;         // a free-running 32-bit millisecond clock; wrap is fine
     int      chg;            // the charge state known now: 0 standby, 1 charging, 2 discharging, -1 unknown (cache or fresh)
-    bool     chg_fresh;      // true when chg was read from the PMIC for this step
+    bool     chg_fresh;      // true when chg (and status0) were read from the PMIC for this step
+    int      status0;        // raw REG 0x00 of that fresh read, or -1 when it failed; ignored when chg_fresh is false
     bool     capable;        // board has the PMIC and the touch controller the wake path was built for
     bool     sof;            // a USB host is sending frames (usb_serial_jtag_is_connected())
     bool     screen_asleep;  // display_is_asleep()

@@ -48,12 +48,23 @@ typedef int esp_err_t;
 static inline const char *esp_err_to_name(esp_err_t e) { return e == ESP_OK ? "OK" : e == ESP_ERR_NO_MEM ? "NO_MEM" : "ERR"; }
 // the event log: every fake that matters appends one token
 extern char g_events[8192];
+extern char g_logs[16384];     // every log line, one after the other
 extern int g_log_lines;
+static inline void logline(const char *s) { size_t n = strlen(g_logs); if (n + strlen(s) + 2 < sizeof g_logs) { strcat(g_logs, s); strcat(g_logs, "\\n"); } }
 static inline void ev(const char *s) { size_t n = strlen(g_events); if (n + strlen(s) + 2 < sizeof g_events) { strcat(g_events, s); strcat(g_events, " "); } }
 // the arguments are evaluated and format-checked, as in IDF; the line itself is only counted
-#define ESP_LOGI(tag, ...) ((void)(tag), (void)snprintf(NULL, 0, __VA_ARGS__), g_log_lines++)
-#define ESP_LOGW(tag, ...) ((void)(tag), (void)snprintf(NULL, 0, __VA_ARGS__), g_log_lines++)
-#define ESP_LOGE(tag, ...) ((void)(tag), (void)snprintf(NULL, 0, __VA_ARGS__), g_log_lines++)
+#include <stdarg.h>
+__attribute__((format(printf, 1, 2))) static inline int logf_(const char *fmt, ...)
+{
+    char line[512];
+    va_list ap; va_start(ap, fmt); (void)vsnprintf(line, sizeof line, fmt, ap); va_end(ap);
+    logline(line);
+    return g_log_lines++;
+}
+#define LOGF(...) logf_(__VA_ARGS__)
+#define ESP_LOGI(tag, ...) ((void)(tag), LOGF(__VA_ARGS__))
+#define ESP_LOGW(tag, ...) ((void)(tag), LOGF(__VA_ARGS__))
+#define ESP_LOGE(tag, ...) ((void)(tag), LOGF(__VA_ARGS__))
 ''',
 'esp_log.h': '#pragma once\n#include "fake_idf.h"\n',
 'esp_heap_caps.h': '''
@@ -104,7 +115,7 @@ typedef enum { TOUCH_NONE = 0, TOUCH_CST9217, TOUCH_CST816S, TOUCH_GT911 } touch
 typedef struct { const char *name; int lcd_rst; int touch_rst; touch_chip_t touch; bool touch_mirror; bool has_pmic; } board_t;
 const board_t *board(void);
 ''',
-'board/power.h': '#pragma once\nint power_charge_state(void);\n',
+'board/power.h': '#pragma once\nint power_charge_state(void);\nint power_pmu_read(int *status0, int *status1);\n',
 'battery.h': '#pragma once\nint battery_chg(void);\nvoid battery_set(int pct, int chg);\nint battery_pct_raw(void);\n',
 'audio_capture.h': '#pragma once\n#include <stdbool.h>\nbool audio_capture_idle(bool idle);\n',
 'audio_client.h': '#pragma once\n#include <stdbool.h>\nbool audio_client_active(void);\n',
@@ -137,6 +148,7 @@ HARNESS = r'''
 #include <assert.h>
 
 char g_events[8192];
+char g_logs[16384];
 int g_log_lines;
 size_t g_int_free = 150000, g_largest = 100000;
 int64_t g_now_us;
@@ -151,6 +163,7 @@ static int pads_kept;
 static board_t the_board = {"cst9217+axp2101", 39, 40, TOUCH_CST9217, true, true};
 static int pmic_state = 0;            // what the PMIC answers: 0 standby, 1 charging, 2 discharging, -1 error
 static int cache_chg = -1, cache_pct = 55, pmic_reads;
+static int pmu0 = 0x08;               // REG 0x00 the PMIC would answer: bit 5 VBUS good, bit 3 battery present; -1 = read error
 static bool usb_host, asleep, voice, session, audio_idle_ok = true, audio_stopped;
 static void (*sleep_cb)(bool);
 static esp_pm_light_sleep_cb_t exit_cb;
@@ -173,6 +186,12 @@ esp_err_t gpio_sleep_sel_dis(gpio_num_t g) { (void)g; pads_kept++; return ESP_OK
 bool usb_serial_jtag_is_connected(void) { return usb_host; }
 const board_t *board(void) { return &the_board; }
 int power_charge_state(void) { pmic_reads++; return pmic_state; }
+int power_pmu_read(int *s0, int *s1) {   // one fresh read of REG 0x00 and REG 0x01 (direction in bits 6:5)
+    pmic_reads++;
+    *s0 = pmu0;
+    *s1 = pmic_state < 0 ? -1 : (pmic_state << 5);
+    return pmic_state;
+}
 int battery_chg(void) { return cache_chg; }
 void battery_set(int pct, int chg) { cache_pct = pct; cache_chg = chg; }
 int battery_pct_raw(void) { return cache_pct; }
@@ -214,12 +233,12 @@ static void screen(bool on_) {   // display_sleep() / display_wake(): flag first
     asleep = !on_;
     if (sleep_cb) sleep_cb(on_);
 }
-static void plug_in(void)  { pmic_state = 1; cache_chg = 1; }
-static void unplug(void)   { pmic_state = 2; cache_chg = 2; }
+static void plug_in(void)  { pmic_state = 1; cache_chg = 1; pmu0 = 0x28; }   // charging, VBUS good, battery present
+static void unplug(void)   { pmic_state = 2; cache_chg = 2; pmu0 = 0x08; }   // discharging, VBUS not good, battery present
 static void reset_world(void) {
     memset(&the_lock, 0, sizeof the_lock); lock_creates = lock_acquires = lock_releases = 0;
     configure_calls = configure_battery = configure_usb = 0; pads_kept = 0; pmic_reads = 0;
-    cache_chg = -1; usb_host = asleep = voice = session = false; audio_stopped = false; audio_idle_ok = true;
+    cache_chg = -1; usb_host = asleep = voice = session = false; audio_stopped = false; audio_idle_ok = true; pmu0 = 0x08; g_logs[0] = 0;
     guard_stops = guard_starts = audio_idles = audio_resumes = touch_arms = touch_disarms = 0; pmic_state = 0; retention_result = ESP_OK;
     arm_wakes_screen = false; arm_plugs_usb = false; arm_fails = false; touch_armed = false;
     clear_events();
@@ -396,6 +415,40 @@ static void scenario_driver_lost(void) {
     assert(the_lock.count == 1 && !power_sleep_relaxed() && touch_disarms == 1);
 }
 
+static void scenario_external_power_facts(void) {
+    // REG 0x00 bit 5 VBUS good, bit 3 battery present, REG 0x01 direction: the three facts of "on the battery"
+    reset_world();
+    power_sleep_init();
+    pmic_state = 2; cache_chg = 2; pmu0 = 0x28;             // VBUS good with a discharging direction (a charger that is not charging)
+    tick(30000);
+    assert(configure_calls == 0 && pmic_reads > 5 && !strstr(g_logs, "S0 -> S1"));
+    pmu0 = 0x00;                                            // no cell
+    tick(30000);
+    assert(configure_calls == 0 && !strstr(g_logs, "S0 -> S1"));
+    pmu0 = -1;                                              // REG 0x00 unreadable
+    tick(30000);
+    assert(configure_calls == 0 && !strstr(g_logs, "S0 -> S1"));
+    pmu0 = 0x08;                                            // on the battery
+    tick(2500);
+    assert(configure_battery == 1 && strstr(g_logs, "S0 -> S1"));
+    // the transition line carries the raw bytes of the fresh read that decided it
+    assert(strstr(g_logs, "reg00=0x8 reg01=0x40") != NULL);
+    // in S2: VBUS good, then a failed read, then no cell: each sends the dial to S0 with the lock back
+    for (int k = 0; k < 3; k++) {
+        screen(false); tick(6000);
+        assert(power_sleep_relaxed() && the_lock.count == 0);
+        pmu0 = k == 0 ? 0x28 : k == 1 ? -1 : 0x00;
+        tick(2600);
+        assert(!power_sleep_relaxed() && the_lock.count == 1);
+        assert(strstr(g_logs, "S2 -> S0"));
+        tick(500);
+        assert(!strcmp(power_sleep_state_name(), "S0"));
+        pmu0 = 0x08; screen(true); tick(10500 + 2500);      // back on the battery after the dwell
+        assert(!strcmp(power_sleep_state_name(), "S1"));
+        g_logs[0] = 0;
+    }
+}
+
 static void scenario_other_boards(void) {
     // ---------- other boards never leave S0 ----------
     reset_world();
@@ -475,6 +528,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "policy")) scenario_policy_leaves_during_entry();
     else if (!strcmp(argv[1], "noarm")) scenario_arm_fails();
     else if (!strcmp(argv[1], "lost")) scenario_driver_lost();
+    else if (!strcmp(argv[1], "facts")) scenario_external_power_facts();
     else if (!strcmp(argv[1], "boards")) scenario_other_boards();
     else if (!strcmp(argv[1], "host")) scenario_usb_host();
     else if (!strcmp(argv[1], "holds")) scenario_holds();
@@ -501,7 +555,7 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
                     '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
                     '-I', str(main), str(folder / 'harness.c'), str(folder / 'power_sleep.c'), str(folder / 'power_policy.c'),
                     '-o', str(folder / 'glue')], check=True)
-    scenarios = ('boot', 'cycles', 'noret', 'race', 'policy', 'noarm', 'lost', 'boards', 'host', 'holds', 'audio', 'stats')
+    scenarios = ('boot', 'cycles', 'noret', 'race', 'policy', 'noarm', 'lost', 'facts', 'boards', 'host', 'holds', 'audio', 'stats')
     for name in scenarios:
         subprocess.run([str(folder / 'glue'), name], check=True)
     print('power sleep glue: ' + ', '.join(scenarios) + ' PASS (boot order, unplug, S2 entry and wake order, plug-in, 200 cycles balanced, '

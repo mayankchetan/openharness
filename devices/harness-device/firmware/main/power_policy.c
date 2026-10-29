@@ -7,6 +7,12 @@ static bool span_reached(uint32_t now, uint32_t since, uint32_t ms) { return (ui
 
 void pp_init(pp_t *p) { memset(p, 0, sizeof *p); p->state = PP_S0; }
 
+// The three facts of a fresh read (power_policy.h). A failed REG 0x00 read (-1) is "not on the battery", like a failed direction read.
+static bool on_battery(const pp_in_t *in)
+{
+    return in->chg == 2 && in->status0 >= 0 && !(in->status0 & PP_PMU_VBUS_GOOD) && (in->status0 & PP_PMU_BATT_PRESENT);
+}
+
 static bool dwell_ok(const pp_t *p, uint32_t now)
 {
     return !p->dwell_armed || span_reached(now, p->dwell_since_ms, PP_DWELL_MS);
@@ -45,7 +51,7 @@ void pp_step(pp_t *p, const pp_in_t *in, pp_out_t *out)
 
     // Anything unsafe leaves S1 and S2 at once. A stale value never does; a fresh one that is not "discharging" always
     // does, and so does a failed read (-1): when in doubt, do not sleep.
-    if (p->state != PP_S0 && (!in->capable || in->sof || (in->chg_fresh && in->chg != 2))) {
+    if (p->state != PP_S0 && (!in->capable || in->sof || (in->chg_fresh && !on_battery(in)))) {
         to_s0(p, in, out);
         out->state = p->state;
         return;
@@ -55,6 +61,8 @@ void pp_step(pp_t *p, const pp_in_t *in, pp_out_t *out)
     case PP_S0:
         if (!in->capable || in->sof || in->chg != 2) {
             p->confirm_reads = 0;                       // the candidate went away: start again
+        } else if (in->chg_fresh && !on_battery(in)) {
+            p->confirm_reads = 0;                       // VBUS is good, or no cell, or a failed read: external power, start again
         } else if (in->chg_fresh && dwell_ok(p, in->now_ms)) {
             if (p->confirm_reads == 0) {
                 p->confirm_reads = 1;
