@@ -1320,7 +1320,7 @@ typedef struct {
     uint8_t gain[HT_ARC_GAINS];   // a proportional mask's per-glyph gains (255 = plain)
 } arc_cache_t;
 _Static_assert(ARC_HALF <= UINT8_MAX, "arc span coordinates must fit in a byte");
-static arc_cache_t arc_caches[2];
+static HT_RENDER_BSS arc_cache_t arc_caches[2];   // PSRAM by default (terminal.h HT_RENDER_DATA_PSRAM)
 static uint32_t arc_builds;
 uint32_t ht_arc_cache_builds(void) { return arc_builds; }
 #ifdef DEVICE_LAYOUT_BENCH

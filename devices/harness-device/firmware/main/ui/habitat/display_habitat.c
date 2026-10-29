@@ -65,7 +65,7 @@ static esp_lcd_panel_handle_t panel;
 static SemaphoreHandle_t model_lock, dma_done;
 static TaskHandle_t renderer;
 static uint16_t *pixels[2];
-static ht_scene_t scenes[2];
+static HT_RENDER_BSS ht_scene_t scenes[2];   // PSRAM by default (terminal.h HT_RENDER_DATA_PSRAM)
 static bool painted;
 static atomic_bool asleep, force_frame;
 // Panel IO belongs to the renderer, including brightness changes.

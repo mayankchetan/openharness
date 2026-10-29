@@ -168,6 +168,16 @@ if(DEVICE_RAM_REGIONS)
     target_include_directories(${COMPONENT_LIB} PRIVATE "${heap_dir}")
 endif()
 
+# PSRAM placement switches (RAM diet 2, round 3). Each defaults to ON in the source that owns it; pass -D<NAME>=0 to
+# cmake (idf.py -D<NAME>=0 build) to put that one item back in internal RAM for an A/B build. Not a Kconfig option on purpose:
+# they change what a test or a profile image measures, not what the product is.
+#   HT_RENDER_DATA_PSRAM   scenes[2] and arc_caches[2] in PSRAM          (ui/habitat/terminal.h)
+foreach(psram_switch HT_RENDER_DATA_PSRAM)
+    if(DEFINED ${psram_switch})
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE ${psram_switch}=${${psram_switch}})
+    endif()
+endforeach()
+
 # Sleep/wake and boot profile (sleep_profile.c): -DDEVICE_SLEEP_PROFILE=1, default OFF. 500 sleep/wake cycles 20 s after boot
 # through the real sleep and touch-wake paths, with wake and sleep times, free internal memory and a summary every 50, and
 # the main task's stack mark at app_ready and at the end of app_main. Needs the debug commands (the wake is an injected tap).

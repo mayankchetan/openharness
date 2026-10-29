@@ -4,6 +4,20 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+// RENDER DATA IN PSRAM (plan C3a + C3b). The renderer's two scene buffers (display_habitat.c, 19,848 B) and its two
+// arc caches (terminal.c, 21,824 B) are touched by the CPU only, never by DMA, so they can sit in PSRAM: 40,920 B of
+// internal RAM back for a full-frame cost of +0.1 percent, +0.9 percent under a 17.8 MB/s PSRAM copy load (on the dial,
+// diet2-r1-results.md section 7). HT_RENDER_BSS is the placement; compile with -DHT_RENDER_DATA_PSRAM=0 to put both
+// back in internal BSS. Host builds (no ESP_PLATFORM, no esp_attr.h) always get ordinary BSS.
+#ifndef HT_RENDER_DATA_PSRAM
+#define HT_RENDER_DATA_PSRAM 1
+#endif
+#if HT_RENDER_DATA_PSRAM && defined(ESP_PLATFORM)
+#include "esp_attr.h"
+#define HT_RENDER_BSS EXT_RAM_BSS_ATTR
+#else
+#define HT_RENDER_BSS
+#endif
 // THE FACE. One device, one size: the 466 round dial.
 //
 // This was a -D from the build for as long as there were two boards; it is a literal again now that the

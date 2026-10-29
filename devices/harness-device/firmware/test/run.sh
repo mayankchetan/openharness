@@ -260,6 +260,8 @@ python3 "$here/test_device_settings.py"
 python3 "$here/test_touch_driver.py"
 python3 "$here/test_touch_inject.py"
 python3 "$here/test_render_guard.py"
+# PSRAM placement of the scene buffers and arc caches (HT_RENDER_DATA_PSRAM), read from the preprocessed source.
+python3 "$here/test_render_data_psram.py"
 python3 "$here/test_display_power.py"
 python3 "$here/test_machine_ui.py"
 python3 "$here/test_reload_threads.py"
