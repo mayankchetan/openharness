@@ -33,6 +33,12 @@ CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
 CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=6
 CONFIG_ESP_WIFI_RX_BA_WIN=12
+# Wi-Fi hot paths run from flash/PSRAM, not from IRAM-placed internal RAM. Measured on the dial at the production
+# buffer counts above (W2 with the options on, W2n with them off): 18,176 B more internal RAM free at run time, bulk
+# throughput 1,295 to 1,239 kbit/s (-4.5 percent), no lost acks, voice-rate round trip p95 219 to 200 ms. Voice needs
+# about 64 kbit/s. IDF default is on (y).
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
 
 # --- HTTP server (captive portal) ---
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024

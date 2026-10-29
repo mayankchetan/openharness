@@ -48,6 +48,10 @@ EXPECTED = {
     'CONFIG_LWIP_TCP_SND_BUF_DEFAULT': '11520',
     'CONFIG_LWIP_TCP_WND_DEFAULT': '11520',
     'CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL': '1024',
+    # Wi-Fi code and RX path run from flash/PSRAM instead of IRAM-placed internal RAM (round 3): 18,176 B of internal
+    # RAM at run time for 4.5 percent of bulk throughput (1,295 to 1,239 kbit/s); voice needs about 64 kbit/s.
+    'CONFIG_ESP_WIFI_IRAM_OPT': 'n',
+    'CONFIG_ESP_WIFI_RX_IRAM_OPT': 'n',
 }
 for symbol, value in EXPECTED.items():
     assert defaults.get(symbol) == value, f'{symbol}: defaults say {defaults.get(symbol)!r}, expected {value!r}'
