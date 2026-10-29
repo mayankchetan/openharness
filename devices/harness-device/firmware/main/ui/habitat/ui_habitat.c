@@ -5732,13 +5732,20 @@ void ui_ota_boot_pct(int percent)
 bool ui_voice_is_recording(void) { return audio_client_recording(); }
 bool ui_voice_is_active(void) { return audio_client_active(); }
 uint32_t ui_voice_start_tick(void) { return s.voice_started; }
+bool ui_voice_can_start(void)
+{
+    display_lock();
+    const bool ok = (s.view == HOME || s.view == AGENT) && s.connected && !s.loading && (active() || swarm_mode()) &&
+                    !s.voice_open && !s.voice_waiting && !audio_client_active();
+    display_unlock();
+    return ok;
+}
 void ui_voice_start(void)
 {
     display_lock();
-    action_t a = {.kind = A_VOICE};
-    if ((s.view == HOME || s.view == AGENT) && active())
-        COPY(a.id, active()->id);
-    dispatch(a);
+    // Exactly the touch gesture's start ("focus touch: start voice"): make_action names the agent on the face, or the Lead in a swarm.
+    if (s.connected && !s.loading && (active() || swarm_mode()))
+        dispatch(make_action((hit_t){.action = A_VOICE}));
     display_unlock();
 }
 void ui_voice_start_goal(void)

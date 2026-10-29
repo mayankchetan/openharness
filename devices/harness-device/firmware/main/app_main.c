@@ -29,8 +29,10 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "boot_key.h"
 #include "ptt.h"
 #include "power_sleep.h"
 #include "ram_telemetry.h"
@@ -63,12 +65,40 @@ static const char *TAG = "app";
 
 // ── factory reset ───────────────────────────────────────────────────────────────────────────────────
 
-// A button held through power-on = factory reset. All that is left to clear is the screen brightness and
-// the voice language — the credentials this used to wipe do not exist any more.
+// BOOT held through power-on starts a countdown on the glass; the settings (the screen brightness and the voice language — the
+// credentials this used to wipe do not exist any more) are cleared only after BK_RESET_HOLD_MS (5 s) of unbroken holding, and letting go
+// cancels it (plan 16.1 item 3: with BOOT now the hold-to-talk key, a thumb on it at power-on is not a request to wipe anything).
 //
 // WHICH button, and whether there is one at all, is the board's to answer (board.h): the dial reads BOOT,
 // and the Pro has nothing it could read, because its only switch is the one that just turned it on.
-static bool boot_button_held(void) { return board_factory_reset_requested(); }
+static void reset_countdown(void)
+{
+    if (!board_factory_reset_requested()) return;
+    bkr_t r;
+    bkr_begin(&r, (uint32_t)(esp_timer_get_time() / 1000), true);
+    ESP_LOGW(TAG, "BOOT held at power-on: settings wipe in %d s unless released", BK_RESET_HOLD_MS / 1000);
+    for (;;) {
+        const bkr_out_t o = bkr_step(&r, (uint32_t)(esp_timer_get_time() / 1000), board_boot_down());
+        if (o.result == BKR_COUNTING) {
+            if (o.changed) {
+                char text[64];
+                snprintf(text, sizeof text, "Keep holding BOOT: %d s. Let go to cancel.", o.seconds_left);
+                ui_show_error("Reset settings", text);
+            }
+        } else if (o.result == BKR_CANCELLED) {
+            ESP_LOGI(TAG, "BOOT released: settings kept");
+            ui_enter_boot_loading();
+            return;
+        } else {   // BKR_DONE
+            ESP_LOGW(TAG, "BOOT held %d s — factory reset", BK_RESET_HOLD_MS / 1000);
+            config_clear_all();
+            ui_show_error("Settings reset", "Let go of BOOT.");
+            for (int i = 0; i < 100 && board_boot_down(); i++) vTaskDelay(pdMS_TO_TICKS(100));   // up to 10 s, then restart anyway
+            esp_restart();   // the UI has already read the old settings; a clean boot reads the cleared ones
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
 
 // ── the agent list ──────────────────────────────────────────────────────────────────────────────────
 
@@ -254,11 +284,6 @@ void app_main(void)
     return;
 #endif
 
-    if (boot_button_held()) {
-        ESP_LOGW(TAG, "BOOT held — factory reset");
-        config_clear_all();
-    }
-
 #ifdef BOARD_PROBE
     board_probe_run();   // bring-up only — see board/board_probe.c
 #endif
@@ -266,6 +291,7 @@ void app_main(void)
     ui_init();
     ui_set_brightness(config_load_brightness());
     ram_telemetry_checkpoint("ui_ready");
+    reset_countdown();   // BOOT held at power-on: a 5 s countdown on the glass, then the settings wipe; released earlier, nothing happens
 
     // Reserve the PSRAM voice buffer now, while the heap is still unfragmented — a large contiguous block
     // is hard to get later even with megabytes free.

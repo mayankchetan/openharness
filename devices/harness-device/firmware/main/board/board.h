@@ -43,9 +43,12 @@ void board_from_acks(const uint8_t *acks, int n, board_t *out);
 // One line, for the boot log and the daemon: "touch=cst816s pmic=no rst=1/2".
 const char *board_describe(void);
 
-// Was a factory reset asked for by holding a button through power-on?
+// Is the settings-wipe button down at power-on? It only STARTS the wipe countdown (app_main.c reset_countdown, boot_key.h): the wipe
+// itself needs the button held for BK_RESET_HOLD_MS, with the countdown on the glass, and letting go cancels it (plan 16.1 item 3).
 //
 // A BOARD FACT, not a policy, which is why it lives here. The dial reads BOOT (GPIO0), a button that is
 // up unless somebody is holding it. The Pro has no such button: its only switch is the one that turns the
 // board on, so it is BY DEFINITION held at this moment and can never mean anything else.
 bool board_factory_reset_requested(void);
+// The same button, one plain read: true while it is down. For the countdown's polling.
+bool board_boot_down(void);

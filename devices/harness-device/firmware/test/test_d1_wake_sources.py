@@ -35,6 +35,8 @@ assert 'if (down && power_sleep_input_allowed())\n            display_bump_activ
 
 # the ptt task: the PWR tap still toggles the screen (the one wake source), BOOT asks the gate before it can wake or act
 assert 'if (pwr_key && power_take_pwrkey_tap()) screen_toggle("PWR tap");' in ptt
-press = ptt[ptt.index('int boot_now = gpio_get_level'):]
-assert press.index('power_sleep_input_allowed()') < press.index('display_wake()')
+# BOOT goes through the key machine with the gate as its `allowed` input: a press the gate refuses yields no event, so no wake
+# (test_boot_key.c proves that), and the only display_wake() in the BOOT code is the BK_PRESS case
+assert 'power_sleep_input_allowed(), ui_voice_can_start)' in ptt
+assert len(re.findall(r'display_wake\(\)', ptt.split('static void ptt_task')[1])) == 1
 print('D1 wake sources: touch arm compiled out by default, the gate is asked by the touch task and the BOOT poll, PWR tap kept PASS')

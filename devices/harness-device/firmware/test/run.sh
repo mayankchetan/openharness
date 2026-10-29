@@ -159,6 +159,11 @@ python3 "$here/test_alive_line.py"
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" -o "$out/test_power_policy" \
    "$here/test_power_policy.c" "$here/../main/power_policy.c"
 "$out/test_power_policy"
+# The BOOT key state machine (tap, hold-to-talk, D1 gate) and the 5 s settings-wipe countdown.
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" -o "$out/test_boot_key"    "$here/test_boot_key.c" "$here/../main/boot_key.c"
+"$out/test_boot_key"
+python3 "$here/test_boot_key_wiring.py"
+python3 "$here/test_d1_wake_sources.py"
 
 # The sleep/wake profile's percentiles and summary line.
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" -o "$out/test_slp_stats" \

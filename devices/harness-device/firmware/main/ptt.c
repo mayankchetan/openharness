@@ -13,19 +13,24 @@
 #include "esp_log.h"
 #include "task_util.h"
 #include "power_sleep.h"
+#include "boot_key.h"
 
 static const char *TAG = "ptt";
 #define POLL_MS      100               // key poll cadence (latency only — the PMIC key event latches; BOOT is level-read)
 
 // Two keys, two dials (board.h):
-//   • BOOT (GPIO0, both dials): a tap interrupts the running turn — fires on the press edge, so it is as
-//     quick as it ever was. Held ≥ BOOT_LONG_PRESS_MS it also toggles the screen on/off — the same
-//     gesture on both dials, so there is one thing to teach and one path to maintain.
+//   • BOOT (GPIO0, both dials), a state machine in boot_key.c:
+//       - a TAP (released within BK_HOLD_MS) interrupts the running turn, on the release;
+//       - a HOLD records: BOOT held for BK_HOLD_MS starts a voice capture through the same entry the touch gesture uses
+//         (ui_voice_start), and the release sends it (ui_voice_stop). If no capture can start (a turn is running, no link, not a
+//         talk screen) the hold is denied and its release is a tap;
+//       - the screen toggle on a BOOT hold is gone: the PWR key does that;
+//       - on the battery with the screen off BOOT does nothing at all (D1, "PWR only").
+//     A key already down when this task starts (held through power-on) is ignored until it is released.
 //   • Button A (the PWR key, wired to the AXP2101 PWRON pin — read over I2C, not a GPIO): a tap toggles
 //     the screen. Only where there is an AXP2101; a long press restarts the device in PMIC hardware and
-//     never reaches us.
-// Voice is gesture-driven (touch.c); neither key touches it.
-#define BOOT_LONG_PRESS_MS 800
+//     never reaches us. On the battery it is the only way to wake the dial (D1): the AXP2101 latches the press, so the
+//     250 ms poll of the sleeping chip (PP_PWR_POLL_MS) cannot miss it.
 
 static void screen_toggle(const char *why)
 {
@@ -45,9 +50,8 @@ static void ptt_task(void *arg)
         .pull_up_en = GPIO_PULLUP_ENABLE,
     };
     gpio_config(&bcfg);
-    int boot_prev = 1;       // released (active-low: 1 = up, 0 = pressed)
-    int64_t press_start_us = 0;
-    bool long_fired = false, boot_ignored = false;
+    bk_t boot_key;
+    bk_init(&boot_key, gpio_get_level(BSP_BOOT_BUTTON) == 0);   // held through power-on: ignored until released
     const bool pwr_key = board()->has_pmic;
     battery_poll_t battery_poll = {0};
 
@@ -61,24 +65,26 @@ static void ptt_task(void *arg)
         power_sleep_poll();   // battery sleep policy (DEVICE_BATTERY_SLEEP; a no-op otherwise)
         if (pwr_key && power_take_pwrkey_tap()) screen_toggle("PWR tap");
 
-        int boot_now = gpio_get_level(BSP_BOOT_BUTTON);
-        if (boot_prev == 1 && boot_now == 0) {                 // fresh press
-            // D1, "PWR only": on the battery with the screen off, BOOT neither wakes the dial nor does anything else (the press is
-            // ignored whole, including its hold).
-            boot_ignored = !power_sleep_input_allowed();
-            if (!boot_ignored) {
-                if (display_is_asleep()) { display_lock(); display_wake(); display_unlock(); }
-                ESP_LOGI(TAG, "BOOT press → back / stop turn");
-                ui_boot_pressed();
-            }
-            press_start_us = esp_timer_get_time();
-            long_fired = false;
-        } else if (boot_now == 0 && !long_fired && !boot_ignored
-                   && esp_timer_get_time() - press_start_us >= (int64_t)BOOT_LONG_PRESS_MS * 1000) {
-            long_fired = true;                                 // once per press
-            screen_toggle("BOOT hold");
+        const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        switch (bk_step(&boot_key, now_ms, gpio_get_level(BSP_BOOT_BUTTON) == 0, power_sleep_input_allowed(), ui_voice_can_start)) {
+        case BK_PRESS:
+            if (display_is_asleep()) { display_lock(); display_wake(); display_unlock(); }   // external power only (D1 filtered the rest)
+            break;
+        case BK_TAP:
+            ESP_LOGI(TAG, "BOOT tap → back / stop turn");
+            ui_boot_pressed();
+            break;
+        case BK_HOLD_START:
+            ESP_LOGI(TAG, "BOOT hold → record");
+            ui_voice_start();
+            break;
+        case BK_HOLD_END:
+            ESP_LOGI(TAG, "BOOT release → send");
+            break;
+        case BK_NONE:
+            break;
         }
-        boot_prev = boot_now;
+        if (bk_stop_poll(&boot_key, now_ms, ui_voice_is_recording())) ui_voice_stop();   // right after the release, or when the capture begins
 
         vTaskDelay(pdMS_TO_TICKS(power_sleep_ptt_poll_ms(POLL_MS)));   // POLL_MS; 250 ms while the chip may sleep (power_sleep.h)
     }

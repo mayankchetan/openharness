@@ -40,6 +40,7 @@ set(BOARD_SRCS
     "audio_probe.c"
     "voice_buffer.c"
     "ptt.c"
+    "boot_key.c"
     # the board
     "board/board_i2c.c"
     "board/board.c"

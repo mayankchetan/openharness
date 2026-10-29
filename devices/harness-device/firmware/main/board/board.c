@@ -80,6 +80,7 @@ const char *board_describe(void)
 
 // BOOT (GPIO0) held at power-on. Two reads a moment apart: a single sample catches the pin mid-transition
 // on a cold boot. Moved here from app_main.c when the Pro — which has no such button — joined the build.
+// This only starts the wipe countdown (boot_key.h); the settings are cleared after BK_RESET_HOLD_MS of holding.
 bool board_factory_reset_requested(void)
 {
     const gpio_config_t io = {
@@ -90,5 +91,16 @@ bool board_factory_reset_requested(void)
     gpio_config(&io);
     if (gpio_get_level(BSP_BOOT_BUTTON) != 0) return false;
     vTaskDelay(pdMS_TO_TICKS(50));
+    return gpio_get_level(BSP_BOOT_BUTTON) == 0;
+}
+
+bool board_boot_down(void)
+{
+    const gpio_config_t io = {
+        .pin_bit_mask = 1ULL << BSP_BOOT_BUTTON,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+    };
+    gpio_config(&io);
     return gpio_get_level(BSP_BOOT_BUTTON) == 0;
 }
