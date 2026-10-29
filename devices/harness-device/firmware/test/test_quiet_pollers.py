@@ -47,7 +47,7 @@ checked.append('render 1000 ms')
 guard = re.search(r'#ifdef DEVICE_BATTERY_SLEEP\n(?:[^\n]*\n)*?void display_render_guard\(bool run\)\n\{(.*?)\n\}\n#endif', render, re.S)
 assert guard, 'display_render_guard is compiled only with the flag'
 assert 'esp_timer_stop(render_guard)' in guard[1] and 'esp_timer_start_periodic(render_guard, 1000000)' in guard[1]
-assert re.search(r'#ifdef DEVICE_BATTERY_SLEEP\n(?:[^\n]*\n)*?void display_render_guard\(bool run\);\n#endif', read('ui/display.h'))
+assert re.search(r'#ifdef DEVICE_BATTERY_SLEEP\n(?:[^\n]*\n)*?void display_render_guard\(bool run\);\n(?:[^\n]*\n)*?#endif', read('ui/display.h'))
 
 # --- cable_link reader: 100 ms ---
 link = read('cable_link.c')

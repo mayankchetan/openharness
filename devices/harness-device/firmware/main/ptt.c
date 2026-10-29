@@ -58,6 +58,7 @@ static void ptt_task(void *arg)
             battery_set(power_battery_pct(), power_charge_state());
             battery_set_mv(power_battery_mv());
         }
+        power_sleep_poll();   // battery sleep policy (DEVICE_BATTERY_SLEEP; a no-op otherwise)
         if (pwr_key && power_take_pwrkey_tap()) screen_toggle("PWR tap");
 
         int boot_now = gpio_get_level(BSP_BOOT_BUTTON);

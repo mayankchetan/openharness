@@ -90,6 +90,9 @@ static int64_t input_us;
 static portMUX_TYPE stats_lock = portMUX_INITIALIZER_UNLOCKED;
 static habitat_perf_t stats;
 static void (*power_cb)(bool);
+#ifdef DEVICE_BATTERY_SLEEP
+static void (*sleep_cb)(bool);   // the sleep policy's hook (display_set_sleep_cb); called before power_cb on a wake
+#endif
 // Watch actual renderer progress independently of the USB and touch tasks.
 // A blocked panel call must not leave a responsive host controlling a frozen screen.
 enum { RENDER_MODEL, RENDER_POWER, RENDER_DAMAGE, RENDER_RASTER, RENDER_DMA,
@@ -279,6 +282,9 @@ void display_unlock(void)
 }
 bool display_is_asleep(void) { return atomic_load(&asleep); }
 void display_set_power_cb(void (*cb)(bool)) { power_cb = cb; }
+#ifdef DEVICE_BATTERY_SLEEP
+void display_set_sleep_cb(void (*cb)(bool)) { sleep_cb = cb; }
+#endif
 void display_bump_activity(void) { atomic_store(&last_activity, now_ms()); }
 void display_sleep(void)
 {
@@ -286,6 +292,10 @@ void display_sleep(void)
         return;
 #ifdef DEVICE_SLEEP_PROFILE
     s_slp.sleep_us = esp_timer_get_time();
+#endif
+#ifdef DEVICE_BATTERY_SLEEP
+    if (sleep_cb)
+        sleep_cb(false);
 #endif
     if (power_cb)
         power_cb(false);
@@ -300,6 +310,10 @@ void display_wake(void)
 #endif
     display_bump_activity();
     atomic_store(&force_frame, true);
+#ifdef DEVICE_BATTERY_SLEEP
+    if (sleep_cb)
+        sleep_cb(true);
+#endif
     if (power_cb)
         power_cb(true);
     habitat_render_notify();
@@ -502,6 +516,9 @@ static void render_task(void *arg)
     unsigned applied_brightness = 101;
     for (;;) {
         ESP_ERROR_CHECK(esp_task_wdt_reset());
+#ifdef DEVICE_BATTERY_SLEEP
+        power_sleep_render_service();   // the sleep policy's actions that belong on this task (power_sleep.c)
+#endif
 #ifdef DEVICE_RENDER_FAULT
         render_fault_once();
 #endif

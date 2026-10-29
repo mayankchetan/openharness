@@ -1,15 +1,35 @@
 // BATTERY SLEEP, the ESP-IDF half. See power_sleep.h and briefs/research/2026-10-29-battery-sleep-plan.md.
+//
+// Who does what (the plan's section 3.1):
+//   ptt task      power_sleep_poll(): reads the inputs (a fresh PMIC read every 2 s when it matters), steps the policy
+//                 (power_policy.c) and writes the state it wants. Takes the awake lock back at once when the dial must stay up.
+//   render task   power_sleep_render_service(): applies that state. It has an internal stack and the cache-safe context the
+//                 power-management calls want (ptt's stack is in PSRAM), and it is the task that owns the panel.
+//   any task      on_screen(): the screen woke. Takes the awake lock back before anything else.
+//
+// The awake lock "dial_awake" (ESP_PM_NO_LIGHT_SLEEP) is held in S0 and S1 and released only in S2. Its hold is a binary
+// ownership (s_lock_held), so the three places that may take it back (ptt, the screen hook, the render service) cannot count it twice.
 #include "power_sleep.h"
 
-#include "power_policy.h"
+#include "audio_capture.h"
+#include "audio_client.h"
+#include "battery.h"
 #include "board/board.h"
+#include "board/power.h"
 #include "board/sleep_pins.h"
+#include "cable_client.h"
 #include "driver/gpio.h"
+#include "driver/usb_serial_jtag.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_pm.h"
 #include "esp_sleep.h"
+#include "esp_timer.h"
+#include "fw_update.h"
+#include "power_policy.h"
 #include "sdkconfig.h"
+#include "ui/display.h"
+#include "ui/habitat/runtime.h"
 #include <stdatomic.h>
 
 #if !CONFIG_PM_ENABLE || !CONFIG_FREERTOS_USE_TICKLESS_IDLE
@@ -18,8 +38,19 @@
 
 static const char *TAG = "pm";
 
+// 1: the S0 to S1 step also turns automatic light sleep on (retention RAM, about 13.4 KB); 0: frequency scaling only (plan stage A1).
+#define POWER_SLEEP_LIGHT 0
+
 static esp_pm_lock_handle_t s_awake;   // ESP_PM_NO_LIGHT_SLEEP: held in S0 and S1, released in S2
+static atomic_bool s_lock_held;        // who owns the lock right now: flipped by exchange, so one acquire pairs with one release
 static atomic_bool s_relaxed;          // the pollers run at their S2 rates (set when S2 is entered, cleared the moment it is left)
+static atomic_bool s_in_s2;            // S2 is applied (render task) or being applied: the screen hook takes the lock back while this is set
+static atomic_int  s_want;             // the policy's state (pp_state_t), written by the ptt task
+static atomic_uint s_link_holds;       // PP_HOLD_LINK and friends, set by transports through power_sleep_hold()
+static pp_t        s_pp;               // the policy; the ptt task only
+static pp_state_t  s_applied;          // what the render task has applied
+static bool        s_pm_battery;       // power management is configured for battery (frequency scaling, maybe light sleep)
+static bool        s_audio_idle;       // the I2S channels are stopped (audio_capture_idle)
 
 static int resolve_gpio(int gpio)
 {
@@ -42,18 +73,14 @@ static void keep_output_pads(void)
     ESP_LOGI(TAG, "%d output pads keep their level in sleep", kept);
 }
 
-void power_sleep_init(void)
+// ── the awake lock ──────────────────────────────────────────────────────────────────────────────────
+
+static void lock_acquire_once(void)
 {
-    keep_output_pads();
-    esp_err_t e = esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "dial_awake", &s_awake);
-    if (e != ESP_OK) {
-        ESP_LOGE(TAG, "dial_awake lock create failed (%s): the policy stays in S0", esp_err_to_name(e));
-        s_awake = NULL;
-        return;
-    }
-    esp_pm_lock_acquire(s_awake);   // nothing sleeps until the policy lets go of it
-    ESP_LOGI(TAG, "battery sleep built in; policy S0 (awake lock held)");
+    if (s_awake && !atomic_exchange(&s_lock_held, true)) esp_pm_lock_acquire(s_awake);
 }
+
+// ── power management for battery (frequency scaling, and light sleep once the retention RAM is there) ──
 
 bool power_sleep_pm_enter_battery(bool light)
 {
@@ -88,6 +115,153 @@ void power_sleep_pm_leave_battery(void)
     const esp_err_t e = esp_pm_configure(&cfg);
     if (e != ESP_OK) ESP_LOGE(TAG, "esp_pm_configure(240/240) failed: %s", esp_err_to_name(e));
 }
+
+// ── init ────────────────────────────────────────────────────────────────────────────────────────────
+
+static void on_screen(bool on);
+
+void power_sleep_init(void)
+{
+    keep_output_pads();
+    pp_init(&s_pp);
+    atomic_store(&s_want, PP_S0);
+    s_applied = PP_S0;
+    esp_err_t e = esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "dial_awake", &s_awake);
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "dial_awake lock create failed (%s): the policy stays in S0", esp_err_to_name(e));
+        s_awake = NULL;
+        return;
+    }
+    lock_acquire_once();   // nothing sleeps until the policy lets go of it
+    display_set_sleep_cb(on_screen);
+    ESP_LOGI(TAG, "battery sleep built in; policy S0 (awake lock held)");
+}
+
+// ── the ptt task ────────────────────────────────────────────────────────────────────────────────────
+
+static bool board_capable(void) { return board()->has_pmic && board()->touch == TOUCH_CST9217; }
+
+static uint32_t holds_now(void)
+{
+    uint32_t holds = atomic_load_explicit(&s_link_holds, memory_order_relaxed);
+    if (audio_client_active()) holds |= PP_HOLD_VOICE;
+#ifndef DEVICE_NO_OTA
+    if (fw_update_active()) holds |= PP_HOLD_FWUPDATE;
+#endif
+    if (cable_client_is_connected()) holds |= PP_HOLD_SESSION;
+    return holds;
+}
+
+void power_sleep_hold(uint32_t bits) { atomic_fetch_or(&s_link_holds, bits); }
+void power_sleep_release(uint32_t bits) { atomic_fetch_and(&s_link_holds, ~bits); }
+
+void power_sleep_poll(void)
+{
+    if (!s_awake) return;   // the lock could not be made: stay in S0
+    pp_in_t in = {
+        .now_ms = (uint32_t)(esp_timer_get_time() / 1000),
+        .chg = battery_chg(),
+        .chg_fresh = false,
+        .capable = board_capable(),
+        .sof = usb_serial_jtag_is_connected(),
+        .screen_asleep = display_is_asleep(),
+        .holds = holds_now(),
+    };
+    if (pp_wants_read(&s_pp, &in)) {
+        in.chg = power_charge_state();
+        in.chg_fresh = true;
+        battery_set(battery_pct_raw(), in.chg);   // the 30 s cache follows what was just read: alive line, hello frame, battery log
+    }
+    pp_out_t out;
+    pp_step(&s_pp, &in, &out);
+    if (out.action == PP_ACT_NONE) return;
+
+    ESP_LOGI(TAG, "%s -> %s (chg=%d sof=%d asleep=%d holds=0x%x) int_free=%u largest=%u", pp_state_name(out.from),
+             pp_state_name(out.state), in.chg, (int)in.sof, (int)in.screen_asleep, (unsigned)in.holds,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    atomic_store(&s_want, out.state);
+    if (out.action == PP_ACT_LEAVE_S2 || out.action == PP_ACT_ENTER_S0) {
+        // The dial must stay up (the screen woke, work started, or external power came back): take the lock back and stop
+        // relaxing the pollers now, on this task. The render task undoes the rest on its next loop.
+        lock_acquire_once();
+        atomic_store(&s_relaxed, false);
+    }
+    habitat_render_notify();
+}
+
+// ── the screen hook (any task) ──────────────────────────────────────────────────────────────────────
+
+static void on_screen(bool on)
+{
+    // The screen woke while the chip was allowed to sleep: take the awake lock back before anything else, so the chip does not go
+    // back to sleep under a finger. The render task restores the rest when it sees the screen on.
+    if (on && atomic_load(&s_in_s2)) {
+        lock_acquire_once();
+        atomic_store(&s_relaxed, false);
+    }
+}
+
+// ── the render task ─────────────────────────────────────────────────────────────────────────────────
+
+static void enter_battery(void)
+{
+    ESP_LOGI(TAG, "battery: int_free=%u largest=%u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    power_sleep_pm_enter_battery(POWER_SLEEP_LIGHT);
+    s_pm_battery = true;
+}
+
+static void leave_battery(void)
+{
+    if (s_pm_battery) power_sleep_pm_leave_battery();
+    s_pm_battery = false;
+}
+
+static void enter_s2(void)
+{
+    atomic_store(&s_in_s2, true);                // from here the screen hook takes the lock back on a wake
+    s_audio_idle = audio_capture_idle(true);     // the I2S clocks stop; refused (and retried) while a beep plays
+    display_render_guard(false);                 // the 1 s stall-guard timer would cap every sleep at one second
+    atomic_store(&s_relaxed, true);              // the pollers go to their S2 rates
+}
+
+static void exit_s2(void)
+{
+    lock_acquire_once();                         // idempotent: the ptt task or the screen hook may have done it
+    atomic_store(&s_relaxed, false);
+    if (s_audio_idle) audio_capture_idle(false);
+    s_audio_idle = false;
+    display_render_guard(true);
+    atomic_store(&s_in_s2, false);
+}
+
+void power_sleep_render_service(void)
+{
+    const pp_state_t want = (pp_state_t)atomic_load(&s_want);
+    pp_state_t have = s_applied;
+    if (want == have && have != PP_S2) return;
+    if (have == PP_S2 && (want != PP_S2 || !display_is_asleep())) {
+        exit_s2();
+        have = PP_S1;
+    }
+    if (want == PP_S0 && have != PP_S0) {
+        leave_battery();
+        have = PP_S0;
+    } else if (want != PP_S0 && have == PP_S0) {
+        enter_battery();
+        have = PP_S1;
+    }
+    if (have == PP_S1 && want == PP_S2 && display_is_asleep()) {
+        enter_s2();
+        have = PP_S2;
+    } else if (have == PP_S2 && !s_audio_idle) {
+        s_audio_idle = audio_capture_idle(true);   // a beep was playing when S2 began: try again
+    }
+    if (have != s_applied) ESP_LOGI(TAG, "applied %s -> %s", pp_state_name(s_applied), pp_state_name(have));
+    s_applied = have;
+}
+
+// ── the pollers ─────────────────────────────────────────────────────────────────────────────────────
 
 uint32_t power_sleep_wait_ms(pp_poller_t who, uint32_t awake_ms)
 {

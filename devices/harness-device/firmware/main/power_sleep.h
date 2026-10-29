@@ -12,6 +12,19 @@
 // app_main (after board_detect()).
 void power_sleep_init(void);
 
+// The ptt task calls this every loop: it reads the inputs (battery state, USB host, screen, work in flight), steps the policy
+// (power_policy.c) and writes the state it wants. It never calls a power-management function that needs more than a lock.
+void power_sleep_poll(void);
+
+// The render task calls this at the top of every loop. It applies what power_sleep_poll() decided: power management on and off
+// for the battery, and the S2 steps (I2S clocks, the stall-guard timer, the relaxed pollers).
+void power_sleep_render_service(void);
+
+// Work in flight that keeps the chip awake (PP_HOLD_* in power_policy.h). The policy itself reads the voice turn, the firmware
+// update and the cable session; a transport with traffic of its own (a later Wi-Fi or BLE mode) holds PP_HOLD_LINK here.
+void power_sleep_hold(uint32_t bits);
+void power_sleep_release(uint32_t bits);
+
 // Battery entry and exit (the render task calls these; see power_sleep_render_service()). enter: power management with
 // frequency scaling 240/80 MHz; with `light` also automatic light sleep, once the CPU/cache retention RAM (about 13.4 KB) is
 // allocated. False when the retention RAM is missing: the dial then runs on frequency scaling only. leave: back to the fixed
@@ -29,6 +42,10 @@ bool power_sleep_relaxed(void);
 #else
 
 static inline void power_sleep_init(void) {}
+static inline void power_sleep_poll(void) {}
+static inline void power_sleep_render_service(void) {}
+static inline void power_sleep_hold(uint32_t bits) { (void)bits; }
+static inline void power_sleep_release(uint32_t bits) { (void)bits; }
 static inline uint32_t power_sleep_wait_ms(pp_poller_t who, uint32_t awake_ms) { (void)who; return awake_ms; }
 static inline uint32_t power_sleep_ptt_poll_ms(uint32_t awake_ms) { return awake_ms; }
 static inline bool power_sleep_relaxed(void) { return false; }
