@@ -64,8 +64,8 @@ static void run(void)
     log_boot();
     ESP_LOGI(TAG, "SLP START cycles=%d: sleep (display_sleep under the display lock, as the idle timer and the PWR key), "
              "hold %d ms, wake by an injected tap through the touch task, wait for the first full frame", CYCLES, HOLD_ASLEEP_MS);
-    static uint32_t wake[WINDOW], sleep_[WINDOW];
-    int in_window = 0, first_free = 0, first_largest = 0, last_free = 0, last_largest = 0, window_first = 1, failures = 0, consecutive = 0;
+    static int32_t wake[WINDOW], sleep_[WINDOW];   // signed microseconds
+    int in_window = 0, first_free = 0, first_largest = 0, last_free = 0, last_largest = 0, window_first = 1, failures = 0, consecutive = 0, excluded = 0, ext_total = 0;
     for (int n = 1; n <= CYCLES; n++) {
         display_slp_stamps_t before;
         display_slp_stamps(&before);
@@ -90,9 +90,17 @@ static void run(void)
         waited = 0;
         do { wait_ms(2); display_slp_stamps(&st); waited += 2000; } while (st.frame_seq == before.frame_seq && waited < STEP_TIMEOUT_MS * 1000LL);
         const bool framed = armed && st.frame_seq != before.frame_seq;
-        const uint32_t sleep_ms = off ? (uint32_t)((st.off_us - t_sleep) / 1000) : 0;
-        const uint32_t wake_ms = framed ? (uint32_t)((st.frame_us - t_wake) / 1000) : 0;
-        const uint32_t core_ms = framed ? (uint32_t)((st.frame_us - st.wake_us) / 1000) : 0;
+        // Signed microseconds. sleep: from just before the display lock to the moment the renderer's panel-off command
+        // returned (sleep_core: from display_sleep() taking effect). wake: from arming the tap (core: from display_wake()
+        // taking effect) to the first full frame painted and DMA-complete.
+        const int32_t sleep_us = off ? (int32_t)(st.off_us - t_sleep) : 0;
+        const int32_t sleep_core_us = off ? (int32_t)(st.off_us - st.sleep_us) : 0;
+        const int32_t wake_us = framed ? (int32_t)(st.frame_us - t_wake) : 0;
+        const int32_t core_us = framed ? (int32_t)(st.frame_us - st.wake_us) : 0;
+        // Something else woke the panel before our tap (a notification, the daemon, a touch): the first frame precedes the
+        // arm point, the tap landed on an awake face, and this cycle says nothing about the wake path. Flag it, leave it
+        // out of the statistics (the first run showed one as an unsigned wrap).
+        const bool external = framed && (st.wake_us < t_wake || st.frame_us < t_wake);
         if (!off || !framed) {
             failures++;
             consecutive++;
@@ -107,22 +115,26 @@ static void run(void)
         const int free_now = mem_free(), largest_now = mem_largest();
         if (n == 1) { first_free = free_now; first_largest = largest_now; }
         last_free = free_now; last_largest = largest_now;
-        ESP_LOGI(TAG, "SLP cycle=%d wake_ms=%u core_ms=%u sleep_ms=%u int_free=%d int_largest=%d psram_free=%u alloc_fail=%u", n,
-                 (unsigned)wake_ms, (unsigned)core_ms, (unsigned)sleep_ms, free_now, largest_now,
+        ESP_LOGI(TAG, "SLP cycle=%d wake_ms=%d core_ms=%d sleep_ms=%d wake_us=%d core_us=%d sleep_us=%d sleep_core_us=%d "
+                 "ext_wake=%d int_free=%d int_largest=%d psram_free=%u alloc_fail=%u", n,
+                 (int)(wake_us / 1000), (int)(core_us / 1000), (int)(sleep_us / 1000), (int)wake_us, (int)core_us, (int)sleep_us,
+                 (int)sleep_core_us, (int)external, free_now, largest_now,
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), (unsigned)ram_telemetry_alloc_fail_count());
-        if (off && framed) { wake[in_window] = wake_ms; sleep_[in_window] = sleep_ms; in_window++; }
+        if (external) { excluded++; ext_total++; }
+        else if (off && framed) { wake[in_window] = wake_us; sleep_[in_window] = sleep_us; in_window++; }
         if (n % WINDOW == 0) {
             char line[300];
-            slp_format_summary(line, sizeof line, window_first, n, wake, sleep_, in_window, free_now, first_free, largest_now,
+            slp_format_summary(line, sizeof line, window_first, n, wake, sleep_, in_window, excluded, free_now, first_free, largest_now,
                                (int)ram_telemetry_alloc_fail_count());
             ESP_LOGI(TAG, "%s", line);
             in_window = 0;
+            excluded = 0;
             window_first = n + 1;
             ram_telemetry_alloc_fail_flush();
         }
     }
-    ESP_LOGI(TAG, "SLP DONE cycles=%d failures=%d int_free_first=%d int_free_last=%d largest_first=%d largest_last=%d", CYCLES,
-             failures, first_free, last_free, first_largest, last_largest);
+    ESP_LOGI(TAG, "SLP DONE cycles=%d failures=%d ext_wakes=%d int_free_first=%d int_free_last=%d largest_first=%d largest_last=%d", CYCLES,
+             failures, ext_total, first_free, last_free, first_largest, last_largest);
 }
 
 static void task(void *arg)
