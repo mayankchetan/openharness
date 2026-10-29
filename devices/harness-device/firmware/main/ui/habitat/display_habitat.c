@@ -614,6 +614,13 @@ static void render_task(void *arg)
 #ifdef DEVICE_SLEEP_PROFILE
             if (force) { s_slp.frame_us = esp_timer_get_time(); s_slp.frame_seq++; }   // the full repaint after a wake is on the glass
 #endif
+#ifdef DEVICE_BATTERY_SLEEP
+            if (force) {   // the full repaint after a wake is on the glass: how long since the touch interrupt woke the chip?
+                const int64_t isr_us = touch_sleep_take_isr_us();
+                if (isr_us)
+                    ESP_LOGI("habitat", "wake isr to frame %lld us", (long long)(esp_timer_get_time() - isr_us));
+            }
+#endif
 #ifdef DEVICE_OCTOPUS_BENCH
             octopus_perf_commit(tag, damage.pixels * 2, model_us, damage_us);
 #endif

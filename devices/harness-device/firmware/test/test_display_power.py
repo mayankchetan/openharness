@@ -77,6 +77,8 @@ static pp_state_t fake_state = PP_S0;   /* the policy state behind the screen le
 static unsigned services, service_at_tick;
 static atomic_bool screen_dimmed;   /* the production file's flag: display_bump_activity brightens a dimmed screen at once */
 pp_screen_t power_sleep_screen_level(uint32_t idle_ms) { return pp_screen_level(fake_state, idle_ms); }
+static unsigned isr_takes;
+static int64_t touch_sleep_take_isr_us(void) { isr_takes++; return 0; }   /* no touch interrupt in this replay: no log line */
 static void (*sleep_cb)(bool);   /* display_set_sleep_cb's slot, called by display_sleep / display_wake; empty here */
 void power_sleep_render_service(void) { services++; service_at_tick = ticks; }
 uint32_t power_sleep_wait_ms(pp_poller_t who, uint32_t awake_ms) {

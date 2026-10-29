@@ -69,6 +69,8 @@ static esp_err_t esp_sleep_enable_gpio_wakeup(void) { e("GPWAKE+"); return 0; }
 static esp_err_t esp_sleep_disable_wakeup_source(int s) { assert(s == ESP_SLEEP_WAKEUP_GPIO); e("GPWAKE-"); return 0; }
 static esp_err_t gpio_wakeup_enable(gpio_num_t g, int t);
 static esp_err_t gpio_wakeup_disable(gpio_num_t g) { assert(g == 11); e("WDIS"); return 0; }
+static int64_t fake_now_us = 777000;
+static int64_t esp_timer_get_time(void) { return fake_now_us; }
 
 ''' + body + irq + r'''
 static esp_err_t gpio_wakeup_enable(gpio_num_t g, int t) {
@@ -91,9 +93,15 @@ int main(void) {
     assert(!strcmp(ev, "WEN(flag-set) GPWAKE+ IEN "));     // the flag was already set when the pin became a level source
     assert(atomic_load(&s_level_wake) && !atomic_load(&s_irq_hit) && !atomic_load(&s_parked));
     ev[0] = 0; touch_sleep_arm(); assert(!ev[0]);          // twice is once
-    // --- the first level hit switches the interrupt off ---
+    // --- the first level hit switches the interrupt off, and stamps the time for the wake-to-frame log ---
+    assert(touch_sleep_take_isr_us() == 0);
     touch_irq(NULL);
     assert(!strcmp(ev, "IDIS ") && atomic_load(&s_irq_hit) && notifies == 1);
+    fake_now_us = 779000; touch_irq(NULL);                  // a second hit keeps the first stamp
+    assert(touch_sleep_take_isr_us() == 777000 && touch_sleep_take_isr_us() == 0);
+    atomic_store(&s_isr_us, 5); touch_sleep_disarm(); touch_sleep_arm();
+    assert(touch_sleep_take_isr_us() == 0);                 // arming forgets an old stamp
+    touch_irq(NULL); ev[0] = 0;                              // the state after a first hit again
     // --- a sample without a contact: three more reads 5 ms apart, then the interrupt goes back on ---
     ev[0] = 0; delays_ms = 0;
     assert(touch_sleep_unconfirmed() && touch_sleep_unconfirmed() && touch_sleep_unconfirmed());

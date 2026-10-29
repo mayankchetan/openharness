@@ -43,13 +43,20 @@ static atomic_bool s_level_wake;     // armed as the wake source (set for S2)
 static atomic_bool s_irq_hit;        // touch_irq switched the interrupt off since the last re-arm
 static atomic_bool s_parked;         // armed, but the wake and the interrupt are off because INT would not go high
 static atomic_uint s_unconfirmed;    // re-reads since the last hit
+static atomic_llong s_isr_us;        // esp_timer time of the first hit since the last frame (0 = none): the start of the wake-to-glass time
 static SemaphoreHandle_t s_pin_lock; // arm, disarm and re-arm never interleave
 static inline void touch_sleep_irq(void)
 {
     if (atomic_load_explicit(&s_level_wake, memory_order_relaxed)) {
         gpio_intr_disable(BSP_TOUCH_INT);
         atomic_store_explicit(&s_irq_hit, true, memory_order_relaxed);
+        if (!atomic_load_explicit(&s_isr_us, memory_order_relaxed))
+            atomic_store_explicit(&s_isr_us, (long long)esp_timer_get_time(), memory_order_relaxed);
     }
+}
+int64_t touch_sleep_take_isr_us(void)
+{
+    return (int64_t)atomic_exchange(&s_isr_us, 0);
 }
 static void touch_pin_arm(void)
 {
@@ -66,6 +73,7 @@ void touch_sleep_arm(void)
         atomic_store(&s_irq_hit, false);
         atomic_store(&s_parked, false);
         atomic_store(&s_unconfirmed, 0);
+        atomic_store(&s_isr_us, 0);
         atomic_store(&s_level_wake, true);   // 1: from here the ISR switches the interrupt off on its first hit
         touch_pin_arm();                     // 2: level wake
     }

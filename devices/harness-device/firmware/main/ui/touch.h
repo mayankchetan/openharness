@@ -31,6 +31,9 @@ void touch_stats(touch_stats_t *out);
 // without the CST9217. The wake runs the driver's own interrupt handler; no second one is installed.
 void touch_sleep_arm(void);
 void touch_sleep_disarm(void);
+// The esp_timer time of the first level interrupt since the last call (0: none, e.g. a PWR-key wake). The render task takes it when the
+// full repaint after a wake is on the glass and logs the interrupt-to-frame time (gate G6 of the plan: 99 percent at most 60 ms).
+int64_t touch_sleep_take_isr_us(void);
 #endif
 
 #ifdef HARNESS_DEBUG_COMMANDS
