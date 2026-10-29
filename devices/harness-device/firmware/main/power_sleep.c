@@ -2,6 +2,9 @@
 #include "power_sleep.h"
 
 #include "power_policy.h"
+#include "board/board.h"
+#include "board/sleep_pins.h"
+#include "driver/gpio.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_pm.h"
@@ -16,8 +19,30 @@ static const char *TAG = "pm";
 
 static esp_pm_lock_handle_t s_awake;   // ESP_PM_NO_LIGHT_SLEEP: held in S0 and S1, released in S2
 
+static int resolve_gpio(int gpio)
+{
+    if (gpio == SLEEP_PIN_LCD_RST) return board()->lcd_rst;
+    if (gpio == SLEEP_PIN_TOUCH_RST) return board()->touch_rst;
+    return gpio;
+}
+
+// Every output the panel and the amplifier depend on keeps its awake level through light sleep (sleep_pins.h says which).
+// Done once; gpio_sleep_sel_dis() only matters while the chip sleeps, so it changes nothing while awake.
+static void keep_output_pads(void)
+{
+    int kept = 0;
+    for (int i = 0; i < SLEEP_PIN_COUNT; i++) {
+        if (SLEEP_PINS[i].light != SLEEP_LIGHT_KEEP) continue;
+        const int gpio = resolve_gpio(SLEEP_PINS[i].gpio);
+        if (gpio < 0) continue;
+        if (gpio_sleep_sel_dis((gpio_num_t)gpio) == ESP_OK) kept++;
+    }
+    ESP_LOGI(TAG, "%d output pads keep their level in sleep", kept);
+}
+
 void power_sleep_init(void)
 {
+    keep_output_pads();
     esp_err_t e = esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "dial_awake", &s_awake);
     if (e != ESP_OK) {
         ESP_LOGE(TAG, "dial_awake lock create failed (%s): the policy stays in S0", esp_err_to_name(e));
