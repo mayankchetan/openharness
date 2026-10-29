@@ -134,6 +134,15 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -DDEVICE_UI_METRICS=1 -fsanitize="${SAN
    -I "$here/host_stubs" -I "$here/../main/ui/habitat" -o "$out/test_uim" "$here/test_uim.c" \
    "$here/../main/ui/habitat/uim.c" "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" -lm
 "$out/test_uim"
+# The same two as the default image builds them (Focus only: HT_RUNS 28, HT_CELL_COLS_MAX 272).
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -DDEVICE_UI_METRICS=1 -DHABITAT_FOCUS_ONLY=1 -fsanitize="${SANITIZERS:-undefined,bounds}" \
+   -I "$here/../main/ui/habitat" -o "$out/test_terminal_metrics_focus" "$here/test_terminal_metrics.c" \
+   "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" -lm
+"$out/test_terminal_metrics_focus"
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -DDEVICE_UI_METRICS=1 -DHABITAT_FOCUS_ONLY=1 -fsanitize="${SANITIZERS:-undefined,bounds}" \
+   -I "$here/host_stubs" -I "$here/../main/ui/habitat" -o "$out/test_uim_focus" "$here/test_uim.c" \
+   "$here/../main/ui/habitat/uim.c" "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" -lm
+"$out/test_uim_focus"
 # The battery cache and its 30 s schedule, the NVS sample ring (against memory), and the alive line's width.
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" -o "$out/test_battery" \
    "$here/test_battery.c" "$here/../main/battery.c"
@@ -264,6 +273,8 @@ python3 "$here/test_render_guard.py"
 python3 "$here/test_render_data_psram.py"
 # Which tasks have a PSRAM stack (task_create_psram under its TASK_STACK_PSRAM_* macro) and which keep an internal one.
 python3 "$here/test_psram_task_sites.py"
+# HT_RUNS / HT_CELL_COLS_MAX right-sized from the gallery tour, against the built-in sprite frames and the pet packs.
+python3 "$here/test_render_limits.py"
 python3 "$here/test_display_power.py"
 python3 "$here/test_machine_ui.py"
 python3 "$here/test_reload_threads.py"

@@ -144,6 +144,23 @@ int main(void)
     assert(line_count == mark + 2 && !strncmp(lines[mark + 1], "UIM view=reader_p1 n=1 ", 23));
     assert(field(lines[mark + 1], "arc0_mask_max") == 0 && field(lines[mark + 1], "raster_max_us") == 100);
 
+    // Runs the builders refused are counted per view. The model builds the scene first and calls uim_scene() after it,
+    // so the refusals belong to the view of that new scene, not to the view it replaces. The next view starts at zero.
+    int omark = line_count;
+    uim_item_begin("overflow");
+    ht_scene_t full;
+    ht_scene_clear(&full, 0);
+    for (int i = 0; i < HT_RUNS + 2; i++) ht_box(&full, 0, i, 10, 1, 0, 0xffff, 0);   // the last two do not fit
+    uim_scene("home", &full);
+    uim_paint(1, 1);
+    uim_item_end();
+    assert(line_count == omark + 1 && field(lines[omark], "runs_drop") == 2 && field(lines[omark], "runs_max") == HT_RUNS);
+    uim_item_begin("fits");
+    uim_scene("home", &home);
+    uim_paint(1, 1);
+    uim_item_end();
+    assert(line_count == omark + 2 && field(lines[omark + 1], "runs_drop") == 0);
+
     // The 512 B limit (cable_link.c): the longest record the formatter can make.
     uim_record_t big;
     memset(&big, 0xff, sizeof big);

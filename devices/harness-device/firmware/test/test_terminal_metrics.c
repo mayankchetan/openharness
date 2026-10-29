@@ -17,6 +17,7 @@ int main(void)
     ht_metrics_t m;
     ht_metrics_take(&m);   // start from zero
     assert(m.arc_cap == 9216 && !m.arc_mask_max[0] && !m.arc_mask_max[1] && !m.cols_max && !m.glyph_hits && !m.glyph_miss);
+    assert(!m.runs_dropped);
 
     // Small-ASCII text in a cacheable font: the first raster builds glyphs (misses), the second finds them (hits).
     // A 20 px mono run is not cacheable and counts nothing.
@@ -76,6 +77,39 @@ int main(void)
     ht_metrics_take(&m);
     assert(m.cols_max == 60);
 
-    puts("terminal metrics: glyph hits and misses, upper/lower arc masks (scene scan and raster), sprite columns, take clears PASS");
+    // RUNS REFUSED. A run that does not fit is dropped silently (the builder returns false and the screen just lacks
+    // it), so each refusal is counted: a full scene, for every builder, and a sprite wider than the unpack row.
+    // Filling the scene exactly refuses nothing.
+    ht_scene_clear(&s, 0);
+    for (int i = 0; i < HT_RUNS; i++) assert(ht_box(&s, 0, i, 10, 1, 0, 0xffff, 0));
+    assert(s.count == HT_RUNS);
+    ht_metrics_take(&m);
+    assert(m.runs_dropped == 0);
+    static const uint16_t icon_px[1] = {0};
+    static const uint8_t icon_a[1] = {255};
+    static const ht_icon_t icon = {1, 1, icon_px, icon_a};
+    assert(!ht_text(&s, 0, 0, 100, &ht_mono_20, 0xffff, 0, "x"));
+    assert(!ht_ascii_text(&s, 0, 0, 100, &ht_mono_20, 0xffff, 0, "x", 1));
+    assert(!ht_icon(&s, 0, 0, &icon));
+    assert(!ht_cell_sprite(&s, 0, 0, &narrow));
+    assert(!ht_box(&s, 0, 0, 10, 1, 0, 0xffff, 0));
+    assert(!ht_ring_arc(&s, 0, 0, 16 * 100, 16 * 4, 90, 30, 0xffff));
+    assert(s.count == HT_RUNS);   // nothing was added
+    ht_metrics_take(&m);
+    assert(m.runs_dropped == 6);
+    ht_metrics_take(&m);
+    assert(m.runs_dropped == 0);   // take clears
+    ht_scene_clear(&s, 0);
+    ht_cell_frame_t too_wide = {HT_CELL_COLS_MAX + 1, 1, 1, pal, cells, NULL};
+    assert(!ht_cell_sprite(&s, 0, 0, &too_wide) && s.count == 0);
+    ht_metrics_take(&m);
+    assert(m.runs_dropped == 1);
+    too_wide.cols = HT_CELL_COLS_MAX;
+    ht_metrics_take(&m);
+    assert(ht_cell_sprite(&s, 0, 0, &too_wide));   // exactly the limit is accepted (the builder does not read the cells)
+    ht_metrics_take(&m);
+    assert(m.runs_dropped == 0);
+
+    puts("terminal metrics: glyph hits and misses, upper/lower arc masks (scene scan and raster), sprite columns, refused runs, take clears PASS");
     return 0;
 }

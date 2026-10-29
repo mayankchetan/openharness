@@ -26,7 +26,26 @@
 // and not about a number.
 #define HT_WIDTH 466
 #define HT_HEIGHT 466
+// RIGHT-SIZED LIMITS. The UI gallery tour (112 items on both dials, diet2-r1-results.md section 5) used at most 26 runs in
+// one scene (the inbox pages; the next screen uses 14) and unpacked at most 259 columns of a sprite row (the widest
+// built-in frame, pets.c). 28 runs and 272 columns keep a little margin: 5,952 B less scene (2 x 12 x 248) and 208 B less
+// sprite scratch. A run that does not fit is dropped silently, so DEVICE_UI_METRICS counts them (ht_metrics_t.runs_dropped).
+// ON by default in a Focus-only build (HABITAT_FOCUS_ONLY, the default image), the only build the tour measured. The
+// companion skins (tim, tux, octopus, the command faces) are not built there and draw more than 28 runs per scene
+// (test_octopus, test_character), so a DEVICE_ALL_SKINS build and the host tests, which cover every skin, keep 40 and
+// 480. -DHT_RIGHT_SIZE=0 restores them in a Focus-only build too.
+#ifndef HT_RIGHT_SIZE
+#ifdef HABITAT_FOCUS_ONLY
+#define HT_RIGHT_SIZE 1
+#else
+#define HT_RIGHT_SIZE 0
+#endif
+#endif
+#if HT_RIGHT_SIZE
+#define HT_RUNS 28
+#else
 #define HT_RUNS 40
+#endif
 #define HT_TEXT_BYTES 128
 #define HT_DAMAGE_MAX 24
 typedef struct {
@@ -81,7 +100,7 @@ typedef struct { uint16_t w, h; const uint16_t *px; const uint8_t *a; } ht_icon_
 // indices, until the row's `cols` are covered. Unset, `cells` is the plain cols x rows grid. At most HT_CELL_COLS_MAX
 // cols (the rasters unpack a row into a buffer that wide): wider than a byte for the builder's props (259, owner
 // 2026-10-16: its sweat drop flies off left while the hammer is out right), each packed run still at most 255.
-enum { HT_CELL_COLS_MAX = 480 };
+enum { HT_CELL_COLS_MAX = HT_RIGHT_SIZE ? 272 : 480 };
 typedef struct { uint16_t cols; uint8_t rows, cell; const uint16_t *palette; const uint8_t *cells; const uint16_t *row_at; }
     ht_cell_frame_t;
 // One cell of a frame, plain or packed (0 transparent).
@@ -295,6 +314,7 @@ typedef struct {
     uint16_t arc_mask_max[2];   // largest arc mask in use: [0] upper arc, [1] lower arc
     uint16_t arc_cap;           // ARC_MASK_BYTES
     uint16_t cols_max;          // widest cell-sprite row unpacked (frame columns, buffer is HT_CELL_COLS_MAX)
+    uint32_t runs_dropped;      // runs a builder refused: no free slot (HT_RUNS) or a sprite wider than HT_CELL_COLS_MAX
     uint32_t glyph_hits, glyph_miss;   // small-ASCII glyph cache (24 slots): rasterized glyphs found / built
 } ht_metrics_t;
 // Add what the scene itself shows: the mask of each arc run whose text is the one cached, and its sprites' rows.

@@ -26,6 +26,7 @@ static void unlock(void) { pthread_mutex_unlock(&s_mutex); }
 #define PET_MALLOC(n) malloc(n)
 #endif
 #endif
+_Static_assert(UINT8_MAX <= HT_CELL_COLS_MAX, "a pet pack frame's one-byte column count must fit the renderer's sprite row");
 #ifndef EXT_RAM_BSS_ATTR
 #define EXT_RAM_BSS_ATTR   // host build: ordinary BSS
 #endif

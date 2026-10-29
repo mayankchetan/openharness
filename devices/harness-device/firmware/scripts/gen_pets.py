@@ -222,7 +222,7 @@ def pack_rows(cols, rows, grid):
     indices, until the row's cols are covered; and each row's start. Transparent runs cost two bytes, not their
     length (owner, 2026-10-06). A frame wider than 255 (the builder's widest props, 259) splits a longer run into
     pairs of at most 255."""
-    assert cols <= 480    # terminal.h HT_CELL_COLS_MAX
+    assert cols <= 272    # terminal.h HT_CELL_COLS_MAX (HT_RIGHT_SIZE)
     out, at = [], []
     for r in range(rows):
         at.append(len(out))

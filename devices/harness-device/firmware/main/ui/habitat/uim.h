@@ -33,5 +33,6 @@ typedef struct {
     char scene[20];   // the view name the renderer last built a scene for (an item names its record, this says what was drawn)
     uint32_t n, runs_max, arc_mask_max[2], glyph_hits, glyph_miss, cols_max, raster_max_us, frame_max_us;
     uint32_t stack_free_min, arc_cap;
+    uint32_t runs_drop;   // runs the builders refused in this view (scene full, or a sprite wider than the unpack row)
 } uim_record_t;
 int uim_format(char *buf, size_t size, const uim_record_t *r, const char *kind, uint32_t int_free, uint32_t int_largest);

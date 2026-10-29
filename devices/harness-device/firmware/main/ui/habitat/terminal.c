@@ -4,6 +4,20 @@
 #include "arc_geometry.inc"
 #include "display_fallbacks.inc"
 
+// A scene has HT_RUNS slots; a builder that finds none returns false and the run is lost. The refusal is counted under
+// DEVICE_UI_METRICS (ui_metrics.runs_dropped, defined with the other counters below).
+#ifdef DEVICE_UI_METRICS
+static void metric_run_dropped(void);
+#else
+#define metric_run_dropped() ((void)0)
+#endif
+static bool run_slot_missing(const ht_scene_t *s)
+{
+    if (s->count < HT_RUNS) return false;
+    metric_run_dropped();
+    return true;
+}
+
 static int imin(int a, int b) { return a < b ? a : b; }
 static int imax(int a, int b) { return a > b ? a : b; }
 /*
@@ -269,7 +283,7 @@ void ht_scene_clear(ht_scene_t *s, uint16_t bg)
 bool ht_text(ht_scene_t *s, int x, int y, int w, const ht_font_t *font, uint16_t fg, uint16_t bg,
              const char *text)
 {
-    if (s->count >= HT_RUNS || !font || !font->width || w <= 0)
+    if (run_slot_missing(s) || !font || !font->width || w <= 0)
         return false;
     ht_run_t *r = &s->runs[s->count++];
     memset(r, 0, sizeof(*r));
@@ -293,7 +307,7 @@ bool ht_text(ht_scene_t *s, int x, int y, int w, const ht_font_t *font, uint16_t
 bool ht_ascii_text(ht_scene_t *s, int x, int y, int w, const ht_font_t *font,
                    uint16_t fg, uint16_t bg, const char *text, size_t cells)
 {
-    if (s->count >= HT_RUNS || !font || !font->width || w <= 0 || (!text && cells)) return false;
+    if (run_slot_missing(s) || !font || !font->width || w <= 0 || (!text && cells)) return false;
     size_t n = (size_t)w / font->width;
     if (n > cells) n = cells;
     if (n >= HT_TEXT_BYTES) n = HT_TEXT_BYTES - 1;
@@ -522,7 +536,7 @@ int ht_fit_width(char *dst, size_t cap, const char *text, int width, const ht_fo
 }
 bool ht_icon(ht_scene_t *s, int x, int y, const ht_icon_t *icon)
 {
-    if (s->count >= HT_RUNS || !icon || !icon->w) return false;
+    if (run_slot_missing(s) || !icon || !icon->w) return false;
     ht_run_t *r = &s->runs[s->count++];
     memset(r, 0, sizeof *r);
     // Not text, but the rest of the compositor reads every run's font; it is never drawn.
@@ -533,7 +547,8 @@ bool ht_icon(ht_scene_t *s, int x, int y, const ht_icon_t *icon)
 }
 bool ht_cell_sprite(ht_scene_t *s, int x, int y, const ht_cell_frame_t *f)
 {
-    if (s->count >= HT_RUNS || !f || !f->cols || f->cols > HT_CELL_COLS_MAX || !f->rows || !f->cell) return false;
+    if (run_slot_missing(s) || !f || !f->cols || !f->rows || !f->cell) return false;
+    if (f->cols > HT_CELL_COLS_MAX) { metric_run_dropped(); return false; }
     ht_run_t *r = &s->runs[s->count++];
     memset(r, 0, sizeof *r);
     r->x = x; r->y = y; r->w = f->cols * f->cell; r->font = &ht_mono_16;
@@ -577,7 +592,7 @@ bool ht_cell_sprite_zoom(ht_scene_t *s, int x, int y, const ht_cell_frame_t *f, 
 }
 bool ht_box(ht_scene_t *s, int x, int y, int w, int h, int radius, uint16_t fill, uint16_t border)
 {
-    if (s->count >= HT_RUNS || w <= 0 || h <= 0) return false;
+    if (run_slot_missing(s) || w <= 0 || h <= 0) return false;
     ht_run_t *r = &s->runs[s->count++];
     memset(r, 0, sizeof *r);
     // A box is not text, but the rest of the compositor reads every run's font; it is never drawn.
@@ -618,7 +633,7 @@ static void ring_trig(int deg, int *cs, int *sn)
 bool ht_ring_arc(ht_scene_t *s, int cx16, int cy16, int radius16, int width16, int mid_deg, int half_deg,
                  uint16_t colour)
 {
-    if (s->count >= HT_RUNS || radius16 < 0 || width16 < 0 || width16 > 0xFFFF || radius16 > 0x7FFF ||
+    if (run_slot_missing(s) || radius16 < 0 || width16 < 0 || width16 > 0xFFFF || radius16 > 0x7FFF ||
         half_deg < 0 || cx16 < -0x7FFF || cx16 > 0x7FFF || cy16 < -0x7FFF || cy16 > 0x7FFF) return false;
     if (half_deg > 180) half_deg = 180;
     ht_run_t *r = &s->runs[s->count++];
@@ -1256,6 +1271,7 @@ static void metric_arc(unsigned index, unsigned bytes)
 {
     if (bytes > ui_metrics.arc_mask_max[index]) ui_metrics.arc_mask_max[index] = (uint16_t)bytes;
 }
+static void metric_run_dropped(void) { ui_metrics.runs_dropped++; }
 #else
 #define metric_cols(cols) ((void)0)
 #define metric_arc(index, bytes) ((void)0)
