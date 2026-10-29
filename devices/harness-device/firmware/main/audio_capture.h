@@ -36,10 +36,11 @@ void audio_capture_stop(void);
 uint32_t audio_capture_overruns(void);
 
 #ifdef DEVICE_BATTERY_SLEEP
-// Battery sleep (power_sleep.c): audio_capture_idle(true) disables the I2S receive and transmit channels, which stops MCLK, BCLK and
-// WS and releases the two APB_FREQ_MAX power-management locks the enabled channels hold, so the chip can light-sleep.
-// audio_capture_idle(false) enables TX, then RX, as at boot. A capture or a beep also starts them by itself (audio_capture_start,
-// the beep task), so a race with the wake-up cannot leave a voice turn on a stopped clock.
+// Battery sleep (power_sleep.c): audio_capture_idle(true) disables the I2S receive and transmit channels (RX, then TX), which stops MCLK,
+// BCLK and WS and releases the two APB_FREQ_MAX power-management locks the enabled channels hold, so the chip can light-sleep. The
+// channels end READY, the state esp_codec_dev_close leaves after every beep and capture, so the next capture or beep opens the codec
+// as it always does (its set_fmt reconfigures from READY and enables what it needs). audio_capture_idle(false) therefore enables
+// nothing; it only records that audio may start again.
 // idle(true) returns false and does nothing while a capture is open or requested or a beep is playing; the caller tries again later.
 // Safe to repeat. Needs audio_capture_init() to have run, otherwise it does nothing and returns true.
 bool audio_capture_idle(bool idle);
