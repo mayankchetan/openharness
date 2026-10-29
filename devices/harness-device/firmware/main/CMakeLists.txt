@@ -19,6 +19,7 @@ set(BOARD_SRCS
     "app_main.c"
     "ram_telemetry.c"
     "task_util.c"
+    "draw_buffer.c"
     "battery.c"
     "battery_ring.c"
     "config_store.c"
@@ -116,7 +117,7 @@ idf_component_register(
         "ui"
         "board"
     REQUIRES ${BOARD_REQUIRES}
-    PRIV_REQUIRES spi_flash   # esp_private/flash_mmap.h: flash_mmap_remain() in the alive line (ram_telemetry.c)
+    PRIV_REQUIRES spi_flash esp_mm   # esp_private/flash_mmap.h: flash_mmap_remain() in the alive line (ram_telemetry.c); esp_private/esp_cache_private.h: esp_cache_get_alignment() (draw_buffer.c)
     EMBED_FILES ${COMPANION_ART}
 )
 
@@ -175,7 +176,8 @@ endif()
 #   TASK_STACK_PSRAM_FLASH_OPS   habitat_actions, cable_session, voice_send stacks in PSRAM   (task_util.h)
 #   HT_RIGHT_SIZE          HT_RUNS 28 and HT_CELL_COLS_MAX 272 instead of 40 and 480; on by default in the Focus-only
 #                          build, off with DEVICE_ALL_SKINS (the skins draw more runs)   (ui/habitat/terminal.h)
-foreach(psram_switch HT_RENDER_DATA_PSRAM TASK_STACK_PSRAM_FLASH_OPS HT_RIGHT_SIZE)
+#   HT_DRAWBUF_PSRAM       1 = one of the two panel draw buffers in PSRAM, sent by DMA from there; 0 = both internal   (ui/habitat/display_habitat.c)
+foreach(psram_switch HT_RENDER_DATA_PSRAM TASK_STACK_PSRAM_FLASH_OPS HT_RIGHT_SIZE HT_DRAWBUF_PSRAM)
     if(DEFINED ${psram_switch})
         target_compile_definitions(${COMPONENT_LIB} PRIVATE ${psram_switch}=${${psram_switch}})
     endif()

@@ -275,6 +275,11 @@ python3 "$here/test_render_data_psram.py"
 python3 "$here/test_psram_task_sites.py"
 # HT_RUNS / HT_CELL_COLS_MAX right-sized from the gallery tour, against the built-in sprite frames and the pet packs.
 python3 "$here/test_render_limits.py"
+# The panel draw buffer in PSRAM: the allocation (fake IDF calls) and its wiring in display_habitat.c.
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
+   -I "$here/host_stubs" -I "$here/../main" -o "$out/test_draw_buffer" "$here/test_draw_buffer.c" "$here/../main/draw_buffer.c"
+"$out/test_draw_buffer"
+python3 "$here/test_drawbuf_psram.py"
 python3 "$here/test_display_power.py"
 python3 "$here/test_machine_ui.py"
 python3 "$here/test_reload_threads.py"

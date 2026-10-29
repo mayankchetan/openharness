@@ -13,6 +13,7 @@ void cable_transport_benchmark(void);
 #include "ui_perf.h"
 #include "audio_capture.h"
 #include "cable_link.h"
+#include "draw_buffer.h"
 #include "ram_telemetry.h"
 #include "battery.h"
 #include "board_pins.h"
@@ -49,6 +50,19 @@ void display_slp_stamps(display_slp_stamps_t *out) { *out = *(const display_slp_
 #endif
 
 #define STRIP_LINES 24
+
+// ONE OF THE TWO DRAW BUFFERS IN PSRAM (plan C13 stage a). paint() alternates two 22,368 B strip buffers and starts every
+// damage list on buffer 0, so a frame of one strip never touches PSRAM and a longer one sends every second strip from it:
+// buffer 1 is the PSRAM one. 1 = that; 0 = both internal. On the dial (diet2-r1-results.md section 7): +22,532 B internal
+// RAM, full-frame max +13 percent (25.1 to 28.4 ms), +27 percent against the same load without it under a PSRAM copy load.
+// The panel IO is told to send a PSRAM colour buffer by DMA from PSRAM (psram_dma_direct). No padding is needed for the
+// short last strip of a face (9,320 B): on the ESP32-S3 the transmit external-memory alignment of the SPI's AHB-GDMA channel
+// is 1 byte (IDF 5.5.6 gdma.c gdma_config_transfer sets one only for the RX channel and for AHB-GDMA v2 / AXI), and
+// spi_master.c setup_dma_priv_buffer bounces a transfer only when (address | length) & (alignment - 1) is not zero.
+// The buffer itself is cache-line aligned and rounded up to a line (draw_buffer.c).
+#ifndef HT_DRAWBUF_PSRAM
+#define HT_DRAWBUF_PSRAM 1
+#endif
 
 // Stack of the render task. The ROM inflater keeps its Huffman tables on the calling task's stack, and an
 // illustrated companion can become active at any time over the USB link, so a build that can draw one keeps
@@ -579,6 +593,9 @@ void display_init(void)
     esp_lcd_panel_io_spi_config_t io_cfg =
         CO5300_PANEL_IO_QSPI_CONFIG(BSP_LCD_QSPI_CS, color_done, NULL);
     io_cfg.trans_queue_depth = 2;
+#if HT_DRAWBUF_PSRAM
+    io_cfg.flags.psram_dma_direct = 1;   // a colour buffer in PSRAM is sent from there; the internal one is not affected
+#endif
     esp_lcd_panel_io_handle_t io;
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI2_HOST, &io_cfg, &io));
     co5300_vendor_config_t vendor = {.init_cmds = init_cmds,
@@ -593,17 +610,17 @@ void display_init(void)
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
+    bool buffer_in_psram[2] = {false, false};
     for (int i = 0; i < 2; i++) {
-        pixels[i] =
-            heap_caps_malloc(HT_WIDTH * STRIP_LINES * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+        pixels[i] = draw_buffer_alloc(HT_WIDTH * STRIP_LINES * 2, HT_DRAWBUF_PSRAM && i == 1, &buffer_in_psram[i]);
         assert(pixels[i]);
     }
     display_bump_activity();
     assert(xTaskCreatePinnedToCore(render_task, "habitat_render", RENDER_STACK_BYTES, NULL, 5, &renderer, 1) ==
            pdPASS);
     touch_init();
-    ESP_LOGI("habitat", "direct C renderer on a %dpx face: two %d-byte internal DMA buffers over %s",
-             HT_WIDTH, HT_WIDTH * STRIP_LINES * 2,
-             "40MHz QSPI");
+    ESP_LOGI("habitat", "direct C renderer on a %dpx face: two %d-byte DMA buffers (%s, %s) over %s",
+             HT_WIDTH, HT_WIDTH * STRIP_LINES * 2, buffer_in_psram[0] ? "PSRAM" : "internal",
+             buffer_in_psram[1] ? "PSRAM" : "internal", "40MHz QSPI");
 }
 void display_init_ota(void) { display_init(); }
