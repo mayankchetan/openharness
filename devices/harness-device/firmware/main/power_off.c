@@ -57,6 +57,31 @@ static void write_record(int reason, int pct, int mv)
     if (e != ESP_OK) ESP_LOGW(TAG, "POWEROFF: the record was not written (%d); powering off without it", (int)e);
 }
 
+// True when this is no time to power off: VBUS good (REG 0x00 bit 5), the register unreadable, or a USB host. Fresh, on this task: the cached state
+// may be 30 s old. Logs the reason.
+static bool external_power_now(const char *when)
+{
+    int s0 = -1, s1 = -1;
+    power_pmu_read(&s0, &s1);
+    if (s0 < 0 || (s0 & POWER_STATUS0_VBUS_GOOD)) {
+        ESP_LOGW(TAG, "POWEROFF refused%s: VBUS good or REG 0x00 unreadable (reg00=%#x)", when, (unsigned)s0);
+        return true;
+    }
+    if (usb_serial_jtag_is_connected()) {
+        ESP_LOGW(TAG, "POWEROFF refused%s: a USB host is there", when);
+        return true;
+    }
+    return false;
+}
+
+// Give the dial back: the writers run again and the home screen returns.
+static void put_back(void)
+{
+    store_gate_thaw();
+    ui_leave_error_screen();
+    s_next_try_us = esp_timer_get_time() + RETRY_US;
+}
+
 static void run(void)
 {
     const int reason = s_reason, pct = battery_pct_raw(), mv = battery_mv();
@@ -66,20 +91,9 @@ static void run(void)
         return;
     }
 #endif
-    if (!s_force) {
-        // Fresh, on this task: the cached state may be 30 s old. VBUS good (REG 0x00 bit 5) or a failed read means external power or doubt.
-        int s0 = -1, s1 = -1;
-        power_pmu_read(&s0, &s1);
-        if (s0 < 0 || (s0 & POWER_STATUS0_VBUS_GOOD)) {
-            ESP_LOGW(TAG, "POWEROFF refused: VBUS good or REG 0x00 unreadable (reg00=%#x)", (unsigned)s0);
-            s_next_try_us = esp_timer_get_time() + RETRY_US;
-            return;
-        }
-        if (usb_serial_jtag_is_connected()) {
-            ESP_LOGW(TAG, "POWEROFF refused: a USB host is there");
-            s_next_try_us = esp_timer_get_time() + RETRY_US;
-            return;
-        }
+    if (!s_force && external_power_now("")) {
+        s_next_try_us = esp_timer_get_time() + RETRY_US;
+        return;
     }
     // The one line before the power goes (plan 16.1 item 2).
     ESP_LOGW(TAG, "POWEROFF reason=%s pct=%d mv=%d force=%d", reason_name(reason), pct, mv, (int)s_force);
@@ -95,14 +109,17 @@ static void run(void)
     display_unlock();
     ui_show_error("Power", "Off - hold PWR");
     vTaskDelay(pdMS_TO_TICKS(SHOW_MS));
+    // The last look, right before the write: a cable can go in during the second the screen was up.
+    if (!s_force && external_power_now(" after the screen")) {
+        put_back();
+        return;
+    }
     const bool wrote = power_pmic_soft_off();   // REG 0x10 bit 0: on success the power goes within milliseconds and nothing below runs
     ESP_LOGW(TAG, "PMIC soft power-off written: %s", wrote ? "ok" : "FAILED");
     vTaskDelay(pdMS_TO_TICKS(AFTER_MS));
     // Still here: the PMIC did not take it (or VBUS keeps it up on a bench run). Put everything back.
     ESP_LOGE(TAG, "POWEROFF: still running %d ms after the PMIC write; the dial stays on", AFTER_MS);
-    store_gate_thaw();
-    ui_leave_error_screen();
-    s_next_try_us = esp_timer_get_time() + RETRY_US;
+    put_back();
 }
 
 static void task(void *arg)

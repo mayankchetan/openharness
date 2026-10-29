@@ -119,6 +119,7 @@ static int pct = 4, mv = 3300, reg20 = 0x04, reg21 = 0x02, soft_off_calls, delay
 static jmp_buf death;                            // the PMIC cuts the power: the task never runs another line
 static bool armed_death;
 static uint32_t delay_total_ms;
+static int plug_during_show;                    // 1: VBUS appears while the screen is shown; 2: a USB host does
 static int writer_in_flight_ms;                  // a writer holds the gate for this long (virtual time), then leaves; <0: for ever
 
 int power_pmu_read(int *s0, int *s1) { ev("PMUREAD"); *s0 = status0; *s1 = status1; return status1 < 0 ? -1 : (status1 >> 5) & 3; }
@@ -155,7 +156,7 @@ static void run_task(void (*fn)(void *), void *arg) {
     if (armed_death && setjmp(death)) { ev("DEAD"); return; }
     fn(arg);
 }
-void vTaskDelay(uint32_t ms) { delays++; delay_total_ms += ms; g_now_us += (int64_t)ms * 1000; if (writer_in_flight_ms >= 0 && writer_in_flight_ms > 0) { writer_in_flight_ms -= (int)ms; if (writer_in_flight_ms <= 0) { writer_in_flight_ms = 0; store_gate_leave(); ev("WRITER-DONE"); } } }
+void vTaskDelay(uint32_t ms) { if (ms == 1000 && plug_during_show) { if (plug_during_show == 1) status0 = 0x28; else usb_host = true; } delays++; delay_total_ms += ms; g_now_us += (int64_t)ms * 1000; if (writer_in_flight_ms >= 0 && writer_in_flight_ms > 0) { writer_in_flight_ms -= (int)ms; if (writer_in_flight_ms <= 0) { writer_in_flight_ms = 0; store_gate_leave(); ev("WRITER-DONE"); } } }
 BaseType_t xTaskCreate(void (*fn)(void *), const char *name, uint32_t stack, void *arg, int prio, TaskHandle_t *out) {
     (void)name; (void)stack; (void)prio; (void)out; tasks_created++; ev("TASK");
     if (defer) { deferred_fn = fn; deferred_arg = arg; return pdPASS; }
@@ -171,7 +172,7 @@ static bool has(const char *s) { return strstr(g_events, s) != NULL; }
 static int count_of(const char *needle) { int n = 0; for (const char *p = g_events; (p = strstr(p, needle)); p += strlen(needle)) n++; return n; }
 static void reset_world(void) {
     status0 = 0x08; status1 = 0x40; usb_host = ota = false; asleep = true; soft_off_ok = true; dies_on_soft_off = true; nvs_fail = false;
-    pct = 4; mv = 3300; reg20 = 0x04; reg21 = 0x02; soft_off_calls = delays = 0; delay_total_ms = 0; writer_in_flight_ms = 0; armed_death = true;
+    pct = 4; mv = 3300; reg20 = 0x04; reg21 = 0x02; soft_off_calls = delays = 0; delay_total_ms = 0; writer_in_flight_ms = 0; plug_during_show = 0; armed_death = true;
     defer = false; store.present = pending.present = false; tasks_created = 0; g_now_us += 10LL * 1000000 * 100;   // far past any retry throttle
     store_gate_thaw();
     clear_events();
@@ -278,6 +279,31 @@ static void scenario_pmic_does_not_take_it(void) {
     assert(strstr(g_logs, "FAILED") && strstr(g_logs, "still running") && !store_gate_frozen());
 }
 
+static void scenario_plugged_during_screen(void) {
+    // VBUS (or a USB host) appears during the 1 s of "Off - hold PWR": the PMIC write is NOT made, the gate opens again, the screen goes back
+    for (int what = 1; what <= 2; what++) {
+        reset_world();
+        dies_on_soft_off = true;
+        plug_during_show = what;
+        assert(power_off_request(PP_OFF_S2_TIMEOUT, false));
+        assert(in_order("SHOW[Power|Off - hold PWR]", "HOME") && !has("REG10") && soft_off_calls == 0);
+        assert(count_of("PMUREAD") == 2 && in_order("SHOW[Power|Off - hold PWR]", "PMUREAD"));   // looked once before, once after the screen
+        assert(!store_gate_frozen() && store_gate_enter());
+        store_gate_leave();
+        assert(strstr(g_logs, "refused") && strstr(g_logs, "still running") == NULL);
+        // and an unforced retry waits a minute
+        assert(!power_off_request(PP_OFF_S2_TIMEOUT, false));
+        // reset_world() of the next round moves the clock past the throttle; the busy flag is clear (the task ended)
+        assert(!power_off_pending());
+    }
+    // the bench trigger (force) does not look again: it is meant to run on a cable
+    reset_world();
+    dies_on_soft_off = false;
+    plug_during_show = 1;
+    assert(power_off_request(POWER_OFF_REASON_DEBUG, true));
+    assert(has("REG10") && !has("PMUREAD"));
+}
+
 static void scenario_one_at_a_time(void) {
     reset_world();
     defer = true;
@@ -336,6 +362,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "external")) scenario_never_on_external_power();
     else if (!strcmp(argv[1], "writer")) scenario_writer_in_flight();
     else if (!strcmp(argv[1], "pmic")) scenario_pmic_does_not_take_it();
+    else if (!strcmp(argv[1], "plug")) scenario_plugged_during_screen();
     else if (!strcmp(argv[1], "one")) scenario_one_at_a_time();
     else if (!strcmp(argv[1], "nvs")) scenario_nvs_failure();
     else if (!strcmp(argv[1], "boot")) scenario_boot_report();
@@ -361,7 +388,7 @@ with tempfile.TemporaryDirectory(prefix='harness-power-off-') as folder:
                     '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
                     '-I', str(main), str(folder / 'harness.c'), str(folder / 'power_off.c'), str(folder / 'store_gate.c'),
                     str(folder / 'power_policy.c'), '-o', str(folder / 'poff')], check=True)
-    scenarios = ('sequence', 'external', 'writer', 'pmic', 'one', 'nvs', 'boot', 'gate')
+    scenarios = ('sequence', 'external', 'writer', 'pmic', 'plug', 'one', 'nvs', 'boot', 'gate')
     for name in scenarios:
         subprocess.run([str(folder / 'poff'), name], check=True)
     print('power off: ' + ', '.join(scenarios) + ' PASS (log line, writers stopped, NVS record committed, "Off - hold PWR", PMIC write last; '

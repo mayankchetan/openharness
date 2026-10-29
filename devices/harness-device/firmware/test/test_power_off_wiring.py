@@ -59,8 +59,10 @@ assert 'AXP_REG_PWROFF' not in power_c.split('#ifdef DEVICE_BATTERY_POWEROFF')[0
 
 # ---- the sequence in power_off.c is the reviewed one, in order ----
 run = re.search(r'static void run\(void\)\n\{.*?^\}', off_c, re.M | re.S)[0]
-order = ['fw_update_active()', 'power_pmu_read(', 'usb_serial_jtag_is_connected()', 'ESP_LOGW(TAG, "POWEROFF reason=', 'store_gate_freeze(', 'write_record(', 'display_wake()',
-         'ui_show_error("Power", "Off - hold PWR")', 'vTaskDelay(pdMS_TO_TICKS(SHOW_MS))', 'power_pmic_soft_off()']
+order = ['fw_update_active()', 'external_power_now("")', 'ESP_LOGW(TAG, "POWEROFF reason=', 'store_gate_freeze(', 'write_record(', 'display_wake()',
+         'ui_show_error("Power", "Off - hold PWR")', 'vTaskDelay(pdMS_TO_TICKS(SHOW_MS))', 'external_power_now(" after the screen")', 'power_pmic_soft_off()']
+helper = re.search(r'static bool external_power_now\(const char \*when\)\n\{.*?^\}', off_c, re.M | re.S)[0]
+assert helper.index('power_pmu_read(') < helper.index('usb_serial_jtag_is_connected()')
 pos = [run.index(x) for x in order]
 assert pos == sorted(pos), dict(zip(order, pos))
 assert '#define SHOW_MS             1000' in off_c
