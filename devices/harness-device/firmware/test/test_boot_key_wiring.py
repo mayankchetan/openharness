@@ -16,11 +16,14 @@ board_c = (main / 'board/board.c').read_text()
 
 # ---- ptt.c ----
 task = re.search(r'static void ptt_task\(void \*arg\)\n\{.*?^\}', ptt, re.M | re.S)[0]
-assert 'bk_init(&boot_key, gpio_get_level(BSP_BOOT_BUTTON) == 0);' in task, 'a key held through power-on is ignored until released'
+assert 'bk_init_ex(&boot_key, gpio_get_level(BSP_BOOT_BUTTON) == 0,' in task, 'a key held through power-on is ignored until released'
 assert 'bk_step(&boot_key, now_ms, gpio_get_level(BSP_BOOT_BUTTON) == 0, power_sleep_input_allowed(), ui_voice_can_start)' in task
 for needle in ('case BK_TAP:', 'ui_boot_pressed();', 'case BK_HOLD_START:', 'ui_voice_start();', 'bk_stop_poll(&boot_key, now_ms, ui_voice_is_recording())) ui_voice_stop();'):
     assert needle in task, needle
-assert 'screen_toggle("BOOT hold")' not in ptt and 'BOOT_LONG_PRESS_MS' not in ptt, 'the BOOT-hold screen toggle is gone'
+assert 'BOOT_LONG_PRESS_MS' not in ptt
+assert 'bk_init_ex(&boot_key, gpio_get_level(BSP_BOOT_BUTTON) == 0, !pwr_key);' in task, 'toggle mode exactly where there is no PWR key'
+assert task.index('const bool pwr_key') < task.index('bk_init_ex(')
+assert re.search(r'case BK_LONG:\n\s+screen_toggle\("BOOT hold"\);', task), 'the old BOOT hold toggle survives for boards without the PMIC'
 assert 'if (pwr_key && power_take_pwrkey_tap()) screen_toggle("PWR tap");' in task, 'PWR still toggles the screen'
 # the tap interrupts only on a tap event, never on the press edge
 press_case = re.search(r'case BK_PRESS:(.*?)break;', task, re.S)[1]

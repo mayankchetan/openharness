@@ -5,9 +5,12 @@
 // (now - since) >= ms on a free-running 32-bit clock: right across the wrap as long as the span is under 49 days.
 static bool span_reached(uint32_t now, uint32_t since, uint32_t ms) { return (uint32_t)(now - since) >= ms; }
 
-void bk_init(bk_t *k, bool pressed_now)
+void bk_init(bk_t *k, bool pressed_now) { bk_init_ex(k, pressed_now, false); }
+
+void bk_init_ex(bk_t *k, bool pressed_now, bool toggle_mode)
 {
     memset(k, 0, sizeof *k);
+    k->toggle_mode = toggle_mode;
     if (pressed_now) {
         k->down = true;
         k->ignored = true;
@@ -27,6 +30,13 @@ bk_event_t bk_step(bk_t *k, uint32_t now_ms, bool pressed, bool allowed, bool (*
         return k->ignored ? BK_NONE : BK_PRESS;
     }
     if (pressed) {
+        if (k->toggle_mode) {
+            if (!k->ignored && !k->hold_fired && span_reached(now_ms, k->down_ms, BK_TOGGLE_MS)) {
+                k->hold_fired = true;
+                return BK_LONG;
+            }
+            return BK_NONE;
+        }
         if (!k->ignored && !k->hold_fired && !k->talk_denied && span_reached(now_ms, k->down_ms, BK_HOLD_MS)) {
             if (can_talk && can_talk()) {
                 k->hold_fired = true;
@@ -39,6 +49,10 @@ bk_event_t bk_step(bk_t *k, uint32_t now_ms, bool pressed, bool allowed, bool (*
     k->down = false;                                     // the release
     if (k->ignored) {
         k->ignored = false;
+        return BK_NONE;
+    }
+    if (k->hold_fired && k->toggle_mode) {
+        k->hold_fired = false;                           // the long press was the whole of it
         return BK_NONE;
     }
     if (k->hold_fired) {

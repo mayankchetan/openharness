@@ -7,7 +7,8 @@
 //     is up nobody knows whether it is a tap or the start of a hold.
 //   * A HOLD (down for BK_HOLD_MS) starts a voice capture, the same entry the touch gesture uses (ui_voice_start); the RELEASE sends it
 //     (ui_voice_stop). If no capture can start (a turn is running, no link, not a talk screen) the hold is denied and its release is a tap.
-//   * The screen toggle on a BOOT hold is gone (the PWR key does that).
+//   * The screen toggle on a BOOT hold is gone WHERE THERE IS A PWR KEY (the dial: the PMIC board). A board without one keeps it (toggle mode,
+//     bk_init_ex): a hold of BK_TOGGLE_MS gives BK_LONG once, the release after it is nothing, and there is no hold-to-talk.
 //   * D1: where input is not allowed (battery, screen off) a press is ignored whole: no wake, no tap, no hold.
 //   * A key already down when the task starts (held through power-on) is ignored until it is released.
 // The cold-boot settings wipe (bkr_*) is its own small machine: BOOT held at power-on starts a countdown on the glass, the wipe happens
@@ -16,6 +17,7 @@
 #include <stdint.h>
 
 #define BK_HOLD_MS        400    // down this long: hold-to-talk (a tap is shorter; 300 ms thumbs are taps)
+#define BK_TOGGLE_MS      800    // toggle mode (no PWR key): held this long, the screen toggles
 #define BK_STOP_WAIT_MS   3000   // released before the capture began: wait this long for it to begin, then give up
 #define BK_RESET_HOLD_MS  5000   // BOOT held this long after power-on: wipe the settings (16.1 item 3)
 
@@ -25,10 +27,12 @@ typedef enum {
     BK_TAP,          // released as a tap (or a hold that was denied): interrupt the running turn
     BK_HOLD_START,   // the hold threshold passed and a capture can start: start it
     BK_HOLD_END,     // released after a hold that started: the capture is sent (bk_stop_poll says when it can be stopped)
+    BK_LONG,         // toggle mode only: held for BK_TOGGLE_MS, once per press: toggle the screen
 } bk_event_t;
 
 typedef struct {
     bool     down;
+    bool     toggle_mode;   // a board without the PWR key: a hold toggles the screen instead of recording
     bool     ignored;       // this press is not ours: D1, or held through power-on
     bool     hold_fired;    // BK_HOLD_START was returned for this press
     bool     talk_denied;   // the hold threshold passed and no capture could start
@@ -39,6 +43,7 @@ typedef struct {
 
 // `pressed_now`: the pin reads low right now (a key held through power-on is ignored until it is released).
 void bk_init(bk_t *k, bool pressed_now);
+void bk_init_ex(bk_t *k, bool pressed_now, bool toggle_mode);
 // One poll. `now_ms` is a free-running 32-bit millisecond clock (wrap is fine). `pressed` is the pin level (true = down). `allowed` is
 // power_sleep_input_allowed() (D1). `can_talk` is asked once per press, when the hold threshold passes: true when a capture can start.
 bk_event_t bk_step(bk_t *k, uint32_t now_ms, bool pressed, bool allowed, bool (*can_talk)(void));

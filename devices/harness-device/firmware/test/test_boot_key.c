@@ -11,7 +11,7 @@ static bool talk_answer;
 static bool talk_ok(void) { talk_calls++; return talk_answer; }
 
 // One poll every 100 ms, as the ptt task runs on external power. Returns the events of the whole run as a string of letters:
-// P press, T tap, S hold start, E hold end.
+// P press, T tap, S hold start, E hold end, L long press (the screen toggle of a board without the PWR key).
 typedef struct { bk_t k; uint32_t now; char log[32]; int n; } rig_t;
 static void rig_init(rig_t *r, uint32_t start, bool pressed_at_start)
 {
@@ -23,7 +23,7 @@ static bk_event_t poll(rig_t *r, bool pressed, bool allowed)
 {
     r->now += 100;
     const bk_event_t e = bk_step(&r->k, r->now, pressed, allowed, talk_ok);
-    if (e != BK_NONE) r->log[r->n++] = "-PTSE"[e];
+    if (e != BK_NONE) r->log[r->n++] = "-PTSEL"[e];
     return e;
 }
 // Press for `ms` (a whole number of polls), then release (one poll).
@@ -120,6 +120,39 @@ static void test_held_at_start(void)
     assert(strcmp(r.log, "PT") == 0);
 }
 
+static void test_no_pwr_key_board(void)
+{
+    // A board without the PMIC has no PWR key (board().has_pmic false): there BOOT keeps its old second job, a hold of BK_TOGGLE_MS toggles the
+    // screen, and there is no hold-to-talk. A tap is still a tap, on the release.
+    rig_t r;
+    rig_init(&r, 0, false);
+    bk_init_ex(&r.k, false, true);
+    talk_answer = true; talk_calls = 0;
+    press_for(&r, 300, true);
+    assert(strcmp(r.log, "PT") == 0);
+    r.n = 0; memset(r.log, 0, sizeof r.log);
+    for (int i = 0; i < 7; i++) assert(poll(&r, true, true) == (i == 0 ? BK_PRESS : BK_NONE));   // the press edge, then 600 ms down
+    assert(poll(&r, true, true) == BK_NONE);                                // 700 ms down
+    assert(poll(&r, true, true) == BK_LONG);                                // 800 ms down: the screen toggles
+    for (int i = 0; i < 20; i++) assert(poll(&r, true, true) == BK_NONE);   // once per press
+    assert(poll(&r, false, true) == BK_NONE);                               // the release after a long press is not a tap, and sends nothing
+    assert(talk_calls == 0 && !bk_stop_poll(&r.k, r.now + 100, true));
+    // the D1 gate still ignores a press on a dark battery screen, and a key held through power-on waits for its release
+    rig_init(&r, 0, false);
+    bk_init_ex(&r.k, false, true);
+    press_for(&r, 3000, false);
+    assert(r.n == 0);
+    rig_init(&r, 0, true);
+    bk_init_ex(&r.k, true, true);
+    for (int i = 0; i < 20; i++) assert(poll(&r, true, true) == BK_NONE);
+    assert(poll(&r, false, true) == BK_NONE);
+    // the dial's machine never says BK_LONG
+    rig_init(&r, 0, false);
+    press_for(&r, 3000, true);
+    assert(strchr(r.log, 'L') == NULL);
+    assert(BK_TOGGLE_MS == 800);
+}
+
 static void test_clock_wrap(void)
 {
     rig_t r; rig_init(&r, UINT32_MAX - 250, false);
@@ -205,6 +238,7 @@ int main(void)
     test_d1_gate();
     test_held_at_start();
     test_clock_wrap();
+    test_no_pwr_key_board();
     test_stop_pending();
     test_reset_countdown();
     assert(BK_HOLD_MS == 400 && BK_STOP_WAIT_MS == 3000);

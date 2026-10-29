@@ -24,7 +24,8 @@ static const char *TAG = "ptt";
 //       - a HOLD records: BOOT held for BK_HOLD_MS starts a voice capture through the same entry the touch gesture uses
 //         (ui_voice_start), and the release sends it (ui_voice_stop). If no capture can start (a turn is running, no link, not a
 //         talk screen) the hold is denied and its release is a tap;
-//       - the screen toggle on a BOOT hold is gone: the PWR key does that;
+//       - the screen toggle on a BOOT hold is gone where there is a PWR key, which does that; a board without the PMIC keeps it (a hold of
+//         BK_TOGGLE_MS, and then no hold-to-talk);
 //       - on the battery with the screen off BOOT does nothing at all (D1, "PWR only").
 //     A key already down when this task starts (held through power-on) is ignored until it is released.
 //   • Button A (the PWR key, wired to the AXP2101 PWRON pin — read over I2C, not a GPIO): a tap toggles
@@ -50,9 +51,10 @@ static void ptt_task(void *arg)
         .pull_up_en = GPIO_PULLUP_ENABLE,
     };
     gpio_config(&bcfg);
-    bk_t boot_key;
-    bk_init(&boot_key, gpio_get_level(BSP_BOOT_BUTTON) == 0);   // held through power-on: ignored until released
     const bool pwr_key = board()->has_pmic;
+    bk_t boot_key;
+    // Held through power-on: ignored until released. A board without the PWR key keeps BOOT's old second job, the screen toggle on a hold, and has no hold-to-talk.
+    bk_init_ex(&boot_key, gpio_get_level(BSP_BOOT_BUTTON) == 0, !pwr_key);
     battery_poll_t battery_poll = {0};
 
     while (1) {
@@ -80,6 +82,9 @@ static void ptt_task(void *arg)
             break;
         case BK_HOLD_END:
             ESP_LOGI(TAG, "BOOT release → send");
+            break;
+        case BK_LONG:
+            screen_toggle("BOOT hold");   // only a board without the PWR key gets here (toggle mode)
             break;
         case BK_NONE:
             break;
