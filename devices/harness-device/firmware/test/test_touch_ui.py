@@ -64,7 +64,7 @@ static struct {
     int pattern_mask, pattern_len, view, voice_return, offset, active, count, pressed, hit_count;
     int draft_drag, tab_drag, start_x, start_y, last_x, last_y, tab_count, machine_count, model_count, notice_count, pet_pose;
     uint32_t touch_started, coast_until, character_activity, pet_until, nap_until, last_celebration;
-    uint32_t notice_sequence, voice_retry_until, error_until;
+    uint32_t notice_sequence, voice_retry_until, error_until, battery_pct_until;
     uint8_t status_phase;
     unsigned bell_unread;
     uint32_t notice_ms;

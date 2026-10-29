@@ -83,6 +83,7 @@ static uint16_t *pixels[2];
 static HT_RENDER_BSS ht_scene_t scenes[2];   // PSRAM by default (terminal.h HT_RENDER_DATA_PSRAM)
 static bool painted;
 static atomic_bool asleep, force_frame;
+static atomic_uint wake_seq;   // display_wake_seq(): moves on a wake from off and on a dimmed screen coming back
 // Panel IO belongs to the renderer, including brightness changes.
 static atomic_uint requested_brightness = 40;
 static atomic_uint last_activity;
@@ -284,6 +285,7 @@ void display_unlock(void)
         xSemaphoreGiveRecursive(model_lock);
 }
 bool display_is_asleep(void) { return atomic_load(&asleep); }
+uint32_t display_wake_seq(void) { return atomic_load_explicit(&wake_seq, memory_order_relaxed); }
 void display_set_power_cb(void (*cb)(bool)) { power_cb = cb; }
 #ifdef DEVICE_BATTERY_SLEEP
 void display_set_sleep_cb(void (*cb)(bool)) { sleep_cb = cb; }
@@ -292,8 +294,10 @@ void display_bump_activity(void)
 {
     atomic_store(&last_activity, now_ms());
 #ifdef DEVICE_BATTERY_SLEEP
-    if (atomic_load_explicit(&screen_dimmed, memory_order_relaxed))
+    if (atomic_load_explicit(&screen_dimmed, memory_order_relaxed)) {
+        atomic_fetch_add_explicit(&wake_seq, 1, memory_order_relaxed);   // a dimmed screen coming back is a wake too
         habitat_render_notify();   // a dimmed screen gets its brightness back at once, not at the end of the render wait
+    }
 #endif
 }
 void display_sleep(void)
@@ -315,6 +319,7 @@ void display_wake(void)
 {
     if (!atomic_exchange(&asleep, false))
         return;
+    atomic_fetch_add_explicit(&wake_seq, 1, memory_order_relaxed);
 #ifdef DEVICE_SLEEP_PROFILE
     s_slp.wake_us = esp_timer_get_time();
 #endif

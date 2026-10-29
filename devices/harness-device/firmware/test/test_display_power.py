@@ -30,6 +30,7 @@ code = r'''
 #include <setjmp.h>
 static atomic_bool asleep, force_frame;
 static atomic_uint last_activity;
+static atomic_uint wake_seq;   /* display_wake_seq(): the habitat UI shows the battery percent for 3 s after each wake */
 static atomic_uint requested_brightness = 40;
 #define ESP_LOGI(...) ((void)0)
 static unsigned last_brightness, brightness_writes, writes_at_panel_on;
@@ -161,7 +162,9 @@ int main(void) {
     // Repeated requests are idempotent; no extra callbacks/notifications.
     unsigned n=notifications, s=sleeps, w=wakes;
     display_sleep(); assert(notifications==n && sleeps==s);
+    unsigned seq=atomic_load(&wake_seq);
     display_wake(); display_wake(); assert(notifications==n+1 && wakes==w+1);
+    assert(atomic_load(&wake_seq)==seq+1);   // one wake from off is one step, however many display_wake() calls
 #ifdef DEVICE_BATTERY_SLEEP
     /* Battery sleep image: the loop applies the sleep policy at the top of every pass (before the model step), and while the chip may
        sleep it waits the 5 s ceiling even with an animation deadline due in 16 ms; awake, it waits the deadline as before. */
@@ -189,6 +192,9 @@ int main(void) {
     run(5,31000,0,true,1); assert(!atomic_load(&screen_dimmed));                                   /* an asleep panel is not "dimmed" */
     { unsigned n = notifications; atomic_store(&screen_dimmed,true); display_bump_activity(); assert(notifications == n+1);
       atomic_store(&screen_dimmed,false); display_bump_activity(); assert(notifications == n+1); }  /* a touch brightens a dimmed screen at once */
+    { unsigned q = atomic_load(&wake_seq);   /* a dimmed screen coming back moves the wake counter; a bump on a bright screen does not */
+      atomic_store(&screen_dimmed,true); display_bump_activity(); assert(atomic_load(&wake_seq) == q+1);
+      atomic_store(&screen_dimmed,false); display_bump_activity(); assert(atomic_load(&wake_seq) == q+1); }
     fake_state = PP_S2;
     run(0,60001,0,false,1); assert(display_is_asleep() && sleeps == 1);
     fake_state = PP_S0;

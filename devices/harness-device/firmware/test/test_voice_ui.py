@@ -36,6 +36,7 @@ static bool cable_client_supports(uint32_t features) { return (host_features & f
 #include "draft.h"
 #include "workspace.h"
 #include "supertab.h"
+#include "battery_rim.h"
 #define EXT_RAM_BSS_ATTR
 enum { HOME, AGENTS, AGENT, COMPANION, VOICE, MESSAGE, SELECTION, FORM, QUESTION, CHOICE, ANSWER_REVIEW, DRAFT, DRAFT_OPTIONS, INBOX };
 enum { A_VOICE, A_VOICE_STOP, A_VOICE_ABORT };
@@ -63,6 +64,7 @@ static struct {
     uint32_t error_until;
     uint32_t pet_until, nap_until, voice_retry_until, voice_started, voice_wait_until, voice_generation, voice_question_revision, voice_draft_revision;
     int voice_question_index, battery_rim_seen;
+    uint32_t battery_wake_seen, battery_pct_until;
     char title[80], message[256], voice_target[64], voice_engine[12], pending_focus[64], pending_machine[64], opening_notice[48];
     struct { bool valid, supported, loading, pending, uncertain; uint32_t revision, deadline; int index; char error[120],speech_error[96],agent[64],token[48]; struct { bool can_text; } item[4]; } q;
     agent_t agents[1];
@@ -70,6 +72,8 @@ static struct {
 } s;
 static int rim_pct = -1, rim_changes;   // battery_rim_pct(): -1 = hidden (external power); habitat_tick marks the scene dirty when it moves
 static int battery_rim_pct(void) { return rim_pct; }
+static uint32_t wake_seq;   // display_wake_seq(): moves on every wake from off and every dimmed screen coming back
+uint32_t display_wake_seq(void) { return wake_seq; }
 static uint32_t now;
 static bool audio_active, recording, abort_requested, queue_full;
 static int starts, stops, aborts, cancels, confirms, scroll, gesture, reviews;
@@ -278,6 +282,22 @@ int main(void) {
     rim_pct = 79; habitat_tick(); assert(rim_changes == 2 && s.battery_rim_seen == 80);
     rim_pct = -1; habitat_tick(); assert(rim_changes == 3 && s.battery_rim_seen == 0);   // plugged in: the rim goes
     habitat_tick(); assert(rim_changes == 3);
+
+    // The percent number: 3 s after each screen wake (from off or back from dim) while on the battery, then gone; every start and end
+    // marks the scene dirty (so ht_damage repaints its box), and nothing else does.
+    reset(); rim_pct = 80; wake_seq = 0; now = 10000; habitat_tick(); rim_changes = 0;
+    habitat_tick(); assert(rim_changes == 0 && !s.battery_pct_until);                        // no wake: no number
+    wake_seq = 1; habitat_tick(); assert(rim_changes == 1 && s.battery_pct_until == 13000);
+    habitat_tick(); assert(rim_changes == 1);                                                // the same wake: nothing new
+    now = 12999; habitat_tick(); assert(rim_changes == 1 && s.battery_pct_until);            // still shown just before the 3 s
+    now = 13000; habitat_tick(); assert(rim_changes == 2 && !s.battery_pct_until);           // gone at 3 s
+    habitat_tick(); assert(rim_changes == 2);
+    now = 20000; wake_seq = 2; habitat_tick(); assert(rim_changes == 3 && s.battery_pct_until);   // the next wake shows it again
+    now = 21000; wake_seq = 3; habitat_tick(); assert(rim_changes == 4 && s.battery_pct_until == 24000);   // a wake inside the window restarts it
+    now = 22000; rim_pct = 79; habitat_tick(); assert(rim_changes == 5 && s.battery_pct_until);     // the percent moves: redrawn, number kept
+    now = 22500; rim_pct = -1; habitat_tick(); assert(!s.battery_pct_until && rim_changes == 7);    // plugged in: rim and number go (two marks, one tick)
+    now = 30000; wake_seq = 4; habitat_tick(); assert(!s.battery_pct_until && rim_changes == 7);     // a wake on USB: nothing at all
+    rim_pct = 50; now = 31000; habitat_tick(); assert(!s.battery_pct_until);                         // unplugged later, no wake: no number
 
     reset(); begin(); now = 601000; habitat_tick();
     assert(stops == 1 && s.voice_waiting);

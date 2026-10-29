@@ -134,7 +134,7 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -DDEVICE_UI_METRICS=1 -fsanitize="${SAN
    -I "$here/host_stubs" -I "$here/../main/ui/habitat" -o "$out/test_uim" "$here/test_uim.c" \
    "$here/../main/ui/habitat/uim.c" "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" -lm
 "$out/test_uim"
-# The same two as the default image builds them (Focus only: HT_RUNS 28, HT_CELL_COLS_MAX 272).
+# The same two as the default image builds them (Focus only: HT_RUNS 29, HT_CELL_COLS_MAX 272).
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -DDEVICE_UI_METRICS=1 -DHABITAT_FOCUS_ONLY=1 -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -I "$here/../main/ui/habitat" -o "$out/test_terminal_metrics_focus" "$here/test_terminal_metrics.c" \
    "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" -lm

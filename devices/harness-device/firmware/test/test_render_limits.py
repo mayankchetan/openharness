@@ -1,13 +1,13 @@
 """HT_RUNS and HT_CELL_COLS_MAX, right-sized from the UI gallery tour (HT_RIGHT_SIZE, default on in a Focus-only build).
 
 The tour (112 items, both dials, diet2-r1-results.md section 5) used at most 26 runs in one scene (the inbox pages)
-and unpacked at most 259 columns of one sprite row (busy_claude_build). The limits are 28 and 272: a little margin
-above the measured worst case, 12 runs (2 x 12 x 248 = 5,952 B of scene) and 208 columns less than before (40 and
-480). A run that does not fit is dropped silently by the builders, so ht_metrics_t counts it (runs_dropped, the UIM
+and unpacked at most 259 columns of one sprite row (busy_claude_build). The limits are 29 and 272: the measured worst
+case plus the three runs of the battery rim (track, fill, percent number), 11 runs (2 x 11 x 248 = 5,456 B of scene) and 208
+columns less than before (40 and 480). A run that does not fit is dropped silently by the builders, so ht_metrics_t counts it (runs_dropped, the UIM
 line's runs_drop); test_terminal_metrics.c checks the counter and test_uim.c its attribution.
 
 The switch follows HABITAT_FOCUS_ONLY: the companion skins (tim, tux, octopus) are not built in the default image and
-draw more than 28 runs (test_octopus asserts the old limit's room), so an all-skins build and the host tests, which
+draw more than 29 runs (test_octopus asserts the old limit's room), so an all-skins build and the host tests, which
 cover every skin, keep 40 and 480.
 
 This test checks the limits against what the source can show without a dial: the built-in sprite frames (every
@@ -40,11 +40,11 @@ def limits(*flags):
 
 FOCUS = '-DHABITAT_FOCUS_ONLY=1'
 runs, cols = limits(FOCUS)
-assert (runs, cols) == (28, 272), (runs, cols)            # the default image (Focus only): right-sized
+assert (runs, cols) == (29, 272), (runs, cols)            # the default image (Focus only): right-sized
 assert limits() == (40, 480)                              # every skin built (host tests, DEVICE_ALL_SKINS): old limits
 assert limits(FOCUS, '-DHT_RIGHT_SIZE=0') == (40, 480)    # the switch puts the old limits back
-assert limits('-DHT_RIGHT_SIZE=1') == (28, 272)           # and forces the new ones
-assert runs >= TOUR_RUNS_MAX + 2 and cols >= TOUR_COLS_MAX + 8, 'margin over the tour worst case'
+assert limits('-DHT_RIGHT_SIZE=1') == (29, 272)           # and forces the new ones
+assert runs >= TOUR_RUNS_MAX + 3 and cols >= TOUR_COLS_MAX + 8, 'room over the tour worst case for the battery rim (3 runs)'
 
 # Built-in frames: the widest cell frame in the generated art must fit the unpack row.
 widest = 0

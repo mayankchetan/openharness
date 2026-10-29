@@ -261,6 +261,8 @@ static EXT_RAM_BSS_ATTR struct {
     uint32_t character_activity;
     uint8_t status_phase;
     int battery_rim_seen;     // the percent last seen for the rim arc, plus 1; 0 = hidden (habitat_tick marks the scene dirty on a change)
+    uint32_t battery_wake_seen;   // display_wake_seq() as habitat_tick last saw it
+    uint32_t battery_pct_until;   // ms() when the rim's percent number goes away again; 0 = not shown (3 s after each wake, on battery)
     unsigned bell_unread;     // the bell's count at the last home render, to see a notice arrive
     uint32_t notice_ms;       // the face clock when it last went up, 0 = none since boot (the pet's alert bubble)
     ht_focus_working_pick_t working_pick;   // which working scene the shown agent's pet plays (Claude: chef or builder)
@@ -2384,7 +2386,9 @@ static struct {
  */
 static void render_battery_rim(ht_scene_t *f)
 {
-    ht_battery_rim(f, battery_rim_pct(), DIM, color(HT_THEME_WARN), color(HT_THEME_FAILED), color(HT_THEME_RIM_TRACK));
+    const ht_battery_rim_ink_t ink = {DIM, color(HT_THEME_WARN), color(HT_THEME_FAILED), color(HT_THEME_RIM_TRACK), FG,
+                                      color(HT_THEME_RIM_TEXT_BG)};
+    ht_battery_rim(f, battery_rim_pct(), s.battery_pct_until != 0, &ink);
 }
 bool habitat_scene_take(ht_scene_t *f)
 {
@@ -3724,7 +3728,7 @@ uint32_t habitat_next_wake_ms(void)
         if (left < delay) delay = left;
     }
     uint32_t deadlines[] = {s.pet_pose ? s.pet_until : 0, s.nap ? s.nap_until : 0,
-                            s.voice_retry_until};
+                            s.voice_retry_until, s.battery_pct_until};
     for (unsigned i = 0; i < sizeof(deadlines) / sizeof(deadlines[0]); i++)
         if (deadlines[i]) {
             int32_t left = (int32_t)(deadlines[i] - now);
@@ -3751,6 +3755,18 @@ void habitat_tick(void)
     {   // the battery rim: redraw only when what it shows changes (it appears, goes, or the percent moves)
         const int rim = battery_rim_pct() + 1;
         if (rim != s.battery_rim_seen) { s.battery_rim_seen = rim; change(); }
+        // The percent number: for 3 s after each screen wake (from off, or back from dim) while on the battery. It goes when the time
+        // is up or the dial is plugged in; either way the scene is marked dirty so ht_damage repaints the number's box only.
+        const uint32_t wakes = display_wake_seq();
+        if (s.battery_pct_until && (rim == 0 || (int32_t)(now - s.battery_pct_until) >= 0)) { s.battery_pct_until = 0; change(); }
+        if (wakes != s.battery_wake_seen) {
+            s.battery_wake_seen = wakes;
+            if (rim > 0) {
+                const uint32_t until = now + HT_BATTERY_RIM_NUMBER_MS;
+                s.battery_pct_until = until ? until : 1;   // 0 means "not shown"
+                change();
+            }
+        }
     }
     surface_tick(now);
     if (ht_workspace_tick(&workspace,now)) workspace_failed("The tab did not open. Choose it again.");

@@ -182,7 +182,7 @@ endif()
 # they change what a test or a profile image measures, not what the product is.
 #   HT_RENDER_DATA_PSRAM   scenes[2] and arc_caches[2] in PSRAM          (ui/habitat/terminal.h)
 #   TASK_STACK_PSRAM_FLASH_OPS   habitat_actions, cable_session, voice_send stacks in PSRAM   (task_util.h)
-#   HT_RIGHT_SIZE          HT_RUNS 28 and HT_CELL_COLS_MAX 272 instead of 40 and 480; on by default in the Focus-only
+#   HT_RIGHT_SIZE          HT_RUNS 29 and HT_CELL_COLS_MAX 272 instead of 40 and 480; on by default in the Focus-only
 #                          build, off with DEVICE_ALL_SKINS (the skins draw more runs)   (ui/habitat/terminal.h)
 #   HT_DRAWBUF_PSRAM       1 = one of the two panel draw buffers in PSRAM, sent by DMA from there; 0 = both internal   (ui/habitat/display_habitat.c)
 #   TASK_STACK_PSRAM_READER   the cable_link reader stack in PSRAM; follows DEVICE_NO_OTA (below), an error without it   (task_util.h)

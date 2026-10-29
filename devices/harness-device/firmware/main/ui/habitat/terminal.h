@@ -28,10 +28,10 @@
 #define HT_HEIGHT 466
 // RIGHT-SIZED LIMITS. The UI gallery tour (112 items on both dials, diet2-r1-results.md section 5) used at most 26 runs in
 // one scene (the inbox pages; the next screen uses 14) and unpacked at most 259 columns of a sprite row (the widest
-// built-in frame, pets.c). 28 runs and 272 columns keep a little margin: 5,952 B less scene (2 x 12 x 248) and 208 B less
-// sprite scratch. A run that does not fit is dropped silently, so DEVICE_UI_METRICS counts them (ht_metrics_t.runs_dropped).
+// built-in frame, pets.c). 29 runs (26 + the battery rim's track, fill and percent number, battery_rim.h) and 272 columns:
+// 5,456 B less scene (2 x 11 x 248) and 208 B less sprite scratch. A run that does not fit is dropped silently, so DEVICE_UI_METRICS counts them (ht_metrics_t.runs_dropped).
 // ON by default in a Focus-only build (HABITAT_FOCUS_ONLY, the default image), the only build the tour measured. The
-// companion skins (tim, tux, octopus, the command faces) are not built there and draw more than 28 runs per scene
+// companion skins (tim, tux, octopus, the command faces) are not built there and draw more than 29 runs per scene
 // (test_octopus, test_character), so a DEVICE_ALL_SKINS build and the host tests, which cover every skin, keep 40 and
 // 480. -DHT_RIGHT_SIZE=0 restores them in a Focus-only build too.
 #ifndef HT_RIGHT_SIZE
@@ -42,7 +42,7 @@
 #endif
 #endif
 #if HT_RIGHT_SIZE
-#define HT_RUNS 28
+#define HT_RUNS 29
 #else
 #define HT_RUNS 40
 #endif

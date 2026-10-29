@@ -36,6 +36,9 @@ void display_set_sleep_cb(void (*cb)(bool on));
 void display_sleep(void);
 void display_wake(void);
 bool display_is_asleep(void);
+// A counter that moves on every screen wake: display_wake() (from off) and a touch or key that brings a dimmed screen back to full
+// brightness. The habitat UI compares it with the value it saw to show the battery percent for a few seconds after a wake.
+uint32_t display_wake_seq(void);
 // Register a power hook: cb(false) fires on sleep, cb(true) on wake. Used by the UI screen-lock to arm
 // re-lock on sleep and show the unlock overlay on wake. Runs under display_lock (recursive).
 void display_set_power_cb(void (*cb)(bool on));
