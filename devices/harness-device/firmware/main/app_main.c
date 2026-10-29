@@ -32,6 +32,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "ptt.h"
+#include "power_sleep.h"
 #include "ram_telemetry.h"
 #include "task_util.h"
 #ifdef DEVICE_UI_METRICS
@@ -245,6 +246,7 @@ void app_main(void)
     ram_telemetry_checkpoint("boot");
     last_words_boot();   // before the first log line, so the previous boot's ring is read, not overwritten
     board_detect();      // which dial this is — the panel's reset pin comes from here, so before display_init
+    power_sleep_init();  // DEVICE_BATTERY_SLEEP only (a no-op otherwise): the awake lock, so nothing sleeps until the policy says so
     config_store_init();
 
 #ifdef DEVICE_UI_GALLERY

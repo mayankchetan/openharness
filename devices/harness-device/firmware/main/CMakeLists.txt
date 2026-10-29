@@ -111,6 +111,13 @@ else()
     set(COMPANION_ART "")
 endif()
 
+# spi_flash esp_mm: esp_private/flash_mmap.h: flash_mmap_remain() in the alive line (ram_telemetry.c); esp_private/esp_cache_private.h:
+# esp_cache_get_alignment() (draw_buffer.c). esp_pm: the power-management locks and esp_pm_configure (power_sleep.c, battery sleep only).
+set(BOARD_PRIV_REQUIRES spi_flash esp_mm)
+if(DEVICE_BATTERY_SLEEP)
+    list(APPEND BOARD_PRIV_REQUIRES esp_pm)
+endif()
+
 idf_component_register(
     SRCS ${BOARD_SRCS}
     INCLUDE_DIRS
@@ -118,7 +125,7 @@ idf_component_register(
         "ui"
         "board"
     REQUIRES ${BOARD_REQUIRES}
-    PRIV_REQUIRES spi_flash esp_mm   # esp_private/flash_mmap.h: flash_mmap_remain() in the alive line (ram_telemetry.c); esp_private/esp_cache_private.h: esp_cache_get_alignment() (draw_buffer.c)
+    PRIV_REQUIRES ${BOARD_PRIV_REQUIRES}
     EMBED_FILES ${COMPANION_ART}
 )
 
@@ -214,6 +221,22 @@ endif()
 if(DEVICE_BATTERY_LOG)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_BATTERY_LOG=1)
     target_sources(${COMPONENT_LIB} PRIVATE "battery_log.c")
+endif()
+
+# Battery sleep (power_policy.c, power_sleep.c): -DDEVICE_BATTERY_SLEEP=1, default OFF. On the CST9217 + AXP2101 dial, while the PMIC says
+# "discharging", no USB host is there and the screen has been off for 3 s, the chip goes into light sleep; a touch (GPIO11, level wake)
+# wakes it. External power, a host, a missing PMIC or any doubt keeps the dial exactly as it was (policy state S0). The screen policy on
+# battery (dim at 30 s, off at 60 s) comes with it. Plan: workbench briefs/research/2026-10-29-battery-sleep-plan.md.
+#   idf.py -DDEVICE_BATTERY_SLEEP=1 -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3;sdkconfig.defaults.sleep" build
+# The overlay sdkconfig.defaults.sleep (power management, tickless idle, USB-Serial-JTAG guard) is NOT loaded by default; without it this
+# flag stops the configure step. Power management and tickless idle cost internal RAM in every mode, USB included (see the overlay).
+if(DEVICE_BATTERY_SLEEP)
+    if(NOT CONFIG_PM_ENABLE OR NOT CONFIG_FREERTOS_USE_TICKLESS_IDLE OR NOT CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION)
+        message(FATAL_ERROR "DEVICE_BATTERY_SLEEP needs the power-management options of sdkconfig.defaults.sleep: pass "
+                "-DSDKCONFIG_DEFAULTS=\"sdkconfig.defaults;sdkconfig.defaults.esp32s3;sdkconfig.defaults.sleep\" (and a fresh sdkconfig)")
+    endif()
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_BATTERY_SLEEP=1)
+    target_sources(${COMPONENT_LIB} PRIVATE "power_policy.c" "power_sleep.c")
 endif()
 
 # The UI gallery (ui/habitat/ui_gallery.inc): a UI-only image that walks every screen and animation of the firmware on a
