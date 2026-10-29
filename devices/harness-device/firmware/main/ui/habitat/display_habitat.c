@@ -392,6 +392,17 @@ static uint32_t paint(const ht_scene_t *next, const ht_damage_t *damage)
 #endif
     return raster_us;
 }
+// The battery sleep fields of the alive line, only in a DEVICE_BATTERY_SLEEP image: the policy state the render task has applied
+// (S0 external power, S1 battery with the screen on, S2 battery with the chip allowed to sleep), the light sleeps since boot and the
+// milliseconds spent in them. A drain test reads sleep off the daemon's dial log from these: slp_ms rising by about 60,000 a minute
+// means the chip sleeps almost all the time.
+#ifdef DEVICE_BATTERY_SLEEP
+#define PM_ALIVE_FMT " pm=%s slp=%lu slp_ms=%lu"
+#define PM_ALIVE_ARGS , power_sleep_state_name(), (unsigned long)power_sleep_sleeps(), (unsigned long)power_sleep_slept_ms()
+#else
+#define PM_ALIVE_FMT ""
+#define PM_ALIVE_ARGS
+#endif
 static void heartbeat(void)
 {
     static uint32_t last;
@@ -412,7 +423,7 @@ static void heartbeat(void)
     ESP_LOGI("habitat",
              "alive up=%lus heap=%u/%u psram=%u touches=%lu read_fails=%lu inferred=%lu "
              "frames=%lu bytes=%lu input_last_us=%lu muted=%d raster_max_us=%lu frame_max_us=%lu log_drops=%lu stack_free=%u "
-             "mmap_remain=%d alloc_fail=%u bat=%d chg=%d mv=%d%s%s",
+             "mmap_remain=%d alloc_fail=%u bat=%d chg=%d mv=%d%s%s" PM_ALIVE_FMT,
              (unsigned long)(now / 1000),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
@@ -426,7 +437,7 @@ static void heartbeat(void)
              ram_flash_mmap_remain_cached(), ram_telemetry_alloc_fail_count(),
              battery_pct(), battery_chg(), battery_mv(),   // -1 = unknown (no PMIC, or not polled yet); chg 0 standby, 1 charging, 2 on battery; mv the cell in mV
              touch.controller_ok ? "" : " TOUCH-DEAD",
-             display_is_asleep() ? " asleep" : "");
+             display_is_asleep() ? " asleep" : "" PM_ALIVE_ARGS);
     // The other nine tasks' stack high-water marks, on their own line (the alive line sits near the 512 B log limit).
     ram_telemetry_hwm();
     ram_telemetry_alloc_fail_flush();

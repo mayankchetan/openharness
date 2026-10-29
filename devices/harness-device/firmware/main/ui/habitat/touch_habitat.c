@@ -23,19 +23,106 @@ static esp_lcd_panel_io_handle_t io;
 static TaskHandle_t touch_task_handle;
 static atomic_uint presses, failures, inferred, last_press;
 static atomic_bool held, controller_ready;
+// BEGIN battery sleep (touch)
+// THE LEVEL WAKE (sleep plan section 3.3). While the chip may light-sleep the controller's INT pin (GPIO11, RTC-capable, active low)
+// is the wake source: gpio_wakeup_enable(LOW_LEVEL) both wakes the chip and turns the pin's interrupt into a LEVEL interrupt. The
+// touch driver owns that interrupt (esp_lcd_touch installs the only handler, touch_irq) and arms it for the FALLING EDGE. IDF does not
+// put the type back (gpio_wakeup_disable leaves it alone), and a level interrupt stays asserted for as long as INT is low, so:
+//   * touch_irq switches the interrupt off on its first hit while the wake is armed (s_level_wake) and notes it (s_irq_hit);
+//   * the touch task reads the controller: a contact wakes the screen as ever (the sleep policy's screen hook then takes the awake
+//     lock back, and the render task calls touch_sleep_disarm());
+//   * no contact (the CST9217 also answers a stale ACK while idle): read again up to 3 times, 5 ms apart, then put the interrupt
+//     back once INT is high; if INT stays low with nothing to read, park the wake until the next 1 s poll finds it high.
+// No second GPIO handler is installed. The pad itself keeps its awake configuration in sleep (gpio_wakeup_enable does that).
 #ifdef DEVICE_BATTERY_SLEEP
 #include "driver/gpio.h"
-// True while GPIO11 is armed as the LOW-level light-sleep wake source (touch_sleep_arm). A level interrupt stays asserted for as
-// long as INT is low, so the first hit switches the interrupt off; the touch task puts the pin back when the contact is handled.
-static atomic_bool s_level_wake;
+#include "esp_sleep.h"
+#include "freertos/semphr.h"
+#define TOUCH_INT_TYPE_AWAKE GPIO_INTR_NEGEDGE   // what the CST9217 driver arms (esp_lcd_touch_cst9217.c: levels.interrupt = 0)
+static atomic_bool s_level_wake;     // armed as the wake source (set for S2)
+static atomic_bool s_irq_hit;        // touch_irq switched the interrupt off since the last re-arm
+static atomic_bool s_parked;         // armed, but the wake and the interrupt are off because INT would not go high
+static atomic_uint s_unconfirmed;    // re-reads since the last hit
+static SemaphoreHandle_t s_pin_lock; // arm, disarm and re-arm never interleave
+static inline void touch_sleep_irq(void)
+{
+    if (atomic_load_explicit(&s_level_wake, memory_order_relaxed)) {
+        gpio_intr_disable(BSP_TOUCH_INT);
+        atomic_store_explicit(&s_irq_hit, true, memory_order_relaxed);
+    }
+}
+static void touch_pin_arm(void)
+{
+    gpio_wakeup_enable(BSP_TOUCH_INT, GPIO_INTR_LOW_LEVEL);   // level type + wake source; the pad keeps its configuration in sleep
+    esp_sleep_enable_gpio_wakeup();
+    gpio_intr_enable(BSP_TOUCH_INT);
+}
+void touch_sleep_arm(void)
+{
+    if (board()->touch != TOUCH_CST9217 || !s_pin_lock)
+        return;
+    xSemaphoreTake(s_pin_lock, portMAX_DELAY);
+    if (!atomic_load(&s_level_wake)) {
+        atomic_store(&s_irq_hit, false);
+        atomic_store(&s_parked, false);
+        atomic_store(&s_unconfirmed, 0);
+        atomic_store(&s_level_wake, true);   // 1: from here the ISR switches the interrupt off on its first hit
+        touch_pin_arm();                     // 2: level wake
+    }
+    xSemaphoreGive(s_pin_lock);
+}
+void touch_sleep_disarm(void)
+{
+    if (!s_pin_lock)
+        return;
+    xSemaphoreTake(s_pin_lock, portMAX_DELAY);
+    if (atomic_load(&s_level_wake)) {
+        gpio_intr_disable(BSP_TOUCH_INT);                          // 1: no interrupt of either kind while the pin changes over
+        gpio_wakeup_disable(BSP_TOUCH_INT);                        // 2: not a wake source any more (IDF leaves the type alone)
+        esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
+        gpio_set_intr_type(BSP_TOUCH_INT, TOUCH_INT_TYPE_AWAKE);   // 3: the driver's edge type back
+        atomic_store(&s_level_wake, false);                        // 4: the ISR leaves the interrupt alone again
+        atomic_store(&s_irq_hit, false);
+        atomic_store(&s_parked, false);
+        gpio_intr_enable(BSP_TOUCH_INT);                           // 5: and on
+    }
+    xSemaphoreGive(s_pin_lock);
+}
+// The touch task calls this after a sample that shows no contact. True: read again at once (the 5 ms pause is done here).
+static bool touch_sleep_unconfirmed(void)
+{
+    if (!atomic_load(&s_level_wake))
+        return false;
+    if (atomic_load(&s_irq_hit) && atomic_load(&s_unconfirmed) < 3) {
+        atomic_fetch_add(&s_unconfirmed, 1);
+        vTaskDelay(pdMS_TO_TICKS(5));   // the controller may report the contact on the next read
+        return true;
+    }
+    atomic_store(&s_unconfirmed, 0);
+    xSemaphoreTake(s_pin_lock, portMAX_DELAY);
+    if (atomic_load(&s_level_wake)) {   // (not disarmed meanwhile)
+        if (gpio_get_level(BSP_TOUCH_INT)) {
+            atomic_store(&s_irq_hit, false);
+            if (atomic_exchange(&s_parked, false))
+                touch_pin_arm();                       // the wake had been parked: arm it again
+            else
+                gpio_intr_enable(BSP_TOUCH_INT);       // the level interrupt, switched off by its first hit, back on
+        } else if (!atomic_exchange(&s_parked, true)) {
+            gpio_wakeup_disable(BSP_TOUCH_INT);        // INT is stuck low with nothing to read: let the chip sleep, look again on the next poll
+            atomic_store(&s_irq_hit, false);           // (this hit is dealt with: the next poll goes straight to looking at INT)
+        }
+    }
+    xSemaphoreGive(s_pin_lock);
+    return false;
+}
+#else
+static inline void touch_sleep_irq(void) {}
 #endif
+// END battery sleep (touch)
 static void touch_irq(esp_lcd_touch_handle_t tp)
 {
     (void)tp;
-#ifdef DEVICE_BATTERY_SLEEP
-    if (atomic_load_explicit(&s_level_wake, memory_order_relaxed))
-        gpio_intr_disable(BSP_TOUCH_INT);
-#endif
+    touch_sleep_irq();
     BaseType_t wake = pdFALSE;
     if (touch_task_handle)
         vTaskNotifyGiveFromISR(touch_task_handle, &wake);
@@ -202,6 +289,10 @@ static void task(void *arg)
             swallow = false;
         prev = down;
         atomic_store(&held, down);
+#ifdef DEVICE_BATTERY_SLEEP
+        if (!down && touch_sleep_unconfirmed())   // woken by INT with no contact to show (yet)
+            continue;
+#endif
         // GPIO wakes immediately. Active samples have a 4ms fallback; idle fallback catches a
         // missed IRQ.
         ulTaskNotifyTake(pdTRUE, touch_wait_ticks(down));
@@ -209,6 +300,9 @@ static void task(void *arg)
 }
 void touch_init(void)
 {
+#ifdef DEVICE_BATTERY_SLEEP
+    s_pin_lock = xSemaphoreCreateMutex();   // without it the wake is never armed (touch_sleep_arm checks)
+#endif
     assert(xTaskCreatePinnedToCore(task, "habitat_touch", 4096, NULL, 7, &touch_task_handle, 1) ==
            pdPASS);
 }

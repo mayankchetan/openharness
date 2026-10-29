@@ -28,8 +28,10 @@
 #include "fw_update.h"
 #include "power_policy.h"
 #include "sdkconfig.h"
+#include "esp_attr.h"
 #include "ui/display.h"
 #include "ui/habitat/runtime.h"
+#include "ui/touch.h"
 #include <stdatomic.h>
 
 #if !CONFIG_PM_ENABLE || !CONFIG_FREERTOS_USE_TICKLESS_IDLE
@@ -38,8 +40,29 @@
 
 static const char *TAG = "pm";
 
-// 1: the S0 to S1 step also turns automatic light sleep on (retention RAM, about 13.4 KB); 0: frequency scaling only (plan stage A1).
-#define POWER_SLEEP_LIGHT 0
+// What the chip really slept, from the exit callback of automatic light sleep (CONFIG_PM_LIGHT_SLEEP_CALLBACKS, in the overlay).
+// The callback runs from the idle task with interrupts off, under the power-management switch lock, so one writer at a time.
+// A sleep that was rejected returns at once and is not counted. The alive line prints the two numbers.
+static volatile uint32_t s_slept_count;
+static volatile uint32_t s_slept_ms;
+static volatile uint32_t s_slept_rem_us;
+#if CONFIG_PM_LIGHT_SLEEP_CALLBACKS
+static esp_err_t IRAM_ATTR on_light_sleep_exit(int64_t slept_us, void *arg)
+{
+    (void)arg;
+    if (slept_us >= 1000) {
+        s_slept_count++;
+        s_slept_rem_us += (uint32_t)slept_us;
+        s_slept_ms += s_slept_rem_us / 1000;
+        s_slept_rem_us %= 1000;
+    }
+    return ESP_OK;
+}
+#endif
+
+// 1: the S0 to S1 step also turns automatic light sleep on (CPU and cache retention RAM, about 13.4 KB, allocated once for the whole
+// battery session and freed when external power returns); 0: frequency scaling only. If the RAM is not there the dial stays on 1.
+#define POWER_SLEEP_LIGHT 1
 
 static esp_pm_lock_handle_t s_awake;   // ESP_PM_NO_LIGHT_SLEEP: held in S0 and S1, released in S2
 static atomic_bool s_lock_held;        // who owns the lock right now: flipped by exchange, so one acquire pairs with one release
@@ -78,6 +101,10 @@ static void keep_output_pads(void)
 static void lock_acquire_once(void)
 {
     if (s_awake && !atomic_exchange(&s_lock_held, true)) esp_pm_lock_acquire(s_awake);
+}
+static void lock_release_once(void)
+{
+    if (s_awake && atomic_exchange(&s_lock_held, false)) esp_pm_lock_release(s_awake);
 }
 
 // ── power management for battery (frequency scaling, and light sleep once the retention RAM is there) ──
@@ -134,6 +161,10 @@ void power_sleep_init(void)
     }
     lock_acquire_once();   // nothing sleeps until the policy lets go of it
     display_set_sleep_cb(on_screen);
+#if CONFIG_PM_LIGHT_SLEEP_CALLBACKS
+    esp_pm_sleep_cbs_register_config_t cbs = {.exit_cb = on_light_sleep_exit};
+    if (esp_pm_light_sleep_register_cbs(&cbs) != ESP_OK) ESP_LOGW(TAG, "light sleep callback not registered: slp= stays 0");
+#endif
     ESP_LOGI(TAG, "battery sleep built in; policy S0 (awake lock held)");
 }
 
@@ -205,10 +236,12 @@ static void on_screen(bool on)
 
 static void enter_battery(void)
 {
-    ESP_LOGI(TAG, "battery: int_free=%u largest=%u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-    power_sleep_pm_enter_battery(POWER_SLEEP_LIGHT);
+    const size_t free_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL), largest_before = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    const bool light = power_sleep_pm_enter_battery(POWER_SLEEP_LIGHT);
     s_pm_battery = true;
+    // G2b of the plan: the retention RAM should show here as about 13.4 KB less free (and the largest block before it at least 64 KB)
+    ESP_LOGI(TAG, "battery: %s; int_free %u -> %u, largest %u -> %u", light ? "light sleep on" : "frequency scaling only", (unsigned)free_before,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)largest_before, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 }
 
 static void leave_battery(void)
@@ -222,13 +255,20 @@ static void enter_s2(void)
     atomic_store(&s_in_s2, true);                // from here the screen hook takes the lock back on a wake
     s_audio_idle = audio_capture_idle(true);     // the I2S clocks stop; refused (and retried) while a beep plays
     display_render_guard(false);                 // the 1 s stall-guard timer would cap every sleep at one second
-    atomic_store(&s_relaxed, true);              // the pollers go to their S2 rates
+    atomic_store(&s_relaxed, true);              // the pollers go to their S2 rates (before the arm: a wake in between clears it, and stays cleared)
+    touch_sleep_arm();                           // INT (GPIO11) becomes the LOW-level wake source
+    lock_release_once();                         // the chip may sleep from here
+    if (!display_is_asleep()) {                  // the screen woke while this ran: its hook may have run before the release took effect
+        lock_acquire_once();                     // (idempotent) take it back; the next render pass undoes the rest
+        atomic_store(&s_relaxed, false);
+    }
 }
 
 static void exit_s2(void)
 {
-    lock_acquire_once();                         // idempotent: the ptt task or the screen hook may have done it
+    lock_acquire_once();                         // FIRST, and idempotent: the ptt task or the screen hook may have done it
     atomic_store(&s_relaxed, false);
+    touch_sleep_disarm();                        // the pin goes back to the touch driver's falling-edge interrupt
     if (s_audio_idle) audio_capture_idle(false);
     s_audio_idle = false;
     display_render_guard(true);
@@ -276,3 +316,9 @@ uint32_t power_sleep_ptt_poll_ms(uint32_t awake_ms)
 }
 
 bool power_sleep_relaxed(void) { return atomic_load_explicit(&s_relaxed, memory_order_relaxed); }
+
+// ── for the alive line ──────────────────────────────────────────────────────────────────────────────
+
+const char *power_sleep_state_name(void) { return pp_state_name(s_applied); }
+uint32_t power_sleep_sleeps(void) { return s_slept_count; }
+uint32_t power_sleep_slept_ms(void) { return s_slept_ms; }

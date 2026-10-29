@@ -39,6 +39,13 @@ uint32_t power_sleep_wait_ms(pp_poller_t who, uint32_t awake_ms);
 uint32_t power_sleep_ptt_poll_ms(uint32_t awake_ms);
 bool power_sleep_relaxed(void);
 
+// For the alive line (display_habitat.c, pm= slp= slp_ms=): the policy state the render task has applied ("S0", "S1", "S2"), the number
+// of light sleeps since boot (entries that really slept 1 ms or more) and the milliseconds the chip spent in them. 0 and 0 when the
+// exit callback is not built in.
+const char *power_sleep_state_name(void);
+uint32_t power_sleep_sleeps(void);
+uint32_t power_sleep_slept_ms(void);
+
 #else
 
 static inline void power_sleep_init(void) {}

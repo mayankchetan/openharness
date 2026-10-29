@@ -37,7 +37,7 @@ static void ht_illustrated_prepare(ht_scene_t *scene) { (void)scene; }
 static ht_scene_t scenes[2];
 static bool painted;
 static void (*power_cb)(bool);
-static uint32_t clock_ms;
+static uint32_t clock_ms, wait_limit = 1000, last_wait, next_wake_ms = 1000;
 static unsigned frames, ticks, waits, locks, sleeps, wakes, full_frames, notifications;
 static unsigned stop_after;
 static int mode;
@@ -66,6 +66,17 @@ static void display_sleep(void);
 static void display_bump_activity(void);
 static bool display_is_asleep(void) { return atomic_load(&asleep); }
 static void power(bool on) { if(on) wakes++; else sleeps++; }
+#ifdef DEVICE_BATTERY_SLEEP
+/* The sleep policy's two entry points into this loop (power_sleep.c, tested on its own in test_power_sleep_glue.py). */
+static bool fake_relaxed;
+static unsigned services, service_at_tick;
+static void (*sleep_cb)(bool);   /* display_set_sleep_cb's slot, called by display_sleep / display_wake; empty here */
+void power_sleep_render_service(void) { services++; service_at_tick = ticks; }
+uint32_t power_sleep_wait_ms(pp_poller_t who, uint32_t awake_ms) {
+    assert(who == PP_POLLER_RENDER);
+    return fake_relaxed && awake_ms < 5000 ? 5000 : awake_ms;
+}
+#endif
 static void display_lock(void) {
     locks++;
     // Touch wins the model lock while the renderer is waiting to auto-sleep.
@@ -81,7 +92,7 @@ static void uim_scene(const char *view, const ht_scene_t *scene) { (void)view; (
 static unsigned receipts;
 static uint32_t habitat_scene_receipt(void) { return mode==4 || mode==5 ? 77 : 0; }
 static void habitat_scene_presented(uint32_t receipt) { assert(receipt==77 && panel_on && frames>0); receipts++; }
-static uint32_t habitat_next_wake_ms(void) { return 1000; }
+static uint32_t habitat_next_wake_ms(void) { return next_wake_ms; }
 static int esp_lcd_panel_disp_on_off(int p, bool on) {
     (void)p; panel_on=on;
     // Power input arrives after the renderer sampled asleep, during panel OFF.
@@ -96,7 +107,8 @@ static uint32_t paint(const ht_scene_t *scene, const ht_damage_t *damage) {
     assert(scene && panel_on && damage->count); frames++; return 0;
 }
 static unsigned ulTaskNotifyTake(int clear, uint32_t timeout) {
-    assert(clear && timeout<=1000);
+    assert(clear && timeout<=wait_limit);
+    last_wait = timeout;
     if (++waits==stop_after) longjmp(finished,1);
     // Normal idle wake follows a quiet/asleep iteration, with no fresh model.
     if (mode==3 && waits==1) display_wake();
@@ -137,14 +149,27 @@ int main(void) {
     unsigned n=notifications, s=sleeps, w=wakes;
     display_sleep(); assert(notifications==n && sleeps==s);
     display_wake(); display_wake(); assert(notifications==n+1 && wakes==w+1);
+#ifdef DEVICE_BATTERY_SLEEP
+    /* Battery sleep image: the loop applies the sleep policy at the top of every pass (before the model step), and while the chip may
+       sleep it waits the 5 s ceiling even with an animation deadline due in 16 ms; awake, it waits the deadline as before. */
+    wait_limit = 5000;
+    next_wake_ms = 16; fake_relaxed = true; services = 0;
+    run(5,1000,1000,true,3); assert(services == 3 && last_wait == 5000 && service_at_tick == 2);
+    fake_relaxed = false;
+    run(5,1000,1000,true,2); assert(last_wait == 16 && services == 5);
+    next_wake_ms = 1000; run(5,1000,1000,true,1); assert(last_wait == 1000);
+    run(4,1000,1000,false,1); assert(frames == 1 && receipts == 1);          /* the normal frame path is the same */
+    wait_limit = 1000;
+#endif
     puts("Display power: production render-loop wake/repaint and touch/idle races, quiet wake, boundaries and wrap PASS");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='harness-display-power-') as folder:
     folder = Path(folder)
     (folder / 'power.c').write_text(code)
-    subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g',
-                    '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
-                    '-I', str(root / 'main/ui/habitat'), '-I', str(root / 'main'), str(folder / 'power.c'),
-                    '-o', str(folder / 'power')], check=True)
-    subprocess.run([str(folder / 'power')], check=True)
+    for flags in ([], ['-DDEVICE_BATTERY_SLEEP=1']):
+        subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g'] + flags + [
+                        '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
+                        '-I', str(root / 'main/ui/habitat'), '-I', str(root / 'main'), str(folder / 'power.c'),
+                        '-o', str(folder / 'power')], check=True)
+        subprocess.run([str(folder / 'power')], check=True)

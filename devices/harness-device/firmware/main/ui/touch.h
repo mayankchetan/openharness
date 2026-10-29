@@ -25,6 +25,14 @@ typedef struct {
 } touch_stats_t;
 void touch_stats(touch_stats_t *out);
 
+#ifdef DEVICE_BATTERY_SLEEP
+// Battery sleep (power_sleep.c, render task): arm GPIO11 as the LOW-level light-sleep wake source, and put the pin back as the
+// touch driver wants it (falling-edge interrupt) when the screen is awake again. Both are safe to repeat and do nothing on a dial
+// without the CST9217. The wake runs the driver's own interrupt handler; no second one is installed.
+void touch_sleep_arm(void);
+void touch_sleep_disarm(void);
+#endif
+
 #ifdef HARNESS_DEBUG_COMMANDS
 // Wake the touch task so it plays an injected gesture (dbg_inject_arm, debug_cmd.h) at once instead of
 // at its next idle poll. The gesture itself is read by the task, in place of the glass, on every pass.
