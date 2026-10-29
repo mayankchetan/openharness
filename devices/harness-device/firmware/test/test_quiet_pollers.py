@@ -39,6 +39,53 @@ assert re.search(r'#define POLL_MS\s+100\b', ptt)
 assert 'vTaskDelay(pdMS_TO_TICKS(power_sleep_ptt_poll_ms(POLL_MS)));' in ptt and 'vTaskDelay(pdMS_TO_TICKS(POLL_MS))' not in ptt
 checked.append('ptt 100 ms')
 
+# --- habitat_render: at most 1 s; the 5 s ceiling while the chip may sleep ---
+render = read('ui/habitat/display_habitat.c')
+assert 'ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_RENDER, wake_ms > 1000 ? 1000 : wake_ms)));' in render
+checked.append('render 1000 ms')
+# the guard timer that would cap every sleep at 1 s can be stopped and started, on the render task, only with the flag
+guard = re.search(r'#ifdef DEVICE_BATTERY_SLEEP\n(?:[^\n]*\n)*?void display_render_guard\(bool run\)\n\{(.*?)\n\}\n#endif', render, re.S)
+assert guard, 'display_render_guard is compiled only with the flag'
+assert 'esp_timer_stop(render_guard)' in guard[1] and 'esp_timer_start_periodic(render_guard, 1000000)' in guard[1]
+assert re.search(r'#ifdef DEVICE_BATTERY_SLEEP\n(?:[^\n]*\n)*?void display_render_guard\(bool run\);\n#endif', read('ui/display.h'))
+
+# --- cable_link reader: 100 ms ---
+link = read('cable_link.c')
+assert re.search(r'#define READ_WAIT_MS 100\b', link)
+assert 'pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_CABLE_READER, READ_WAIT_MS))' in link
+checked.append('cable reader 100 ms')
+
+# --- cable_session: 250 ms; no hello while the chip may sleep ---
+client = read('cable_client.c')
+session = re.search(r'static void session_task\(void \*arg\)\n\{.*?^\}', client, re.M | re.S)[0]
+assert 'vTaskDelay(pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_CABLE_SESSION, 250)));' in session
+assert 'if (!power_sleep_relaxed()) send_hello();' in session and session.count('send_hello()') == 1
+checked.append('cable session 250 ms')
+
+# --- proj_refresh: 1000 ms ---
+app = read('app_main.c')
+refresh = re.search(r'static void refresh_task\(void \*arg\)\n\{.*?^\}', app, re.M | re.S)[0]
+assert 'ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_REFRESH, 1000)));' in refresh
+checked.append('refresh 1000 ms')
+
+# --- batlog: 1000 ms, stretched only to the next sample ---
+batlog = read('battery_log.c')
+assert 'uint32_t wait_ms = power_sleep_wait_ms(PP_POLLER_BATLOG, 1000);' in batlog
+assert re.search(r'if \(wait_ms > 1000\) \{\s+const int64_t left_ms = \(next_us - esp_timer_get_time\(\)\) / 1000;\s+'
+                 r'if \(left_ms < \(int64_t\)wait_ms\) wait_ms = left_ms < 1 \? 1 : \(uint32_t\)left_ms;\s+\}', batlog)
+assert 'vTaskDelay(pdMS_TO_TICKS(wait_ms));' in batlog and 'vTaskDelay(pdMS_TO_TICKS(1000))' not in batlog
+checked.append('batlog 1000 ms')
+
+# --- every poller in the policy table has exactly one caller ---
+policy_h = (main / 'power_policy.h').read_text()
+names = re.findall(r'^\s+(PP_POLLER_[A-Z_]+),?', re.search(r'typedef enum \{(.*?)\} pp_poller_t;', policy_h, re.S)[1], re.M)
+assert len(names) == len(relaxed) + 1 and names[-1] == 'PP_POLLER_COUNT', names
+callers = ''.join(p.read_text(errors='replace') for p in main.rglob('*.c') if p.name not in ('power_policy.c', 'power_sleep.c'))
+for name in names[:-1]:
+    assert len(re.findall(r'power_sleep_wait_ms\(' + name + r'\b', callers)) == 1, f'{name}: exactly one caller'
+    assert name in relaxed, f'{name}: no relaxed value in power_policy.c'
+    assert relaxed[name] > 20
+
 # --- the relaxed values: longer than today's, and the render wait under the 10 s task watchdog ---
 assert relaxed['PP_POLLER_TOUCH'] > 20
 assert relaxed['PP_POLLER_RENDER'] < 10000, 'the render task feeds the 10 s task watchdog on every loop'

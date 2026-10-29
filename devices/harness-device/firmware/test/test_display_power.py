@@ -20,6 +20,7 @@ def function(name):
 
 code = r'''
 #include "terminal.h"
+#include "power_sleep.h"   /* power_sleep_wait_ms: the render wait, unchanged with the flag off */
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -144,6 +145,6 @@ with tempfile.TemporaryDirectory(prefix='harness-display-power-') as folder:
     (folder / 'power.c').write_text(code)
     subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g',
                     '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
-                    '-I', str(root / 'main/ui/habitat'), str(folder / 'power.c'),
+                    '-I', str(root / 'main/ui/habitat'), '-I', str(root / 'main'), str(folder / 'power.c'),
                     '-o', str(folder / 'power')], check=True)
     subprocess.run([str(folder / 'power')], check=True)

@@ -26,6 +26,7 @@
 #include "fw_update.h"
 #include "last_words.h"
 #include "pet_store.h"
+#include "power_sleep.h"
 #include "ram_telemetry.h"
 #include "task_util.h"
 #include "board/board.h"
@@ -1680,11 +1681,12 @@ static void session_task(void *arg)
         const int64_t now = esp_timer_get_time();
 
         if (now >= next_hello_us) {
-            send_hello();
+            // No hello while the chip may sleep: nobody is there to read it, and building the JSON would wake the dial every 2 s.
+            if (!power_sleep_relaxed()) send_hello();
             next_hello_us = now + (int64_t)(s_session ? HELLO_SESSION_MS : HELLO_ALONE_MS) * 1000;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(250));
+        vTaskDelay(pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_CABLE_SESSION, 250)));
     }
 }
 

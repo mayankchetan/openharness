@@ -28,6 +28,7 @@ code = r'''
 #include <stdio.h>
 #include <stdatomic.h>
 #include <setjmp.h>
+#include "power_sleep.h"   /* the loops ask power_sleep_wait_ms / power_sleep_relaxed: their own waits, no sleeping, with the flag off */
 #define READ_CHUNK 256
 #define READ_WAIT_MS 100
 #define FRAME_IDLE_US INT64_C(15000000)
@@ -191,5 +192,5 @@ with tempfile.TemporaryDirectory(prefix='harness-cable-session-') as folder:
         subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g', f'-DTASK_STACK_PSRAM_FLASH_OPS={psram_stack}',
                         f'-DTASK_STACK_PSRAM_READER={psram_reader}',
                         '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
-                        str(out / 'session.c'), '-o', str(out / 'session')], check=True)
+                        '-I', str(main), str(out / 'session.c'), '-o', str(out / 'session')], check=True)
         subprocess.run([str(out / 'session')], check=True)

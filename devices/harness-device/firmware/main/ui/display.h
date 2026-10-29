@@ -22,6 +22,12 @@ void display_lock_at(const char *who);
 #define display_lock() display_lock_at(__func__)
 void display_unlock(void);
 
+#ifdef DEVICE_BATTERY_SLEEP
+// Stop (run = false) or start (true) the render stall guard, a 1 s periodic timer that would cap every light sleep at one second.
+// Called by the sleep policy on the render task only, when the chip may sleep and when the screen comes back.
+void display_render_guard(bool run);
+#endif
+
 // Idle battery-save: turn the AMOLED panel off / back on. `display_wake()` repaints the current
 // screen and re-arms the idle timer. Call sites run on the LVGL task (idle check + touch wake).
 void display_sleep(void);

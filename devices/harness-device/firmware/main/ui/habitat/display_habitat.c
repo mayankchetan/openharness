@@ -16,6 +16,7 @@ void cable_transport_benchmark(void);
 #include "draw_buffer.h"
 #include "ram_telemetry.h"
 #include "battery.h"
+#include "power_sleep.h"
 #include "board_pins.h"
 #include "board.h"
 #include "esp_lcd_panel_io.h"
@@ -139,6 +140,24 @@ static void render_watch(void *arg)
     // Panic reboot also preserves the stage in the existing last-words log.
     abort();
 }
+#ifdef DEVICE_BATTERY_SLEEP
+// The stall guard is a 1 s periodic esp_timer, and an esp_timer alarm caps every light sleep at its period. While the chip may
+// sleep (power_sleep.c, state S2) the render task stops it, and starts it again, on its own task, when the screen comes back.
+// The task watchdog (10 s, feeding on every loop of the render task) still watches this task.
+void display_render_guard(bool run)
+{
+    static bool running = true;   // render_task starts it
+    if (run == running)
+        return;
+    if (run) {
+        render_progress(RENDER_MODEL);   // the stall clock starts now, not when the guard was stopped
+        ESP_ERROR_CHECK(esp_timer_start_periodic(render_guard, 1000000));
+    } else {
+        ESP_ERROR_CHECK(esp_timer_stop(render_guard));
+    }
+    running = run;
+}
+#endif
 #ifdef DEVICE_RENDER_FAULT
 // Diagnostic image only. One deliberate blocked render task, then normal boot.
 // The RTC marker survives the panic; no settings or NVS writes are involved.
@@ -572,7 +591,9 @@ static void render_task(void *arg)
         heartbeat();
         // Notifications wake immediately; only finite reactions / voice require the short timeout.
         render_progress(RENDER_WAIT);
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wake_ms > 1000 ? 1000 : wake_ms));
+        // power_sleep_wait_ms: the same wait on external power and while the screen is on; the 5 s ceiling, with the animation
+        // deadlines ignored, while the chip may sleep (the screen is off then, and a notification still wakes this task at once).
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_RENDER, wake_ms > 1000 ? 1000 : wake_ms)));
     }
 }
 void display_init(void)

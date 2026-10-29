@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
+#include "power_sleep.h"
 #include <stdio.h>
 
 static const char *TAG = "batlog";
@@ -77,7 +78,14 @@ static void task(void *arg)
     bool dumped = false;
     int64_t next_us = esp_timer_get_time() + (int64_t)SAMPLE_MS * 1000;
     for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        // One second; while the chip may sleep the wait stretches to the next sample (at most 10 s), so the instrument does not
+        // wake the dial every second to look at a clock.
+        uint32_t wait_ms = power_sleep_wait_ms(PP_POLLER_BATLOG, 1000);
+        if (wait_ms > 1000) {
+            const int64_t left_ms = (next_us - esp_timer_get_time()) / 1000;
+            if (left_ms < (int64_t)wait_ms) wait_ms = left_ms < 1 ? 1 : (uint32_t)left_ms;
+        }
+        vTaskDelay(pdMS_TO_TICKS(wait_ms));
         const int chg = battery_chg();
         if (!dumped && chg >= 0 && chg != 2 && cable_client_is_connected()) {
             dumped = true;   // once a boot, when the dial is on external power and the daemon can file the lines

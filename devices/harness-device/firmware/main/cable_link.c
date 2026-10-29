@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "last_words.h"
+#include "power_sleep.h"
 #include "task_util.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -179,7 +180,8 @@ static void reader_task(void *arg)
     uint8_t chunk[READ_CHUNK];
     int64_t last_rx_us = 0;
     while (1) {
-        int n = usb_serial_jtag_read_bytes(chunk, sizeof(chunk), pdMS_TO_TICKS(READ_WAIT_MS));
+        // READ_WAIT_MS; 2 s while the chip may sleep (no host can be talking then: a host would have kept it awake)
+        int n = usb_serial_jtag_read_bytes(chunk, sizeof(chunk), pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_CABLE_READER, READ_WAIT_MS)));
         const int64_t now = esp_timer_get_time();
         // This task owns the decoder. Reset before feeding a newly arrived
         // read too: scheduling need not provide an intervening empty read.

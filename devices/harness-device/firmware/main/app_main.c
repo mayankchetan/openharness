@@ -170,7 +170,7 @@ static void refresh_task(void *arg)
         // focus arrived at a carousel still holding the ring from before — which is the whole of "the
         // window moved to an agent and the dial stayed put". The hold in ui_focus_project makes that
         // correct; this makes it quick.
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_REFRESH, 1000)));   // 5 s while the chip may sleep
 
         // Telemetry that must not run in the render task: the flash mmap sample (can wait for a flash write)
         // and the 61 s / 300 s RAM_REGIONS lines. Cheap when nothing is due.

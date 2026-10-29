@@ -11,6 +11,7 @@ reader = re.search(r'static void reader_task\(void \*arg\)\n\{.*?^\}', source, r
 defines = '\n'.join(re.findall(r'^#define (?:READ_CHUNK|READ_WAIT_MS|FRAME_IDLE_US) .+$', source, re.M))
 code = r'''
 #include "cable_link.h"
+#include "power_sleep.h"   /* the reader asks power_sleep_wait_ms for its wait: READ_WAIT_MS with the flag off */
 #include <assert.h>
 #include <setjmp.h>
 #include <stdint.h>
