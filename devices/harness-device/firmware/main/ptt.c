@@ -51,10 +51,12 @@ static void ptt_task(void *arg)
     battery_poll_t battery_poll = {0};
 
     while (1) {
-        // The one place the battery is read: percent and charge state, every 30 s, into battery.c's cache (the alive
-        // line and the hello frame read that). Only a dial with the PMIC; the other boards keep -1 = unknown.
-        if (pwr_key && battery_poll_due(&battery_poll, (uint32_t)(esp_timer_get_time() / 1000)))
+        // The one place the battery is read: percent, charge state and voltage, every 30 s, into battery.c's cache (the
+        // alive line and the hello frame read that). Only a dial with the PMIC; the other boards keep -1 = unknown.
+        if (pwr_key && battery_poll_due(&battery_poll, (uint32_t)(esp_timer_get_time() / 1000))) {
             battery_set(power_battery_pct(), power_charge_state());
+            battery_set_mv(power_battery_mv());
+        }
         if (pwr_key && power_take_pwrkey_tap()) screen_toggle("PWR tap");
 
         int boot_now = gpio_get_level(BSP_BOOT_BUTTON);

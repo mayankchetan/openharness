@@ -10,6 +10,11 @@ bool power_init(void);
 // Battery charge percent 0..100, or -1 if unknown (no driver/battery/read error).
 int power_battery_pct(void);
 
+// Battery voltage in mV, or -1 if unknown (no driver, read error, a value outside 2,500..4,600 mV, ADC off). Reads the bus: one
+// task at a slow rate (ptt.c, every BATTERY_POLL_MS). If the battery-voltage ADC channel is off it switches it on and answers -1
+// this time.
+int power_battery_mv(void);
+
 // True while the battery is actively charging (drives the charge bolt). False if unknown.
 bool power_is_charging(void);
 

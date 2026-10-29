@@ -14,7 +14,7 @@ match = re.search(r'ESP_LOGI\("habitat",\s*((?:"[^"]*"\s*)+),', source)
 assert match, 'alive line not found'
 fmt = ''.join(re.findall(r'"([^"]*)"', match[1]))
 assert fmt.startswith('alive up=')
-assert ' bat=%d chg=%d' in fmt, 'the alive line carries the battery'
+assert ' bat=%d chg=%d mv=%d' in fmt, 'the alive line carries the battery: shown percent, charge state, cell voltage in mV'
 
 limit = int(re.search(r'#define LOG_LINE_MAX (\d+)', link)[1])
 widths = {'lu': 10, 'u': 10, 'd': 11}
@@ -32,4 +32,4 @@ for part in re.split(r'(%l?[udsx])', fmt):
 assert strings == 2
 prefix = len('I (4294967295) habitat: ')
 assert worst + prefix <= limit, (worst + prefix, limit)
-print(f'alive line: carries bat= and chg=, worst case {worst + prefix} of {limit} bytes PASS')
+print(f'alive line: carries bat=, chg= and mv=, worst case {worst + prefix} of {limit} bytes PASS')

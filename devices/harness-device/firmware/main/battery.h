@@ -9,13 +9,33 @@
 #include <stdint.h>
 
 #define BATTERY_POLL_MS 30000
+// A single Li-ion cell reads inside this window (dead about 3,000, full 4,200); anything else is a wrong register or an ADC that is off.
+#define BATTERY_MV_MIN 2500
+#define BATTERY_MV_MAX 4600
 
-// Store a sample. A percent outside 0..100 and a state outside 0..2 are stored as unknown (-1).
+// Store a sample: the fuel gauge's percent and the charge state. A percent outside 0..100 and a state outside 0..2 are
+// stored as unknown (-1).
 void battery_set(int pct, int chg);
-// Percent 0..100, or -1 (no PMIC, not sampled yet, bad read).
+// The percent to SHOW, 0..100, or -1 (no PMIC, not sampled yet, bad read). While the dial runs on its battery (charge state
+// 2) this is the gauge's percent mapped to the share of the run time left (battery_discharge_pct); on external power it is
+// the gauge's own percent.
 int battery_pct(void);
+// The gauge's own percent, 0..100, or -1. What the battery log stores.
+int battery_pct_raw(void);
 // 0 standby, 1 charging, 2 discharging, or -1.
 int battery_chg(void);
+
+// The gauge's percent while discharging, mapped to the share of the run time left at a constant current. The AXP2101 gauge
+// reads about 58 % with a third of the run left (overnight log, 2026-10-28), because its curve follows the cell's voltage and
+// the cell is flat in the middle. -1 for a value outside 0..100. Pure function of its argument.
+int battery_discharge_pct(int raw);
+
+// Battery voltage in mV, or -1 (not read, ADC off, outside 2,500..4,600 mV). Set by the one poller, like the percent.
+void battery_set_mv(int mv);
+int battery_mv(void);
+// The two voltage register bytes (AXP2101 VBAT_H bits 5:0 and VBAT_L, 1 mV a step) as mV; -1 for a failed read (negative
+// byte) or a value outside 2,500..4,600 mV, which includes 0 (ADC off).
+int battery_mv_from_regs(int high, int low);
 
 // One poller's schedule (the caller owns it, zero-initialised).
 typedef struct { uint32_t next_ms; bool armed; } battery_poll_t;

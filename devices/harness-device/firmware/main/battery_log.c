@@ -33,7 +33,9 @@ static bool blob_set(const char *key, const void *buf, size_t len)
 {
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return false;
-    esp_err_t e = nvs_set_blob(h, key, buf, len);
+    // Length 0 is "erase this block" (battery_ring.c drops a ring of another version); a key that is not there is erased already.
+    esp_err_t e = len ? nvs_set_blob(h, key, buf, len) : nvs_erase_key(h, key);
+    if (e == ESP_ERR_NVS_NOT_FOUND && !len) e = ESP_OK;
     if (e == ESP_OK) e = nvs_commit(h);
     nvs_close(h);
     return e == ESP_OK;
@@ -61,7 +63,8 @@ static const batlog_store_t s_store = {ring_load, ring_save, meta_load, meta_sav
 static void emit(uint32_t seq, const batlog_entry_t *e, void *ctx)
 {
     (void)ctx;
-    ESP_LOGI(TAG, "BATLOG seq=%u boot=%u up_s=%u pct=%u", (unsigned)seq, (unsigned)e->boot, (unsigned)e->up_s, (unsigned)e->pct);
+    ESP_LOGI(TAG, "BATLOG seq=%u boot=%u up_s=%u pct=%u mv=%u shown=%d", (unsigned)seq, (unsigned)e->boot, (unsigned)e->up_s,
+             (unsigned)e->pct, (unsigned)e->mv, battery_discharge_pct(e->pct));   // every sample was taken on battery (state 2)
 }
 
 // An internal stack on purpose: this task writes NVS, and the PSRAM-stack tasks (ptt, beep, proj_refresh) were moved on the
@@ -86,9 +89,10 @@ static void task(void *arg)
         if (now < next_us) continue;
         next_us += (int64_t)SAMPLE_MS * 1000;
         if (next_us <= now) next_us = now + (int64_t)SAMPLE_MS * 1000;   // never a burst after a stall
-        const int pct = battery_pct();
-        if (chg != 2 || pct < 0) continue;
-        batlog_entry_t e = {boot, (uint32_t)(now / 1000000), (uint8_t)pct};
+        const int raw = battery_pct_raw();   // the gauge's own figure, not the remapped one shown on the glass
+        if (chg != 2 || raw < 0) continue;
+        const int mv = battery_mv();
+        batlog_entry_t e = {boot, (uint32_t)(now / 1000000), (uint8_t)raw, (uint16_t)(mv > 0 ? mv : 0)};
         if (!batlog_append(&s_store, e)) ESP_LOGW(TAG, "NVS write failed; sample dropped");
     }
 }

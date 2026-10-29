@@ -1,4 +1,5 @@
 #include "power.h"
+#include "battery.h"
 #include "board_pins.h"
 #include "board_i2c.h"
 #include "board.h"
@@ -16,6 +17,13 @@ static i2c_master_dev_handle_t s_dev;
 #define AXP_REG_IRQ_ST1   0x49   // IRQ status set 1 (PONKEY power-key events)
 #define AXP_REG_IRQ_ST2   0x4A   // IRQ status set 2 (write-1-to-clear)
 #define AXP_REG_BAT_PCT   0xA4   // fuel-gauge battery percentage (0..100), valid when gauge is running
+// Battery voltage: a 14-bit ADC value, 1 mV a step, high 6 bits in 0x34 and low 8 bits in 0x35; bit 0 of 0x30 enables that
+// channel. These three addresses are the AXP2101 register map as XPowersLib names it (ADC_CHANNEL_CTRL, ADC_DATA_RELUST0/1); no
+// datasheet for it is in this repo (parts/), so battery_mv_from_regs() accepts only 2,500..4,600 mV and a wrong register reads
+// as "unknown" instead of as a voltage. Check the first mv= readings against a multimeter (full about 4,150-4,200).
+#define AXP_REG_ADC_EN    0x30
+#define AXP_REG_VBAT_H    0x34
+#define AXP_REG_VBAT_L    0x35
 // PONKEY (PWR key) PRESS (negative-edge / key-DOWN) bit, in both IRQ enable-1 (0x41) and status-1 (0x49).
 // We react on the key-DOWN edge so the screen toggles INSTANTLY. The SHORT-press event (bit 3) is only
 // latched by the AXP2101 on release, AFTER its internal short-press timing → a 1-2s lag. PONKEY bits:
@@ -93,6 +101,23 @@ int power_battery_pct(void)
     int v = axp_read(AXP_REG_BAT_PCT);
     if (v < 0 || v > 100) return -1;   // gauge not ready / no battery / bad read
     return v;
+}
+
+int power_battery_mv(void)
+{
+    // High, low, high again: the ADC updates between two reads, and a changed high byte means the pair is torn.
+    int mv = -1;
+    for (int attempt = 0; attempt < 2 && mv < 0; attempt++) {
+        int h = axp_read(AXP_REG_VBAT_H), l = axp_read(AXP_REG_VBAT_L), h2 = axp_read(AXP_REG_VBAT_H);
+        if (h >= 0 && h2 == h) mv = battery_mv_from_regs(h, l);
+        else if (h < 0 || l < 0) break;   // the bus failed: not worth a second try
+    }
+    if (mv < 0) {
+        // Zero is what a disabled channel reads. Switch it on (the only write here) and answer on the next poll.
+        int en = axp_read(AXP_REG_ADC_EN);
+        if (en >= 0 && !(en & 1)) axp_write(AXP_REG_ADC_EN, (uint8_t)(en | 1));
+    }
+    return mv;
 }
 
 // AXP2101 PMU_STATUS2 (REG 0x01) bits [7:5] = battery activity: 0 = standby (idle/full), 1 = charging,
