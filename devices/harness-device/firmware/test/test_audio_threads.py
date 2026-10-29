@@ -84,6 +84,13 @@ static BaseType_t xTaskCreatePinnedToCore(void (*f)(void *),const char *name,uns
     assert(!pthread_mutex_init(&task->lock,NULL));assert(!pthread_cond_init(&task->wake,NULL));
     task->function=f;*out=task;assert(!pthread_create(&task->thread,NULL,run_task,task));return pdPASS;
 }
+// voice_send's stack is in PSRAM on the board (TASK_STACK_PSRAM_FLASH_OPS); the host stub counts the call and
+// starts the same thread, with the core the caller asked for (voice_send is pinned to core 0).
+static unsigned psram_creates;
+__attribute__((unused)) static BaseType_t task_create_psram(void (*f)(void *),const char *name,unsigned stack,void *arg,
+                                    unsigned priority,TaskHandle_t *out,BaseType_t core) {
+    psram_creates++;assert(core==0);return xTaskCreatePinnedToCore(f,name,stack,arg,priority,out,core);
+}
 static void vTaskDelete(TaskHandle_t task) {
     pthread_mutex_lock(&task->lock);task->quit=true;pthread_cond_signal(&task->wake);pthread_mutex_unlock(&task->lock);
     assert(!pthread_join(task->thread,NULL));pthread_cond_destroy(&task->wake);pthread_mutex_destroy(&task->lock);free(task);
@@ -175,12 +182,18 @@ int main(void) {
         } else assert(!ends&&aborts==1);
     }
     vTaskDelete(capture_task);vTaskDelete(sender_task);free(storage);
+#if TASK_STACK_PSRAM_FLASH_OPS
+    assert(psram_creates==1);   // voice_send only: voice_capture keeps its internal stack
+#else
+    assert(psram_creates==0);
+#endif
     puts("Audio threads: 1000 concurrent offline sessions; exact PCM, pinned targets, explicit stop/abort, start/read/USB/overflow failures and immediate restart PASS");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='harness-audio-threads-') as d:
     out=Path(d);(out/'threads.c').write_text(code)
-    subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-O1','-g','-pthread',
-        '-fsanitize='+os.environ.get('SANITIZERS','undefined,bounds'),'-I',str(main),
-        str(out/'threads.c'),str(main/'voice_buffer.c'),'-o',str(out/'threads')],check=True)
-    subprocess.run([str(out/'threads')],check=True,timeout=120)
+    for psram_stack in (1,0):   # TASK_STACK_PSRAM_FLASH_OPS on (the default) and off
+        subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-O1','-g','-pthread',f'-DTASK_STACK_PSRAM_FLASH_OPS={psram_stack}',
+            '-fsanitize='+os.environ.get('SANITIZERS','undefined,bounds'),'-I',str(main),
+            str(out/'threads.c'),str(main/'voice_buffer.c'),'-o',str(out/'threads')],check=True)
+        subprocess.run([str(out/'threads')],check=True,timeout=120)

@@ -172,7 +172,8 @@ endif()
 # cmake (idf.py -D<NAME>=0 build) to put that one item back in internal RAM for an A/B build. Not a Kconfig option on purpose:
 # they change what a test or a profile image measures, not what the product is.
 #   HT_RENDER_DATA_PSRAM   scenes[2] and arc_caches[2] in PSRAM          (ui/habitat/terminal.h)
-foreach(psram_switch HT_RENDER_DATA_PSRAM)
+#   TASK_STACK_PSRAM_FLASH_OPS   habitat_actions, cable_session, voice_send stacks in PSRAM   (task_util.h)
+foreach(psram_switch HT_RENDER_DATA_PSRAM TASK_STACK_PSRAM_FLASH_OPS)
     if(DEFINED ${psram_switch})
         target_compile_definitions(${COMPONENT_LIB} PRIVATE ${psram_switch}=${${psram_switch}})
     endif()

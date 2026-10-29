@@ -16,7 +16,8 @@ BaseType_t task_create_psram(TaskFunction_t fn, const char *name, uint32_t stack
                              UBaseType_t priority, TaskHandle_t *out, BaseType_t core);
 
 // Per-task switches (compile with -DTASK_STACK_PSRAM_<X>=0 to put that task's stack back in internal RAM).
-// Stack bytes moved out of internal RAM at the default: ptt 4,096, beep 4,096, proj_refresh 7,168.
+// Stack bytes moved out of internal RAM at the default: ptt 4,096, beep 4,096, proj_refresh 7,168; FLASH_OPS
+// (habitat_actions 6,144, cable_session 4,096, voice_send 5,120) 15,360.
 #ifndef TASK_STACK_PSRAM_PTT
 #define TASK_STACK_PSRAM_PTT 1
 #endif
@@ -25,4 +26,11 @@ BaseType_t task_create_psram(TaskFunction_t fn, const char *name, uint32_t stack
 #endif
 #ifndef TASK_STACK_PSRAM_PROJ
 #define TASK_STACK_PSRAM_PROJ 1
+#endif
+// The three tasks that save to NVS or read config but never map flash: habitat_actions (config_save_*), cable_session
+// (send_hello, config_load_voicelang) and voice_send (config_load_voicelang). NVS writes from a PSRAM stack passed the
+// XiP probe (1,000 write+commit on each core, and against esp_ota_end; diet2-r1-results.md section 1). cable_link is NOT
+// in this group: its reader runs fw_update_* -> esp_ota_*, and esp_ota_begin asserts on a PSRAM stack.
+#ifndef TASK_STACK_PSRAM_FLASH_OPS
+#define TASK_STACK_PSRAM_FLASH_OPS 1
 #endif

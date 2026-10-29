@@ -262,6 +262,8 @@ python3 "$here/test_touch_inject.py"
 python3 "$here/test_render_guard.py"
 # PSRAM placement of the scene buffers and arc caches (HT_RENDER_DATA_PSRAM), read from the preprocessed source.
 python3 "$here/test_render_data_psram.py"
+# Which tasks have a PSRAM stack (task_create_psram under its TASK_STACK_PSRAM_* macro) and which keep an internal one.
+python3 "$here/test_psram_task_sites.py"
 python3 "$here/test_display_power.py"
 python3 "$here/test_machine_ui.py"
 python3 "$here/test_reload_threads.py"

@@ -27,6 +27,7 @@
 #include "last_words.h"
 #include "pet_store.h"
 #include "ram_telemetry.h"
+#include "task_util.h"
 #include "board/board.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -1686,7 +1687,14 @@ bool cable_client_start(void)
     }
     s_last_rx_us = esp_timer_get_time();
     ui_set_connected(false);
+#if TASK_STACK_PSRAM_FLASH_OPS
+    // Stack in PSRAM (task_util.h). session_task sends the hello (esp_app_get_description returns a pointer, no mapping)
+    // and reads config from NVS; it maps no flash and hands no stack buffer to DMA (call graph and grep, 2026-10-28).
+    // The failure path below deletes it with vTaskDelete: a boot-time failure that leaves its 4,096 B PSRAM stack allocated.
+    if (task_create_psram(session_task, "cable_session", 4096, NULL, 4, &hello_task, tskNO_AFFINITY) != pdPASS) {
+#else
     if (xTaskCreate(session_task, "cable_session", 4096, NULL, 4, &hello_task) != pdPASS) {
+#endif
         ESP_LOGE(TAG, "session task create failed — no handshake");
         goto failed;
     }

@@ -129,6 +129,13 @@ static int xTaskCreate(void (*task)(void *),const char *name,int stack,void *arg
     owner = 1; s_cb(1,1,NULL,0,s_ctx); owner = 0; new_task_ready = true;
     return pdPASS;
 }
+// cable_session's stack is in PSRAM on the board (TASK_STACK_PSRAM_FLASH_OPS); the host stub counts the call and
+// takes the same path as xTaskCreate, so the failure schedule below is the same in both settings.
+#define tskNO_AFFINITY (-1)
+static unsigned psram_creates;
+__attribute__((unused)) static int task_create_psram(void (*task)(void *),const char *name,int stack,void *arg,int priority,void *handle,int core) {
+    (void)core; psram_creates++; return xTaskCreate(task,name,stack,arg,priority,handle);
+}
 static void vTaskDelete(TaskHandle_t task) { assert(task==hello_handle&&hellos);hellos--;hello_handle=NULL; }
 static void xTaskNotifyGive(TaskHandle_t task) {
     assert(task==hello_handle&&hellos&&s_running&&driver&&new_task_ready);notifications++;
@@ -151,8 +158,16 @@ int main(void) {
     }
     attempts=fail_at=0;
     assert(psram_calls>=1); // s_agents comes from ram_psram_calloc, not from the internal-first calloc
+#if TASK_STACK_PSRAM_FLASH_OPS
+    assert(psram_creates==4);   // the handshake task: failure points 4-7 reach the create
+#else
+    assert(psram_creates==0);
+#endif
     now = 91; assert(cable_client_start());
     assert(new_task_ready && s_running && connected && s_session && notifications==1);
+#if TASK_STACK_PSRAM_FLASH_OPS
+    assert(psram_creates==5);   // and the clean start made its handshake task through task_create_psram too
+#endif
     unsigned calls=attempts;assert(cable_client_start());assert(calls==attempts&&notifications==1);
     s_tick = counted_tick; owner = 1;
     if (!setjmp(loop_done)) reader_task(NULL);
@@ -173,7 +188,8 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix='harness-cable-session-') as folder:
     out = Path(folder)
     (out / 'session.c').write_text(code)
-    subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g',
-                    '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
-                    str(out / 'session.c'), '-o', str(out / 'session')], check=True)
-    subprocess.run([str(out / 'session')], check=True)
+    for psram_stack in (1, 0):   # TASK_STACK_PSRAM_FLASH_OPS on (the default) and off
+        subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g', f'-DTASK_STACK_PSRAM_FLASH_OPS={psram_stack}',
+                        '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
+                        str(out / 'session.c'), '-o', str(out / 'session')], check=True)
+        subprocess.run([str(out / 'session')], check=True)

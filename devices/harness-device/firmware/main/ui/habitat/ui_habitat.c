@@ -28,6 +28,7 @@ static ht_gallery_t gallery;
 #include "cable_client.h"
 #include "pet_store.h"
 #include "../../elapsed.h"
+#include "task_util.h"
 #include "esp_attr.h"
 #include "esp_timer.h"
 #include "esp_log.h"
@@ -3851,7 +3852,13 @@ void ui_init(void)
     display_set_power_cb(power);
     actions = xQueueCreate(8, sizeof(action_t));
     assert(actions);
+#if TASK_STACK_PSRAM_FLASH_OPS
+    // Stack in PSRAM (task_util.h). worker() saves config to NVS and sends cable frames; it maps no flash and hands no
+    // stack buffer to DMA (call graph and grep for esp_partition_mmap, spi_flash_mmap, esp_ota_*, fw_update_*, 2026-10-28).
+    assert(task_create_psram(worker, "habitat_actions", 6144, NULL, 4, NULL, tskNO_AFFINITY) == pdPASS);
+#else
     assert(xTaskCreate(worker, "habitat_actions", 6144, NULL, 4, NULL) == pdPASS);
+#endif
     display_unlock();
     habitat_render_notify();
 }

@@ -5,6 +5,7 @@
 #include "voice_buffer.h"
 #include "config_store.h"
 #include "ram_telemetry.h"
+#include "task_util.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_random.h"
@@ -180,8 +181,15 @@ void audio_client_init(void)
     voice_buffer_init(&buffer, storage, BUFFER_BYTES);
     BaseType_t a =
         xTaskCreatePinnedToCore(capture, "voice_capture", 5120, NULL, 6, &capture_task, 0);
+#if TASK_STACK_PSRAM_FLASH_OPS
+    // Stack in PSRAM (task_util.h). send_audio reads config from NVS and sends PCM frames over the cable; it maps no
+    // flash and its stack buffers never go to DMA (call graph and grep, 2026-10-28). voice_capture stays internal:
+    // it reads the I2S microphone, and its loop is the latency-bound one.
+    BaseType_t b = task_create_psram(send_audio, "voice_send", 5120, NULL, 4, &sender_task, 0);
+#else
     BaseType_t b =
         xTaskCreatePinnedToCore(send_audio, "voice_send", 5120, NULL, 4, &sender_task, 0);
+#endif
     if (a != pdPASS || b != pdPASS) {
         if (capture_task)
             vTaskDelete(capture_task);

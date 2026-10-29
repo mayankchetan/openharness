@@ -1,8 +1,10 @@
-"""Which tasks have a PSRAM stack: the round-2 safe-tier set (ptt, beep, proj_refresh) and no other.
+"""Which tasks have a PSRAM stack: ptt, beep, proj_refresh (round 2) and habitat_actions, cable_session, voice_send
+(round 3, TASK_STACK_PSRAM_FLASH_OPS), and no other.
 
 Each moved task creates itself with task_create_psram() under its TASK_STACK_PSRAM_* macro and falls back to
-the old plain create under #else. The tasks that touch flash (OTA, NVS saves, SHA over flash) or run a
-latency-bound loop stay on internal stacks until their own round and its proof.
+the old plain create under #else. cable_link runs OTA (esp_ota_* maps flash, which asserts on a PSRAM stack,
+diet2-r1-results.md section 1), the render and touch tasks and voice_capture are latency-bound: those stay on
+internal stacks.
 """
 from pathlib import Path
 import re
@@ -13,12 +15,14 @@ MOVED = [  # (file, task name, macro, plain create that the #else branch keeps)
     ('ptt.c', 'ptt', 'TASK_STACK_PSRAM_PTT', 'xTaskCreate'),
     ('audio_capture.c', 'beep', 'TASK_STACK_PSRAM_BEEP', 'xTaskCreate'),
     ('app_main.c', 'proj_refresh', 'TASK_STACK_PSRAM_PROJ', 'xTaskCreate'),
+    ('ui/habitat/ui_habitat.c', 'habitat_actions', 'TASK_STACK_PSRAM_FLASH_OPS', 'xTaskCreate'),
+    ('cable_client.c', 'cable_session', 'TASK_STACK_PSRAM_FLASH_OPS', 'xTaskCreate'),
+    ('audio_client_habitat.c', 'voice_send', 'TASK_STACK_PSRAM_FLASH_OPS', 'xTaskCreatePinnedToCore'),
 ]
-STAYS_INTERNAL = ['habitat_render', 'habitat_touch', 'habitat_actions', 'cable_link', 'cable_session',
-                  'voice_capture', 'voice_send']
+STAYS_INTERNAL = ['habitat_render', 'habitat_touch', 'cable_link', 'voice_capture']
 
 header = (main / 'task_util.h').read_text()
-for _, _, macro, _ in MOVED:
+for macro in sorted({m for _, _, m, _ in MOVED}):
     assert re.search(r'#ifndef ' + macro + r'\s+#define ' + macro + r' 1\b', header), macro   # default on
 
 for name, task, macro, plain in MOVED:
@@ -35,4 +39,4 @@ for path in main.rglob('*.c'):
             assert 'task_create_psram' not in line and 'WithCaps' not in line, f'{path.name}:{number} moved too early'
 
 print('PSRAM task sites: ' + ', '.join(task for _, task, _, _ in MOVED) + ' use task_create_psram under their macros, '
-      'the flash-touching and latency-bound tasks keep internal stacks PASS')
+      'cable_link (OTA) and the latency-bound tasks keep internal stacks PASS')
