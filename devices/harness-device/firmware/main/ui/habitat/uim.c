@@ -53,6 +53,7 @@ void uim_scene(const char *view, const ht_scene_t *scene)
     ht_metrics_take(&shown);
     portENTER_CRITICAL(&s_lock);
     fold(&before);
+    const char *built = view;       // what the model says it built this scene for
     if (s_item[0]) view = s_item;   // an item names its record
     if (!s_started || strncmp(s_cur.view, view, sizeof s_cur.view - 1) != 0) {
         if (s_started) {
@@ -66,6 +67,7 @@ void uim_scene(const char *view, const ht_scene_t *scene)
         s_cur_log_ms = now;
     }
     fold(&shown);
+    snprintf(s_cur.scene, sizeof s_cur.scene, "%s", built);
     maxu(&s_cur.runs_max, scene->count);
     s_cur.stack_free_min = stack;
     portEXIT_CRITICAL(&s_lock);
@@ -91,12 +93,13 @@ int uim_format(char *buf, size_t size, const uim_record_t *r, const char *kind, 
     return snprintf(buf, size,
         "UIM view=%s n=%lu runs_max=%lu runs_cap=%u arc0_mask_max=%lu arc1_mask_max=%lu arc_cap=%lu "
         "glyph_hits=%lu glyph_miss=%lu unpacked_cols_max=%lu raster_max_us=%lu frame_max_us=%lu "
-        "render_stack_free_min=%lu int_free=%lu int_largest=%lu kind=%s",
+        "render_stack_free_min=%lu int_free=%lu int_largest=%lu kind=%s%s%s",
         r->view, (unsigned long)r->n, (unsigned long)r->runs_max, (unsigned)HT_RUNS,
         (unsigned long)r->arc_mask_max[0], (unsigned long)r->arc_mask_max[1], (unsigned long)r->arc_cap,
         (unsigned long)r->glyph_hits, (unsigned long)r->glyph_miss, (unsigned long)r->cols_max,
         (unsigned long)r->raster_max_us, (unsigned long)r->frame_max_us,
-        (unsigned long)r->stack_free_min, (unsigned long)int_free, (unsigned long)int_largest, kind);
+        (unsigned long)r->stack_free_min, (unsigned long)int_free, (unsigned long)int_largest, kind,
+        !strcmp(kind, "item") ? " scene=" : "", !strcmp(kind, "item") ? r->scene : "");
 }
 
 static void emit(const uim_record_t *r, const char *kind)
@@ -159,4 +162,11 @@ void uim_item_end(void)
     s_started = false;
     portEXIT_CRITICAL(&s_lock);
     emit(&record, "item");   // here and now, on the caller's task: the gallery has no tick
+}
+
+void uim_item_scene(char *out, size_t size)
+{
+    portENTER_CRITICAL(&s_lock);
+    snprintf(out, size, "%s", s_cur.scene);
+    portEXIT_CRITICAL(&s_lock);
 }

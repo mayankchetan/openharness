@@ -126,8 +126,12 @@ int main(void)
     uim_scene("brand", &reader);     // a second scene during the item still belongs to it
     uim_paint(900, 1200);
     assert(line_count == mark);      // nothing yet
+    char drawn[20];
+    uim_item_scene(drawn, sizeof drawn);
+    assert(!strcmp(drawn, "brand"));
     uim_item_end();
     assert(line_count == mark + 1 && !strncmp(lines[mark], "UIM view=idle_claude n=2 ", 25) && strstr(lines[mark], "kind=item"));
+    assert(strstr(lines[mark], " scene=brand"));   // what the renderer last built for the item (the second scene), not the item's name
     assert(field(lines[mark], "raster_max_us") == 900 && field(lines[mark], "arc0_mask_max") > 0);
     uim_scene("home", &home);        // between items: ignored, and the counters are discarded
     uim_paint(5, 5);
@@ -145,8 +149,10 @@ int main(void)
     memset(&big, 0xff, sizeof big);
     memset(big.view, 'v', sizeof big.view - 1);
     big.view[sizeof big.view - 1] = 0;
+    memset(big.scene, 's', sizeof big.scene - 1);
+    big.scene[sizeof big.scene - 1] = 0;
     char buf[1024];
-    int n = uim_format(buf, sizeof buf, &big, "10s", UINT32_MAX, UINT32_MAX);
+    int n = uim_format(buf, sizeof buf, &big, "item", UINT32_MAX, UINT32_MAX);   // the longest kind: it carries scene=
     assert(n > 0 && n < 400 && (size_t)n == strlen(buf));
     for (int i = 0; i < line_count; i++) assert(strlen(lines[i]) < 400);
 

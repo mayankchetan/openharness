@@ -117,10 +117,12 @@ static void g_notices(int ask, int others)
         if (k < 15) GCOPY(r->agent_id, g_id(agent)); else snprintf(r->agent_id, sizeof r->agent_id, "x%02d", k);
         if (k < 15) GCOPY(r->name, G_NAME[agent]); else snprintf(r->name, sizeof r->name, "Agent %02d", k);
         GCOPY(r->machine, k % 3 ? "This computer" : "Studio Mac");
-        GCOPY(r->summary, G_SUMMARY[k % 8]);
         snprintf(r->read_token, sizeof r->read_token, "n-%d", k);
         r->question = k % 7 == 3;
         r->failed = k % 11 == 5;
+        // A row says what it is: a question row asks, a failed row failed, the others report a finished turn.
+        static const int finished[4] = {0, 3, 5, 6};
+        GCOPY(r->summary, G_SUMMARY[r->question ? (k & 1 ? 4 : 2) : r->failed ? (k & 1 ? 7 : 1) : finished[k % 4]]);
         n++;
     }
     ui_notif_replace(rows, n);
@@ -236,8 +238,12 @@ static void g_reset(void)
     for (int i = 0; i < 16; i++) g_agent_quiet(i);
     s.bell_unread = 0;
     s.notice_ms = 0;
+    // Home BEFORE the notices are replaced: with the inbox still the view, ui_notif_replace keeps the card on screen
+    // ("held", read on the dial) and every later item would carry one stray notice (inbox_empty showed 1/1).
+    view(HOME);
     display_unlock();
     ui_supertab_wait_close(g_id(2), "supertab:r1");
+    ui_supertab_wait_close(g_id(3), "supertab:r2");
     if (ui_project_count() != 16) { ui_project_clear_all(); g_roster(); }
     g_tabs();         // an item may have emptied them (tabs_empty)
     g_machines();     // likewise (machines_empty)
@@ -362,6 +368,8 @@ SETUP(swarm_asking)
 SETUP(swarm_stuck)
 {
     g_swarm_put("work", "work", "stuck", "done");
+    // A stuck Lead's fixed line ("Stuck. See the desktop.") is the text of a Super Tab wait with stuck set and no question.
+    ui_supertab_wait(g_id(3), "supertab:r2", "Release swarm", true, NULL);
     g_swarm_go("sw1", "L3");
 }
 SETUP(swarm_recap)
@@ -415,7 +423,9 @@ static void g_open_inbox(int index)
     change();
     display_unlock();
 }
-SETUP(inbox_first) { g_open_inbox(0); }
+// Questions are filed before the other rows, so index 0 is a question: the three kinds are looked up by what they are.
+static void g_inbox_find(bool question, bool failed);
+SETUP(inbox_first) { g_inbox_find(false, false); }   // a finished-turn card
 static void step_slide_inbox(uint32_t t)
 {
     if (t % 1000 < 100 && s.view == INBOX) {
@@ -431,12 +441,14 @@ static void g_inbox_find(bool question, bool failed)
 {
     g_open_inbox(0);
     display_lock();
-    for (int i = 0; i < s.notice_count; i++)
-        if ((question && s.notice[i].question) || (failed && s.notice[i].failed)) {
+    for (int i = 0; i < s.notice_count; i++) {
+        const cable_notif_t *n = &s.notice[i];
+        if ((question && n->question) || (failed && n->failed) || (!question && !failed && !n->question && !n->failed)) {
             ht_tab_carousel_reset(&inbox_carousel, s.notice_count, i);
             s.offset = i;
             break;
         }
+    }
     change();
     display_unlock();
 }
@@ -675,8 +687,12 @@ SETUP(stop) { g_busy(0, "Editing cable_link.c"); LOCKED(GCOPY(s.stop_agent, g_id
 SETUP(msg_toast) { ui_cable_toast("The link to your computer is ready."); }
 SETUP(msg_long)
 {
-    ui_show_error("Link this machine",
-                  "On that computer:\nharness link create\n\nOn this computer:\nharness link import\n\nThen reconnect the cable.");
+    // More than the five rows the message screen shows, so the clipping is what is drawn.
+    ui_show_error("Update available",
+                  "The firmware on this dial is older than the one on your computer. Keep the cable plugged in while the new "
+                  "image installs; the screen shows the wordmark and the dial restarts by itself when it is done. Do not "
+                  "unplug it, and do not touch the glass. If the update stops, plug the cable in again and the computer "
+                  "will offer it once more.");
 }
 SETUP(msg_turn_error) { ui_turn_error(g_id(1), G_SUMMARY[7]); }
 SETUP(ota) { LOCKED(view(OTA)); }
@@ -730,6 +746,16 @@ static const struct { const char *name, *why; } G_SKIPS[] = {
 };
 #define G_SKIP_COUNT ((int)(sizeof G_SKIPS / sizeof G_SKIPS[0]))
 
+static void note_bad(char *bad, size_t cap, const char *name, const char *how)
+{
+    size_t used = strlen(bad);
+    if (used + strlen(name) + strlen(how) + 2 < cap) snprintf(bad + used, cap - used, "%s%s%s", used ? "," : "", name, how);
+}
+
+// Three checks per item (all against it->view, the name habitat_view_name() gives, HOME split into its faces):
+//   MISMATCH        the model's state, 300 ms after the setup
+//   MISMATCH_LATE   the model's state at shot_ready: something (a tick, a timeout) undid the state during the hold
+//   MISMATCH_DRAWN  the view name of the last scene the renderer built for the item (uim_item_scene): what was drawn
 static void tour_item(int n, const g_item_t *it, char *bad, size_t bad_cap)
 {
     g_reset();
@@ -741,27 +767,43 @@ static void tour_item(int n, const g_item_t *it, char *bad, size_t bad_cap)
     g_wait(300);
     display_lock();
     const char *seen = habitat_view_name();
-    bool match = !strcmp(seen, it->view);
     display_unlock();
-    if (!match) {
+    if (strcmp(seen, it->view)) {
         ESP_LOGW(TAG_TOUR, "UIM_TOUR item=%d/%d name=%s MISMATCH expected_view=%s got=%s", n, G_COUNT, it->name, it->view, seen);
-        size_t used = strlen(bad);
-        if (used + strlen(it->name) + 2 < bad_cap) snprintf(bad + used, bad_cap - used, "%s%s", used ? "," : "", it->name);
+        note_bad(bad, bad_cap, it->name, "");
     }
     uint32_t t0 = ms(), t;
     while ((t = ms() - t0) < it->hold_ms) {
         if (it->step) it->step(t);
         g_wait(100);
     }
+    display_lock();
+    seen = habitat_view_name();
+    display_unlock();
+    if (strcmp(seen, it->view)) {
+        ESP_LOGW(TAG_TOUR, "UIM_TOUR item=%d/%d name=%s MISMATCH_LATE expected_view=%s got=%s", n, G_COUNT, it->name, it->view, seen);
+        note_bad(bad, bad_cap, it->name, ":late");
+    }
     ESP_LOGI(TAG_TOUR, "UIM_TOUR shot_ready name=%s", it->name);
-    uint32_t done0 = cable_debug_commands_done(), waited = 0;
-    while (waited < SHOT_WAIT_MS && cable_debug_commands_done() == done0) {
+    // Only a debug command that starts after shot_ready counts, and the wait ends when it has finished (the screenshot's
+    // last chunk is sent): a late shot for the previous item finishing now is not this item's.
+    const uint32_t started0 = cable_debug_commands_started();
+    uint32_t waited = 0;
+    bool shot = false;
+    while (waited < SHOT_WAIT_MS) {
+        shot = cable_debug_commands_started() != started0 && cable_debug_commands_done() == cable_debug_commands_started();
+        if (shot) break;
         if (it->step) it->step(ms() - t0);
         g_wait(50);
         waited += 50;
     }
-    bool shot = cable_debug_commands_done() != done0;
-    uim_item_end();   // the item's UIM line, here and now
+    char drawn[20];
+    uim_item_scene(drawn, sizeof drawn);
+    if (strcmp(drawn, it->view)) {
+        ESP_LOGW(TAG_TOUR, "UIM_TOUR item=%d/%d name=%s MISMATCH_DRAWN expected_view=%s drew=%s", n, G_COUNT, it->name, it->view, drawn);
+        note_bad(bad, bad_cap, it->name, ":drawn");
+    }
+    uim_item_end();   // the item's UIM line (with scene=), here and now
     ESP_LOGI(TAG_TOUR, "UIM_TOUR item=%d/%d name=%s end shot=%d shot_wait_ms=%u", n, G_COUNT, it->name, shot, (unsigned)waited);
 }
 
@@ -779,7 +821,7 @@ static void tour_task(void *arg)
                  (unsigned)max_s, (unsigned)UI_GALLERY_PAUSE_S);
         for (int k = 0; k < G_SKIP_COUNT; k++)
             ESP_LOGI(TAG_TOUR, "UIM_TOUR skipped name=%s reason=%s", G_SKIPS[k].name, G_SKIPS[k].why);
-        char bad[200] = "";
+        char bad[320] = "";
         int64_t began = esp_timer_get_time();
         for (int i = 0; i < G_COUNT; i++) tour_item(i + 1, &G_ITEMS[i], bad, sizeof bad);
         g_reset();

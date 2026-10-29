@@ -22,6 +22,9 @@ bool cable_debug_handle(const char *t, const cJSON *p);
 // How many debug.* commands have been handled to the end (a screenshot: the whole picture sent). The UI gallery's tour
 // waits on it after UIM_TOUR shot_ready, so it never changes the screen while a capture is still being read.
 uint32_t cable_debug_commands_done(void);
+// How many have been begun. A command is finished when done == started; the gallery's tour counts a command only if it
+// started after its shot_ready (a late shot for the previous item must not end this item's wait).
+uint32_t cable_debug_commands_started(void);
 
 // From the reader's tick: report an injected gesture that has finished (or failed). Cheap when idle.
 void cable_debug_tick(void);

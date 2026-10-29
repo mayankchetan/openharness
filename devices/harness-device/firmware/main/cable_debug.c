@@ -137,14 +137,16 @@ bool cable_debug_inject_tap(int x, int y)
     return true;
 }
 
-static volatile uint32_t s_commands_done;
+static volatile uint32_t s_commands_done, s_commands_started;
 uint32_t cable_debug_commands_done(void) { return s_commands_done; }
+uint32_t cable_debug_commands_started(void) { return s_commands_started; }
 
 bool cable_debug_handle(const char *t, const cJSON *p)
 {
     dbg_request_t request;
     const dbg_err_t err = dbg_request_parse(t, p, &request);
     if (err == DBG_NOT_DEBUG) return false;
+    s_commands_started++;
     if (err) refuse(request.cmd, request.id, err);
     else if (request.cmd == DBG_CMD_SHOT) shot(request.id);
     else touch(&request);

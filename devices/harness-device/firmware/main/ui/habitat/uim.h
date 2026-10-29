@@ -21,6 +21,8 @@ void uim_tick(void);
 // uim_item_end() writes the item's line (kind=item) at once on the caller's task. Between items nothing is recorded.
 void uim_item_begin(const char *name);
 void uim_item_end(void);
+// The view name of the last scene built since uim_item_begin ("" if none): what was really drawn, for the tour's check.
+void uim_item_scene(char *out, size_t size);
 
 // The name of the view the model is on (ui_habitat.c): the view_t enum, with the home face split by what it shows.
 const char *habitat_view_name(void);
@@ -28,6 +30,7 @@ const char *habitat_view_name(void);
 // "UIM ..." line for one record. Exposed for the host test; `buf` of 512 bytes is always enough.
 typedef struct {
     char view[20];
+    char scene[20];   // the view name the renderer last built a scene for (an item names its record, this says what was drawn)
     uint32_t n, runs_max, arc_mask_max[2], glyph_hits, glyph_miss, cols_max, raster_max_us, frame_max_us;
     uint32_t stack_free_min, arc_cap;
 } uim_record_t;
