@@ -94,7 +94,8 @@ static void reset_countdown(void)
             ESP_LOGW(TAG, "BOOT held %d s — factory reset", BK_RESET_HOLD_MS / 1000);
             config_clear_all();
             ui_show_error("Settings reset", "Let go of BOOT.");
-            for (int i = 0; i < 100 && board_boot_down(); i++) vTaskDelay(pdMS_TO_TICKS(100));   // up to 10 s, then restart anyway
+            // Restart only when the key is up, however long that takes: a restart under a held BOOT would start the countdown again and wipe again, for ever.
+            while (board_boot_down()) vTaskDelay(pdMS_TO_TICKS(100));
             esp_restart();   // the UI has already read the old settings; a clean boot reads the cleared ones
         }
         vTaskDelay(pdMS_TO_TICKS(100));

@@ -43,6 +43,10 @@ for needle in ('s.view == HOME || s.view == AGENT', 's.connected', '!s.loading',
 assert app.count('config_clear_all()') == 1
 cd = re.search(r'static void reset_countdown\(void\)\n\{.*?^\}', app, re.M | re.S)[0]
 assert cd.index('BKR_CANCELLED') < cd.index('config_clear_all()') < cd.index('esp_restart()')
+# after the wipe the restart waits for the release, with no timeout: a restart under a still-held BOOT would count down and wipe again
+assert 'while (board_boot_down()) vTaskDelay(pdMS_TO_TICKS(100));' in cd
+assert cd.index('config_clear_all()') < cd.index('while (board_boot_down())') < cd.index('esp_restart()')
+assert 'i < 100' not in cd
 assert 'ui_show_error("Reset settings"' in cd and 'bkr_step(' in cd and 'board_boot_down()' in cd
 body = app[app.index('void app_main(void)'):]
 assert 'boot_button_held' not in app
