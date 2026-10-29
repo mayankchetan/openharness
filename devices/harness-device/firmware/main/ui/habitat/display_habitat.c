@@ -92,6 +92,7 @@ static habitat_perf_t stats;
 static void (*power_cb)(bool);
 #ifdef DEVICE_BATTERY_SLEEP
 static void (*sleep_cb)(bool);   // the sleep policy's hook (display_set_sleep_cb); called before power_cb on a wake
+static atomic_bool screen_dimmed;   // the render task has dimmed the panel for the battery screen policy (power_policy.h)
 #endif
 // Watch actual renderer progress independently of the USB and touch tasks.
 // A blocked panel call must not leave a responsive host controlling a frozen screen.
@@ -224,6 +225,8 @@ static uint32_t render_stress_tick(void)
     return 20;
 }
 #endif
+// True when the screen has been idle long enough to go off: 300 s on external power, 60 s on the battery (power_sleep.h).
+static bool idle_expired(void) { return power_sleep_screen_level(elapsed_since(&last_activity)) == PP_SCREEN_OFF; }
 void habitat_render_notify(void)
 {
     if (renderer)
@@ -285,7 +288,14 @@ void display_set_power_cb(void (*cb)(bool)) { power_cb = cb; }
 #ifdef DEVICE_BATTERY_SLEEP
 void display_set_sleep_cb(void (*cb)(bool)) { sleep_cb = cb; }
 #endif
-void display_bump_activity(void) { atomic_store(&last_activity, now_ms()); }
+void display_bump_activity(void)
+{
+    atomic_store(&last_activity, now_ms());
+#ifdef DEVICE_BATTERY_SLEEP
+    if (atomic_load_explicit(&screen_dimmed, memory_order_relaxed))
+        habitat_render_notify();   // a dimmed screen gets its brightness back at once, not at the end of the render wait
+#endif
+}
 void display_sleep(void)
 {
     if (atomic_exchange(&asleep, true))
@@ -557,6 +567,17 @@ static void render_task(void *arg)
 #endif
         display_unlock();
         unsigned brightness = atomic_load(&requested_brightness);
+#ifdef DEVICE_BATTERY_SLEEP
+        {   // battery screen policy: dim after 30 s without a touch to a quarter of the user's setting (never below 3 percent), and
+            // stay dimmed until the panel goes off at 60 s, so the glass does not flash bright just before it turns off. On external
+            // power the level is only FULL or OFF: nothing was dimmed, so nothing stays dimmed.
+            const pp_screen_t level = power_sleep_screen_level(elapsed_since(&last_activity));
+            const bool dim = !display_is_asleep() && (level == PP_SCREEN_DIM || (level == PP_SCREEN_OFF && atomic_load(&screen_dimmed)));
+            atomic_store(&screen_dimmed, dim);
+            if (dim)
+                brightness = pp_dimmed_percent(brightness);
+        }
+#endif
         if (brightness != applied_brightness) {
             render_progress(RENDER_POWER);
             ESP_ERROR_CHECK(esp_lcd_panel_co5300_set_brightness(panel, brightness));
@@ -607,11 +628,11 @@ static void render_task(void *arg)
 #ifdef HARNESS_DEBUG_COMMANDS
         capture_service(&scenes[front], on && painted);
 #endif
-        if (on && elapsed_since(&last_activity) > 300000) {
+        if (on && idle_expired()) {
             display_lock();
             // A touch may have refreshed activity while we waited for this
             // lock. The stale pre-lock idle decision must not swallow it.
-            if (elapsed_since(&last_activity) > 300000)
+            if (idle_expired())
                 display_sleep();
             display_unlock();
         }

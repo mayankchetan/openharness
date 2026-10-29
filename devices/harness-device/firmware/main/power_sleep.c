@@ -301,6 +301,14 @@ void power_sleep_render_service(void)
     s_applied = have;
 }
 
+// ── the screen policy ───────────────────────────────────────────────────────────────────────────────
+
+pp_screen_t power_sleep_screen_level(uint32_t idle_ms)
+{
+    // "On the battery" is the policy's own call (two fresh reads, no host): S1 or S2. A dial the policy cannot confirm keeps 300 s.
+    return pp_screen_level((pp_state_t)atomic_load_explicit(&s_want, memory_order_relaxed), idle_ms);
+}
+
 // ── the pollers ─────────────────────────────────────────────────────────────────────────────────────
 
 uint32_t power_sleep_wait_ms(pp_poller_t who, uint32_t awake_ms)

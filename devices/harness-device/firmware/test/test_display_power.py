@@ -32,7 +32,11 @@ static atomic_bool asleep, force_frame;
 static atomic_uint last_activity;
 static atomic_uint requested_brightness = 40;
 #define ESP_LOGI(...) ((void)0)
-static int esp_lcd_panel_co5300_set_brightness(int p, unsigned level) { (void)p; assert(level <= 100); return 0; }
+static unsigned last_brightness;
+#ifdef DEVICE_BATTERY_SLEEP
+static bool keep_dimmed;   /* a run continues the render loop of the one before: the dimmed flag survives it */
+#endif
+static int esp_lcd_panel_co5300_set_brightness(int p, unsigned level) { (void)p; assert(level <= 100); last_brightness = level; return 0; }
 static void ht_illustrated_prepare(ht_scene_t *scene) { (void)scene; }
 static ht_scene_t scenes[2];
 static bool painted;
@@ -69,7 +73,10 @@ static void power(bool on) { if(on) wakes++; else sleeps++; }
 #ifdef DEVICE_BATTERY_SLEEP
 /* The sleep policy's two entry points into this loop (power_sleep.c, tested on its own in test_power_sleep_glue.py). */
 static bool fake_relaxed;
+static pp_state_t fake_state = PP_S0;   /* the policy state behind the screen levels: external power until a test says battery */
 static unsigned services, service_at_tick;
+static atomic_bool screen_dimmed;   /* the production file's flag: display_bump_activity brightens a dimmed screen at once */
+pp_screen_t power_sleep_screen_level(uint32_t idle_ms) { return pp_screen_level(fake_state, idle_ms); }
 static void (*sleep_cb)(bool);   /* display_set_sleep_cb's slot, called by display_sleep / display_wake; empty here */
 void power_sleep_render_service(void) { services++; service_at_tick = ticks; }
 uint32_t power_sleep_wait_ms(pp_poller_t who, uint32_t awake_ms) {
@@ -115,11 +122,14 @@ static unsigned ulTaskNotifyTake(int clear, uint32_t timeout) {
     return 0;
 }
 '''
-for name in ['elapsed_since', 'display_bump_activity', 'display_sleep', 'display_wake', 'render_task']:
+for name in ['elapsed_since', 'idle_expired', 'display_bump_activity', 'display_sleep', 'display_wake', 'render_task']:
     code += function(name)
 code += r'''
 static void run(int which, uint32_t now, uint32_t activity, bool sleep, unsigned loops) {
     mode=which; clock_ms=now; atomic_store(&last_activity,activity);
+#ifdef DEVICE_BATTERY_SLEEP
+    if (!keep_dimmed) atomic_store(&screen_dimmed,false);
+#endif
     atomic_store(&asleep,sleep); atomic_store(&force_frame,false);
     memset(scenes,0,sizeof scenes); painted=mode!=4; panel_on=true; receipts=0; power_cb=power;
     frames=ticks=waits=locks=sleeps=wakes=full_frames=notifications=0;
@@ -160,6 +170,29 @@ int main(void) {
     next_wake_ms = 1000; run(5,1000,1000,true,1); assert(last_wait == 1000);
     run(4,1000,1000,false,1); assert(frames == 1 && receipts == 1);          /* the normal frame path is the same */
     wait_limit = 1000;
+    /* The battery screen policy (power_policy.h): on the battery the panel dims to a quarter of the setting (40 percent -> 10) after
+       30 s without a touch, stays dimmed until it goes off at 60 s; on external power it is full until it goes off at 300 s. */
+    fake_state = PP_S1;
+    run(0,30000,0,false,1); assert(!display_is_asleep() && last_brightness == 40 && !atomic_load(&screen_dimmed));
+    run(0,30001,0,false,1); assert(!display_is_asleep() && last_brightness == 10 && atomic_load(&screen_dimmed));
+    run(0,60000,0,false,1); assert(!display_is_asleep() && !sleeps && last_brightness == 10);
+    run(0,60001,0,false,1); assert(display_is_asleep() && sleeps == 1 && last_brightness == 40);   /* a loop that never dimmed goes straight to off */
+    keep_dimmed = true;                                                                              /* ... one that dimmed at 30 s stays dimmed to off */
+    run(0,30001,0,false,1); assert(last_brightness == 10 && atomic_load(&screen_dimmed));
+    run(0,60001,0,false,1); assert(display_is_asleep() && last_brightness == 10);                  /* no flash of full brightness before off */
+    keep_dimmed = false;
+    run(0,59000,UINT32_MAX-1000,false,1); assert(display_is_asleep() && sleeps == 1);               /* 60 s across the clock wrap */
+    run(0,100,UINT32_MAX-100,false,1); assert(!display_is_asleep() && last_brightness == 40);
+    run(5,31000,0,true,1); assert(!atomic_load(&screen_dimmed));                                   /* an asleep panel is not "dimmed" */
+    { unsigned n = notifications; atomic_store(&screen_dimmed,true); display_bump_activity(); assert(notifications == n+1);
+      atomic_store(&screen_dimmed,false); display_bump_activity(); assert(notifications == n+1); }  /* a touch brightens a dimmed screen at once */
+    fake_state = PP_S2;
+    run(0,60001,0,false,1); assert(display_is_asleep() && sleeps == 1);
+    fake_state = PP_S0;
+    run(0,299999,0,false,1); assert(!display_is_asleep() && last_brightness == 40 && !atomic_load(&screen_dimmed));
+    run(0,300000,0,false,1); assert(!display_is_asleep());
+    run(0,300001,0,false,1); assert(display_is_asleep() && sleeps == 1);
+    run(0,100000,0,false,1); assert(!display_is_asleep() && last_brightness == 40);                 /* no dimming on external power */
 #endif
     puts("Display power: production render-loop wake/repaint and touch/idle races, quiet wake, boundaries and wrap PASS");
 }
@@ -170,6 +203,7 @@ with tempfile.TemporaryDirectory(prefix='harness-display-power-') as folder:
     for flags in ([], ['-DDEVICE_BATTERY_SLEEP=1']):
         subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g'] + flags + [
                         '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
-                        '-I', str(root / 'main/ui/habitat'), '-I', str(root / 'main'), str(folder / 'power.c'),
+                        '-I', str(root / 'main/ui/habitat'), '-I', str(root / 'main'), str(folder / 'power.c')] +
+                       ([str(root / 'main/power_policy.c')] if flags else []) + [
                         '-o', str(folder / 'power')], check=True)
         subprocess.run([str(folder / 'power')], check=True)

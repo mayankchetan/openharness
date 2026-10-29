@@ -46,9 +46,15 @@ const char *power_sleep_state_name(void);
 uint32_t power_sleep_sleeps(void);
 uint32_t power_sleep_slept_ms(void);
 
+// THE BATTERY SCREEN POLICY (power_policy.h pp_screen_level): what the screen should be after `idle_ms` without a touch. On external
+// power: full, then off after 300 s. On the battery (policy S1 or S2): full, dim after 30 s, off after 60 s.
+pp_screen_t power_sleep_screen_level(uint32_t idle_ms);
+
 #else
 
 static inline void power_sleep_init(void) {}
+// Without the flag the screen goes off after 300 s idle, as it always did (the same number as PP_SCREEN_OFF_USB_MS).
+static inline pp_screen_t power_sleep_screen_level(uint32_t idle_ms) { return idle_ms > PP_SCREEN_OFF_USB_MS ? PP_SCREEN_OFF : PP_SCREEN_FULL; }
 static inline void power_sleep_poll(void) {}
 static inline void power_sleep_render_service(void) {}
 static inline void power_sleep_hold(uint32_t bits) { (void)bits; }
