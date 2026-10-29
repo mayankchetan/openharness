@@ -73,6 +73,41 @@ static void render_tone(size_t offset, size_t count)
     }
 }
 
+#ifdef DEVICE_BATTERY_SLEEP
+static bool s_idle;   // the I2S channels are stopped by audio_capture_idle(true); read and written under s_codec_lock
+
+// TX, then RX, as at boot. The caller holds s_codec_lock. A channel the codec library already re-enabled returns an error: ignored.
+static void idle_resume_locked(void)
+{
+    if (!s_idle) return;
+    if (s_tx) i2s_channel_enable(s_tx);
+    if (s_rx) i2s_channel_enable(s_rx);
+    s_idle = false;
+}
+
+bool audio_capture_idle(bool idle)
+{
+    if (!s_codec_lock) return true;   // audio never came up: nothing runs, nothing to stop
+    if (idle) {
+        if (atomic_load(&s_capture_requested) || s_open) return false;
+        if (xSemaphoreTake(s_codec_lock, 0) != pdTRUE) return false;   // a beep is playing, or a capture is opening
+        if (!atomic_load(&s_capture_requested) && !s_open && !s_idle) {
+            // RX, then TX. A channel the codec library closed after a beep or a capture is disabled already: the error is ignored.
+            if (s_rx) i2s_channel_disable(s_rx);
+            if (s_tx) i2s_channel_disable(s_tx);
+            s_idle = true;
+        }
+        const bool stopped = s_idle;
+        xSemaphoreGive(s_codec_lock);
+        return stopped;
+    }
+    if (xSemaphoreTake(s_codec_lock, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+    idle_resume_locked();
+    xSemaphoreGive(s_codec_lock);
+    return true;
+}
+#endif
+
 static void play_beep(void)
 {
     if (!s_spk || audio_notify_is_muted() || atomic_load(&s_capture_requested)) return;
@@ -81,6 +116,9 @@ static void play_beep(void)
         xSemaphoreGive(s_codec_lock);
         return;
     }
+#ifdef DEVICE_BATTERY_SLEEP
+    idle_resume_locked();   // the chip was asleep: start the I2S clocks again before the codec opens
+#endif
     esp_codec_dev_sample_info_t fs = { .sample_rate = AUDIO_SAMPLE_RATE, .channel = 1, .bits_per_sample = 16 };
     if (esp_codec_dev_open(s_spk, &fs) != ESP_OK) { xSemaphoreGive(s_codec_lock); ESP_LOGW(TAG, "spk open failed"); return; }
     if (!audio_notify_is_muted()) {
@@ -273,6 +311,9 @@ bool audio_capture_start(void)
     if (s_open) return true;
     atomic_store(&s_capture_requested,true);
     xSemaphoreTake(s_codec_lock,portMAX_DELAY);
+#ifdef DEVICE_BATTERY_SLEEP
+    idle_resume_locked();   // the chip was asleep: start the I2S clocks again before the codec opens
+#endif
     esp_codec_dev_sample_info_t fs = {
         .sample_rate = AUDIO_SAMPLE_RATE,
         .channel = 1,

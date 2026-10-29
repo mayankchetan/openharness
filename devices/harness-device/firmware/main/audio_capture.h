@@ -35,6 +35,16 @@ void audio_capture_stop(void);
 // DMA queue overflows since the current capture opened; a count above zero means lost samples.
 uint32_t audio_capture_overruns(void);
 
+#ifdef DEVICE_BATTERY_SLEEP
+// Battery sleep (power_sleep.c): audio_capture_idle(true) disables the I2S receive and transmit channels, which stops MCLK, BCLK and
+// WS and releases the two APB_FREQ_MAX power-management locks the enabled channels hold, so the chip can light-sleep.
+// audio_capture_idle(false) enables TX, then RX, as at boot. A capture or a beep also starts them by itself (audio_capture_start,
+// the beep task), so a race with the wake-up cannot leave a voice turn on a stopped clock.
+// idle(true) returns false and does nothing while a capture is open or requested or a beep is playing; the caller tries again later.
+// Safe to repeat. Needs audio_capture_init() to have run, otherwise it does nothing and returns true.
+bool audio_capture_idle(bool idle);
+#endif
+
 // --- Notification beep (ES8311 speaker output) ---
 // One-time init of the ES8311 OUT path + a worker task that plays a short tone on request.
 // Call once at boot (after the I2C bus is up). Safe no-op if the speaker codec isn't present.

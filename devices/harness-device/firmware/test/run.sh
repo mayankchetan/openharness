@@ -304,6 +304,7 @@ python3 "$here/test_audio_notify.py"
 python3 "$here/test_audio_init.py"
 python3 "$here/test_audio_stream.py"
 python3 "$here/test_audio_threads.py"
+python3 "$here/test_audio_idle.py"
 
 # These exercise the exact cJSON version linked into the board, when its SDK is
 # available. The rest of the suite remains independent of ESP-IDF.
