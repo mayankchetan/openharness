@@ -26,6 +26,9 @@ typedef struct {
 void touch_stats(touch_stats_t *out);
 
 #ifdef DEVICE_BATTERY_SLEEP
+// Wake the touch task from its idle wait (the 5 s S2 poll, power_policy.h PP_TOUCH_POLL_MS): the sleep policy calls it from the screen-wake hook, so
+// the first touch after a PWR wake is read at once and not at the end of the wait. Safe from any task; a no-op until the task exists.
+void touch_wake_task(void);
 // Battery sleep (power_sleep.c, render task): arm GPIO11 as the LOW-level light-sleep wake source, and put the pin back as the
 // touch driver wants it (falling-edge interrupt) when the screen is awake again. Both are safe to repeat and do nothing on a dial
 // without the CST9217. touch_sleep_arm() returns false (and arms nothing) if it cannot: another chip, no pin lock, controller not up. The wake runs the driver's own interrupt handler; no second one is installed.

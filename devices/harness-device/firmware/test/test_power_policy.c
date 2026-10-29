@@ -473,7 +473,7 @@ int main(void)
 
     // --- The poller table: S0 and S1 give back the caller's own wait; S2 the relaxed one ---
     static const struct { pp_poller_t who; uint32_t awake, relaxed; } rows[] = {
-        {PP_POLLER_TOUCH, 20, 1000}, {PP_POLLER_RENDER, 1000, 5000}, {PP_POLLER_CABLE_READER, 100, 2000},
+        {PP_POLLER_TOUCH, 20, 5000}, {PP_POLLER_RENDER, 1000, 5000}, {PP_POLLER_CABLE_READER, 100, 2000},
         {PP_POLLER_CABLE_SESSION, 250, 2000}, {PP_POLLER_REFRESH, 1000, 5000}, {PP_POLLER_BATLOG, 1000, 10000},
     };
     assert(sizeof rows / sizeof rows[0] == PP_POLLER_COUNT);
@@ -485,7 +485,9 @@ int main(void)
         // A caller that already waits longer than the relaxed value keeps its own (never shortens a wait in S2).
         assert(pp_wait_ms(PP_S2, rows[i].who, 60000) == 60000);
     }
-    assert(PP_TOUCH_POLL_MS == 1000);
+    // D1: no touch wake in S2, and every touch is dropped on a dark battery screen, so the touch fallback poll has nothing to catch: 5 s. (With
+    // the level wake built in it is the 1 s of the plan.) The screen wake pokes the touch task so the long wait never delays a touch after a PWR wake.
+    assert(PP_TOUCH_POLL_MS == 5000 && PP_TOUCH_WAKE_ON_BATTERY == 0);
     assert(pp_wait_ms(PP_S2, PP_POLLER_COUNT, 77) == 77);   // an unknown poller is left alone
 
     // --- The battery screen levels ---

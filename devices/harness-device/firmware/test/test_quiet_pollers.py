@@ -16,7 +16,7 @@ fw = Path(__file__).resolve().parent / '..'
 main = fw / 'main'
 policy = (main / 'power_policy.c').read_text()
 relaxed = {m[1]: int(m[2]) for m in re.finditer(r'case (PP_POLLER_[A-Z_]+):\s+return (\d+);', policy)}
-relaxed['PP_POLLER_TOUCH'] = int(re.search(r'#define PP_TOUCH_POLL_MS (\d+)', (main / 'power_policy.h').read_text())[1])
+relaxed['PP_POLLER_TOUCH'] = int(re.search(r'#else\n#define PP_TOUCH_POLL_MS (\d+)', (main / 'power_policy.h').read_text())[1])   # the D1 value (no touch wake)
 
 
 def read(name):

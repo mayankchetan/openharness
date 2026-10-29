@@ -366,6 +366,13 @@ void touch_stats(touch_stats_t *out)
                            .controller_ok = atomic_load(&controller_ready),
                            .held_now = atomic_load(&held)};
 }
+#ifdef DEVICE_BATTERY_SLEEP
+void touch_wake_task(void)
+{
+    if (touch_task_handle)
+        xTaskNotifyGive(touch_task_handle);
+}
+#endif
 #ifdef HARNESS_DEBUG_COMMANDS
 void touch_inject_wake(void)
 {

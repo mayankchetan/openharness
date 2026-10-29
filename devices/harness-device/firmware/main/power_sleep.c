@@ -261,6 +261,7 @@ static void on_screen(bool on)
     if (on && atomic_load(&s_in_s2)) {
         lock_acquire_once();
         atomic_store(&s_relaxed, false);
+        touch_wake_task();   // the touch task sits in its 5 s S2 wait: it reads the glass now, not at the end of the wait
     }
 }
 

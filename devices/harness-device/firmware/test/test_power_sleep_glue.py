@@ -137,6 +137,7 @@ void display_render_guard(bool run);
 'ui/touch.h': '''
 #pragma once
 #include <stdbool.h>
+void touch_wake_task(void);
 bool touch_sleep_arm(void);
 void touch_sleep_disarm(void);
 bool touch_sleep_armed(void);
@@ -214,6 +215,8 @@ bool display_is_asleep(void) { return asleep; }
 void display_set_sleep_cb(void (*cb)(bool)) { sleep_cb = cb; }
 void display_render_guard(bool run) { if (run) { guard_starts++; ev("GUARD+"); } else { guard_stops++; ev("GUARD-"); } }
 void habitat_render_notify(void) { notifies++; }
+static int touch_pokes;               // touch_wake_task(): the touch task is woken from its long S2 wait
+void touch_wake_task(void) { touch_pokes++; ev("TPOKE"); }
 bool touch_sleep_armed(void) { return touch_armed; }
 bool touch_sleep_arm(void) {
     if (arm_fails) { ev("TARM-FAIL"); return false; }
@@ -253,7 +256,7 @@ static void reset_world(void) {
     configure_calls = configure_battery = configure_usb = 0; pads_kept = 0; pmic_reads = 0;
     cache_chg = -1; usb_host = asleep = voice = session = false; audio_stopped = false; audio_idle_ok = true; pmu0 = 0x08; g_logs[0] = 0;
     guard_stops = guard_starts = audio_idles = audio_resumes = touch_arms = touch_disarms = 0; pmic_state = 0; retention_result = ESP_OK;
-    release_wakes_screen = false; release_plugs_usb = false; arm_fails = false; touch_armed = false;
+    release_wakes_screen = false; release_plugs_usb = false; arm_fails = false; touch_armed = false; touch_pokes = 0;
     off_calls = off_first_reason = off_last_reason = 0; off_last_force = false; off_accept = true;
     clear_events();
 }
@@ -294,7 +297,7 @@ static void scenario_boot_and_cycle(void) {
     assert(power_sleep_relaxed() && !strcmp(power_sleep_state_name(), "S2"));
     assert(guard_stops == 1 && audio_stopped);
     assert(touch_arms == 0 && !touch_armed && !strstr(g_events, "TARM"));   // D1: the touch level wake is NOT armed on the battery
-    assert(power_sleep_wait_ms(PP_POLLER_TOUCH, 20) == 1000 && power_sleep_wait_ms(PP_POLLER_RENDER, 1000) == 5000 && power_sleep_ptt_poll_ms(100) == 250);
+    assert(power_sleep_wait_ms(PP_POLLER_TOUCH, 20) == 5000 && power_sleep_wait_ms(PP_POLLER_RENDER, 1000) == 5000 && power_sleep_ptt_poll_ms(100) == 250);
     assert(the_lock.count == 0);                           // the chip may sleep
     assert(in_order("AUDIO-", "LOCK-") && in_order("GUARD-", "LOCK-"));   // the I2S clocks and the stall guard stop, THEN the lock goes
 
@@ -304,6 +307,7 @@ static void scenario_boot_and_cycle(void) {
     assert(the_lock.count == 1 && !power_sleep_relaxed());  // before the render task has run: lock back, pollers back to their S1 rates
     assert(power_sleep_wait_ms(PP_POLLER_TOUCH, 20) == 20);
     assert(strncmp(g_events, "LOCK+", 5) == 0);
+    assert(touch_pokes == 1 && in_order("LOCK+", "TPOKE"));   // the touch task is woken from its 5 s S2 wait, after the lock is back
     tick(300);
     assert(touch_disarms == 0 && guard_starts == 1 && audio_resumes == 1 && !audio_stopped);
     assert(in_order("LOCK+", "AUDIO+") && in_order("AUDIO+", "GUARD+"));
@@ -540,7 +544,7 @@ static void scenario_input_gate(void) {
     tick(60000);
     assert(!power_sleep_input_allowed() && touch_arms == 0);
     screen(true);                                           // a PWR tap (ptt.c) wakes the screen
-    assert(power_sleep_input_allowed() && the_lock.count == 1);
+    assert(power_sleep_input_allowed() && the_lock.count == 1 && touch_pokes == 1);
     tick(300);
     assert(power_sleep_input_allowed() && !power_sleep_relaxed());
     // plugged in while dark: input is allowed again as soon as the policy is back in S0

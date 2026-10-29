@@ -121,7 +121,14 @@ typedef enum {
     PP_POLLER_BATLOG,       // battery log (1000 ms)
     PP_POLLER_COUNT
 } pp_poller_t;
-#define PP_TOUCH_POLL_MS 1000   // the touch fallback poll in S2 (plan SLEEP_TOUCH_POLL_MS); the level wake is the main path
+// The touch fallback poll in S2 (plan SLEEP_TOUCH_POLL_MS). With the level wake it backs up the interrupt (1 s); under D1 there is no wake and every
+// contact on a dark battery screen is dropped, so it has nothing to catch and the touch task only needs to look up now and then (5 s). The screen
+// wake pokes the task (touch_wake_task), so the long wait never delays a touch after a PWR wake.
+#if PP_TOUCH_WAKE_ON_BATTERY
+#define PP_TOUCH_POLL_MS 1000
+#else
+#define PP_TOUCH_POLL_MS 5000
+#endif
 uint32_t pp_relaxed_ms(pp_poller_t who);
 uint32_t pp_wait_ms(pp_state_t s, pp_poller_t who, uint32_t awake_ms);
 
