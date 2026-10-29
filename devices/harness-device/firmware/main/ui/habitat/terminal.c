@@ -1150,9 +1150,12 @@ void ht_damage(const ht_scene_t *a, const ht_scene_t *b, ht_damage_t *d)
                 if (old->arc && old->arc == next->arc && old->shimmer && next->shimmer &&
                     old->x == next->x && old->y == next->y && old->w == next->w &&
                     old->font == next->font && old->fg == next->fg && old->bg == next->bg &&
-                    old->colors == next->colors && !strcmp(old->text, next->text)) {
+                    old->colors == next->colors && !strcmp(old->text, next->text) &&
+                    old->gained == next->gained && !memcmp(old->gain, next->gain, sizeof old->gain)) {
                     // Only the old/new highlight bands change. The rotated glyph
                     // mask and the dim text outside those bands stay untouched.
+                    // Not when the per-glyph gains changed too (the Listening word): every glyph can change
+                    // brightness, so such a pair falls through to the whole run bounds below.
                     damage_add(d, shimmer_band(old), rows);
                     damage_add(d, shimmer_band(next), rows);
                     continue;

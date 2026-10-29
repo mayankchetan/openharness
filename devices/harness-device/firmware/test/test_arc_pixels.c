@@ -159,6 +159,41 @@ static void sweep_face(void)
     ht_scene_clear(&b,0); ht_arc_status_sweep(&b,ht_rgb(0x00ff2f),"Hi",&ht_arc_geist,none);
     assert(b.count==1 && !b.runs[0].gained);
 }
+// A partial paint of the listening word (gains and shimmer both change on the voice face) must differ from a full raster
+// nowhere: every pixel that changes between two frames lies inside a damage rectangle. Host render found 872 of 5,936 partial
+// paints in voice_listen_* that did not, because the shimmer shortcut in ht_damage ignored the gains.
+static void sweep_damage(void)
+{
+    static uint16_t before[HT_WIDTH*HT_HEIGHT], after[HT_WIDTH*HT_HEIGHT];
+    const ht_rect_t all={0,0,HT_WIDTH,HT_HEIGHT};
+    unsigned frames=0, differing=0;
+    for (unsigned pa=1;pa<=21;pa+=4) for (unsigned pb=1;pb<=21;pb+=3) for (int ga=0;ga<4;ga++) for (int gb=0;gb<4;gb++) {
+        uint8_t gain_a[HT_ARC_GAINS], gain_b[HT_ARC_GAINS];
+        for (int i=0;i<HT_ARC_GAINS;i++) {
+            gain_a[i]=(uint8_t)(77+(ga*60+i*29)%179);
+            gain_b[i]=(uint8_t)(77+(gb*60+i*53)%179);
+        }
+        ht_scene_t a,b;
+        ht_scene_clear(&a,0); ht_arc_status_sweep(&a,ht_rgb(0x00ff2f),"Listening",&ht_arc_inter_lower,gain_a); a.runs[0].shimmer=(uint8_t)pa;
+        ht_scene_clear(&b,0); ht_arc_status_sweep(&b,ht_rgb(0x00ff2f),"Listening",&ht_arc_inter_lower,gain_b); b.runs[0].shimmer=(uint8_t)pb;
+        ht_raster(&a,all,before); ht_raster(&b,all,after);
+        ht_damage_t d; ht_damage(&a,&b,&d);
+        frames++;
+        bool bad=false;
+        for (int y=0;y<HT_HEIGHT && !bad;y++) for (int x=0;x<HT_WIDTH;x++) {
+            if (before[y*HT_WIDTH+x]==after[y*HT_WIDTH+x]) continue;
+            bool covered=false;
+            for (int i=0;i<d.count;i++) {
+                const ht_rect_t r=d.rect[i];
+                if (x>=r.x && x<r.x+r.w && y>=r.y && y<r.y+r.h) { covered=true; break; }
+            }
+            if (!covered) { bad=true; break; }
+        }
+        if (bad) differing++;
+    }
+    printf("sweep damage: %u frame pairs, %u with a changed pixel outside the damage\n",frames,differing);
+    assert(differing==0);
+}
 int main(void)
 {
     for (int edge=0;edge<2;edge++) for (int length=1;length<=HT_ARC_COLS;length++) {
@@ -191,6 +226,7 @@ int main(void)
         assert(l.runs[0].font==g.runs[0].font && l.runs[0].arc_mid!=g.runs[0].arc_mid);
     }
     sweep_face();
+    sweep_damage();
     puts("arc pixels: Inter Medium 26 arcs (name face and lower face) kerned, ink in r230 and inside tight bounds, unclipped, own mask per face, fitted with an ellipsis");
     puts("arc pixels: per-glyph gains scale the proportional lower arc, none/full are ht_arc_status_face to the pixel");
     printf("arc pixels: all %u upper/lower 24 px angle/color hashes preserved\n",2*HT_ARC_COLS);
