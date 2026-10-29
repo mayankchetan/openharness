@@ -52,6 +52,9 @@ EXPECTED = {
     # RAM at run time for 4.5 percent of bulk throughput (1,295 to 1,239 kbit/s); voice needs about 64 kbit/s.
     'CONFIG_ESP_WIFI_IRAM_OPT': 'n',
     'CONFIG_ESP_WIFI_RX_IRAM_OPT': 'n',
+    # Main task stack (plan C15): measured peak 2,092 B (build-SLP, 2026-10-28), so max(3072, peak + 1536) rounded up to 512.
+    # app_main ends in vTaskDelete(NULL), so this is a boot-time cost only.
+    'CONFIG_ESP_MAIN_TASK_STACK_SIZE': '4096',
 }
 for symbol, value in EXPECTED.items():
     assert defaults.get(symbol) == value, f'{symbol}: defaults say {defaults.get(symbol)!r}, expected {value!r}'

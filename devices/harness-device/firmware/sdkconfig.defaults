@@ -26,10 +26,13 @@ CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y
 # --- FreeRTOS ---
 CONFIG_FREERTOS_HZ=1000
 
-# --- Main task stack (UI + init) ---
-# OTA boot mode performs HTTP download and SHA verification on app_main. The
-# measured 8KiB stack left only 1,444B (17.6%); 10KiB restores the 25% margin.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240
+# --- Main task stack (init only) ---
+# The main task runs app_main, which starts the other tasks and ends in vTaskDelete(NULL): it is gone for the
+# rest of the run, so this size is paid at boot only. The OTA download that once ran here (and needed 10 KiB) is
+# gone. Measured peak use 2,092 B (SLP profile build, 2026-10-28: 8,148 of 10,240 B free at app_ready and at the end of
+# app_main). 4096 = max(3072, 2092 + 1536) rounded up to 512. Paths the profile did not run: the factory reset
+# (config_clear_all, a BOOT press at power-on) and the NVS erase on a bad partition; both are a few NVS calls.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
 
 # --- Log level ---
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
