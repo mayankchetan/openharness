@@ -88,6 +88,7 @@ static void run(void)
 #ifndef DEVICE_NO_OTA
     if (fw_update_active()) {
         ESP_LOGW(TAG, "POWEROFF refused: a firmware update is running");
+        s_next_try_us = esp_timer_get_time() + RETRY_US;   // like every refusal: the policy asks again every poll, and a task a poll would be too many
         return;
     }
 #endif

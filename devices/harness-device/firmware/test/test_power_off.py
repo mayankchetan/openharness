@@ -218,6 +218,14 @@ static void scenario_never_on_external_power(void) {
         store_gate_leave();
         assert(strstr(g_logs, "refused"));
     }
+    // a firmware update refuses the policy's request, and that refusal arms the same one-minute throttle as the others (no task a poll)
+    reset_world();
+    ota = true;
+    assert(power_off_request(PP_OFF_S2_TIMEOUT, false) && tasks_created == 1);
+    assert(!has("NVSSET") && !has("REG10") && strstr(g_logs, "firmware update"));
+    assert(!power_off_request(PP_OFF_S2_TIMEOUT, false) && tasks_created == 1);
+    g_now_us += 61LL * 1000000;
+    assert(power_off_request(PP_OFF_S2_TIMEOUT, false) && tasks_created == 2);
     // a firmware update refuses even the forced one
     reset_world();
     ota = true;
