@@ -47,6 +47,7 @@ static event_t events[400]; static int event_count;
 static int64_t esp_timer_get_time(void) { return passes[at].ms * 1000ll; }
 static bool open_touch(void) { if (open_ok) controller = (void *)1; return open_ok; }
 static void ulTaskNotifyTake(int a, int t) { (void)a; (void)t; if (++at == count) longjmp(stop, 1); }
+static int touch_wait_ticks(bool down) { return down ? 4 : 20; }   /* the production helper (power_sleep.h) gives these in S0 and S1 */
 static int esp_lcd_touch_read_data(void *c) { (void)c; return passes[at].rc; }
 // The glass itself is always idle: the only contact in these runs is the injected one.
 static bool esp_lcd_touch_get_coordinates(void *c, uint16_t *x, uint16_t *y, uint16_t *s, uint8_t *n, int m)
