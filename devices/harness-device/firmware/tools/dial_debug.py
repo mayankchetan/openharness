@@ -5,6 +5,7 @@
   dial_debug.py COM8 tap 233 233
   dial_debug.py COM8 swipe 380 233 90 233 [ms]
   dial_debug.py COM8 press 233 233 [ms]
+  dial_debug.py COM8 poweroff      (only an image built with DEVICE_BATTERY_POWEROFF=1 answers: the PMIC switches the dial off)
 
 Needs pyserial. Opens the port with DTR/RTS low so the open does not reset the board.
 """
@@ -166,6 +167,8 @@ def main():
             ms = int(args[4]) if len(args) > 4 else 250
             cmd_touch(port, {"t": "debug.swipe", "x1": int(args[0]), "y1": int(args[1]),
                              "x2": int(args[2]), "y2": int(args[3]), "ms": ms})
+        elif verb == "poweroff":
+            cmd_touch(port, {"t": "debug.power.off"})
         else:
             sys.exit(__doc__)
     finally:

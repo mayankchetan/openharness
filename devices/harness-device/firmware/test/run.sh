@@ -306,6 +306,8 @@ python3 "$here/test_sleep_pins.py"
 python3 "$here/test_quiet_pollers.py"
 python3 "$here/test_power_sleep_glue.py"
 python3 "$here/test_touch_sleep.py"
+python3 "$here/test_power_off.py"
+python3 "$here/test_power_off_wiring.py"
 python3 "$here/test_cable_logging.py"
 python3 "$here/test_audio_notify.py"
 python3 "$here/test_audio_init.py"
@@ -327,6 +329,9 @@ if [[ -n "${IDF_PATH:-}" ]]; then
         -o "$out/test_debug_cmd_json" "$here/test_debug_cmd_json.c" \
         "$here/../main/debug_cmd.c" "$here/../main/debug_cmd_json.c" "$IDF_PATH/components/json/cJSON/cJSON.c" -lm
     "$out/test_debug_cmd_json"
+    # the same with the bench command of the PMIC power-off compiled in (DEVICE_BATTERY_POWEROFF)
+    cc -std=c11 -Wall -Wextra -Werror -Wno-deprecated-declarations -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -DDEVICE_BATTERY_POWEROFF=1         -I "$here/../main" -I "$IDF_PATH/components/json/cJSON"         -o "$out/test_debug_cmd_json_poff" "$here/test_debug_cmd_json.c"         "$here/../main/debug_cmd.c" "$here/../main/debug_cmd_json.c" "$IDF_PATH/components/json/cJSON/cJSON.c" -lm
+    "$out/test_debug_cmd_json_poff"
     cc -std=c11 -Wall -Wextra -Werror -Wno-deprecated-declarations -O1 -g -pthread -fsanitize="${SANITIZERS:-undefined,bounds}" \
         -I "$here/../main" -I "$IDF_PATH/components/json/cJSON" \
         -o "$out/test_cable_scroll" "$here/test_cable_scroll.c" \

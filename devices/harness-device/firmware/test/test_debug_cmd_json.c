@@ -49,6 +49,32 @@ static void test_not_ours(void)
     assert(dbg_request_parse(NULL, NULL, &r) == DBG_NOT_DEBUG);
 }
 
+static cJSON *reply_of(char *text);
+
+// debug.power.off: the bench trigger of the PMIC power-off (DEVICE_BATTERY_POWEROFF). In any other image the name is not ours.
+static void test_poweroff(void)
+{
+    dbg_request_t r;
+#ifdef DEVICE_BATTERY_POWEROFF
+    assert(parse("{\"t\":\"debug.power.off\"}", &r) == DBG_OK && r.cmd == DBG_CMD_POWEROFF && r.id == 0);
+    assert(parse("{\"t\":\"debug.power.off\",\"id\":9}", &r) == DBG_OK && r.cmd == DBG_CMD_POWEROFF && r.id == 9);
+    assert(parse("{\"t\":\"debug.power.off\",\"id\":70000}", &r) == DBG_E_RANGE && r.cmd == DBG_CMD_POWEROFF);   // the refusal still names the command
+    assert(parse("{\"t\":\"debug.power.off\",\"id\":1.5}", &r) == DBG_E_SHAPE && r.cmd == DBG_CMD_POWEROFF);
+    assert(dbg_request_parse("debug.power.off", NULL, &r) == DBG_E_SHAPE && r.cmd == DBG_CMD_POWEROFF);
+    assert(parse("{\"t\":\"debug.power.off.now\"}", &r) == DBG_NOT_DEBUG && parse("{\"t\":\"debug.poweroff\"}", &r) == DBG_NOT_DEBUG);
+    assert(!strcmp(dbg_cmd_name(DBG_CMD_POWEROFF), "power.off"));
+    cJSON *d = reply_of(dbg_reply_done(DBG_CMD_POWEROFF, 9));
+    assert(!strcmp(cJSON_GetObjectItem(d, "t")->valuestring, "debug.done") && cJSON_GetObjectItem(d, "id")->valueint == 9 &&
+           !strcmp(cJSON_GetObjectItem(d, "cmd")->valuestring, "power.off"));
+    cJSON_Delete(d);
+    d = reply_of(dbg_reply_error(DBG_CMD_POWEROFF, 9, DBG_E_BUSY));
+    assert(!strcmp(cJSON_GetObjectItem(d, "reason")->valuestring, "busy") && !strcmp(cJSON_GetObjectItem(d, "cmd")->valuestring, "power.off"));
+    cJSON_Delete(d);
+#else
+    assert(parse("{\"t\":\"debug.power.off\",\"id\":9}", &r) == DBG_NOT_DEBUG && r.cmd == DBG_CMD_NONE);   // an image without the flag does not know it
+#endif
+}
+
 static void test_shot(void)
 {
     dbg_request_t r;
@@ -212,6 +238,7 @@ int main(void)
     cJSON_InitHooks(&hooks);
     test_not_ours();
     test_shot();
+    test_poweroff();
     test_touch();
     test_replies();
     test_allocation_failure();

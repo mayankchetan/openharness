@@ -8,7 +8,7 @@ static bool span_reached(uint32_t now, uint32_t since, uint32_t ms) { return (ui
 void pp_init(pp_t *p) { memset(p, 0, sizeof *p); p->state = PP_S0; }
 
 // The three facts of a fresh read (power_policy.h). A failed REG 0x00 read (-1) is "not on the battery", like a failed direction read.
-static bool on_battery(const pp_in_t *in)
+bool pp_on_battery(const pp_in_t *in)
 {
     return in->chg == 2 && in->status0 >= 0 && !(in->status0 & PP_PMU_VBUS_GOOD) && (in->status0 & PP_PMU_BATT_PRESENT);
 }
@@ -51,7 +51,7 @@ void pp_step(pp_t *p, const pp_in_t *in, pp_out_t *out)
 
     // Anything unsafe leaves S1 and S2 at once. A stale value never does; a fresh one that is not "discharging" always
     // does, and so does a failed read (-1): when in doubt, do not sleep.
-    if (p->state != PP_S0 && (!in->capable || in->sof || (in->chg_fresh && !on_battery(in)))) {
+    if (p->state != PP_S0 && (!in->capable || in->sof || (in->chg_fresh && !pp_on_battery(in)))) {
         to_s0(p, in, out);
         out->state = p->state;
         return;
@@ -61,7 +61,7 @@ void pp_step(pp_t *p, const pp_in_t *in, pp_out_t *out)
     case PP_S0:
         if (!in->capable || in->sof || in->chg != 2) {
             p->confirm_reads = 0;                       // the candidate went away: start again
-        } else if (in->chg_fresh && !on_battery(in)) {
+        } else if (in->chg_fresh && !pp_on_battery(in)) {
             p->confirm_reads = 0;                       // VBUS is good, or no cell, or a failed read: external power, start again
         } else if (in->chg_fresh && dwell_ok(p, in->now_ms)) {
             if (p->confirm_reads == 0) {
@@ -150,4 +150,76 @@ uint32_t pp_dimmed_percent(uint32_t user_percent)
 {
     const uint32_t dimmed = user_percent * PP_DIM_PERCENT / 100u;
     return dimmed < PP_DIM_FLOOR ? PP_DIM_FLOOR : dimmed;
+}
+
+// ---- the PMIC power-off triggers (power_policy.h) ----
+void pp_off_init(pp_off_t *o) { memset(o, 0, sizeof *o); }
+
+static void hist_reset(pp_off_t *o)
+{
+    o->hist_next = 0;
+    o->hist_count = 0;
+    o->have_sample = false;
+}
+
+int pp_off_drain_per_hour(const pp_off_t *o)
+{
+    if (o->hist_count < PP_OFF_SAMPLES) return -1;
+    const int oldest = o->hist[o->hist_next];   // the ring is full: the next slot to write holds the oldest sample
+    const int newest = o->hist[(o->hist_next + PP_OFF_SAMPLES - 1) % PP_OFF_SAMPLES];
+    return oldest > newest ? oldest - newest : 0;   // a gauge that rose (a cell that relaxed) is a drain of 0
+}
+
+pp_off_reason_t pp_off_step(pp_off_t *o, const pp_off_in_t *in)
+{
+    // External power in any form: no timers, no history, nothing to ask for.
+    if (in->state == PP_S0 || !in->on_battery || in->sof) {
+        o->s2_armed = false;
+        o->low_armed = false;
+        hist_reset(o);
+        return PP_OFF_NONE;
+    }
+    // One gauge sample a minute, in S1 and S2. A gap of two sample periods (the gauge unreadable for a while) throws the history away: it would
+    // no longer span an hour.
+    if (in->pct >= 0 && (!o->have_sample || span_reached(in->now_ms, o->last_sample_ms, PP_OFF_SAMPLE_MS))) {
+        if (o->have_sample && span_reached(in->now_ms, o->last_sample_ms, 2 * PP_OFF_SAMPLE_MS)) hist_reset(o);
+        o->hist[o->hist_next] = (uint8_t)(in->pct > 100 ? 100 : in->pct);
+        o->hist_next = (uint8_t)((o->hist_next + 1) % PP_OFF_SAMPLES);
+        if (o->hist_count < PP_OFF_SAMPLES) o->hist_count++;
+        o->have_sample = true;
+        o->last_sample_ms = in->now_ms;
+    }
+    // A power-off is only ever asked for from S2: with the screen on the user sees the battery rim.
+    if (in->state != PP_S2) {
+        o->s2_armed = false;
+        o->low_armed = false;
+        return PP_OFF_NONE;
+    }
+    if (!o->s2_armed) {
+        o->s2_armed = true;
+        o->s2_since_ms = in->now_ms;
+    }
+    if (in->pct >= 0 && in->pct <= PP_OFF_LOW_PCT) {
+        if (!o->low_armed) {
+            o->low_armed = true;
+            o->low_since_ms = in->now_ms;
+        }
+    } else {
+        o->low_armed = false;                                   // above 5 percent, or unknown: the minute starts again
+    }
+    if (o->low_armed && span_reached(in->now_ms, o->low_since_ms, PP_OFF_LOW_HOLD_MS)) return PP_OFF_LOW_BATTERY;
+    if (pp_off_drain_per_hour(o) > PP_OFF_DRAIN_PCT_PER_H) return PP_OFF_DRAIN;
+    if (span_reached(in->now_ms, o->s2_since_ms, PP_OFF_S2_MS)) return PP_OFF_S2_TIMEOUT;
+    return PP_OFF_NONE;
+}
+
+const char *pp_off_reason_name(pp_off_reason_t r)
+{
+    switch (r) {
+    case PP_OFF_NONE:       return "none";
+    case PP_OFF_LOW_BATTERY: return "low_battery";
+    case PP_OFF_DRAIN:      return "drain";
+    case PP_OFF_S2_TIMEOUT: return "s2_30min";
+    }
+    return "?";
 }

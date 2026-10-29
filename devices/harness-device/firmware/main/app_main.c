@@ -34,6 +34,7 @@
 #include "freertos/task.h"
 #include "boot_key.h"
 #include "ptt.h"
+#include "power_off.h"
 #include "power_sleep.h"
 #include "ram_telemetry.h"
 #include "task_util.h"
@@ -278,6 +279,7 @@ void app_main(void)
     board_detect();      // which dial this is — the panel's reset pin comes from here, so before display_init
     power_sleep_init();  // DEVICE_BATTERY_SLEEP only (a no-op otherwise): the awake lock, so nothing sleeps until the policy says so
     config_store_init();
+    power_off_boot_report();   // DEVICE_BATTERY_POWEROFF only (a no-op otherwise): the AXP2101 source bytes, and why the last boot ended
 
 #ifdef DEVICE_UI_GALLERY
     gallery_main();

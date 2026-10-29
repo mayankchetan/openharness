@@ -136,3 +136,60 @@ uint32_t pp_wait_ms(pp_state_t s, pp_poller_t who, uint32_t awake_ms);
 typedef enum { PP_SCREEN_FULL = 0, PP_SCREEN_DIM, PP_SCREEN_OFF } pp_screen_t;
 pp_screen_t pp_screen_level(pp_state_t s, uint32_t idle_ms);
 uint32_t pp_dimmed_percent(uint32_t user_percent);
+
+// THE PMIC POWER-OFF TRIGGERS (S3, DEVICE_BATTERY_POWEROFF; plan sections 3.6 and 16). From S2 (battery, screen off) the dial asks to be
+// switched off by the PMIC (power_off.c) when ANY of these holds:
+//   (a) PP_OFF_S2_MS, 30 min, continuously in S2;
+//   (b) the gauge reads PP_OFF_LOW_PCT percent or less, without a break, for PP_OFF_LOW_HOLD_MS (the minute keeps a gauge that has not
+//       started yet, and reads 0, from being taken for a flat cell right after a boot);
+//   (c) the gauge fell by more than PP_OFF_DRAIN_PCT_PER_H over the last hour (61 samples a minute apart, kept in RAM while on the battery).
+//       THE 15 PERCENT AN HOUR IS PROVISIONAL: the plan wants it set from the measured light-sleep drain (T0/G6), which is not in yet. It
+//       catches a chip that does not sleep. An hour of history cannot be made in S2 alone (the 30 min fires first), so it is made over
+//       S1 and S2 together, and is lost at every boot and at every spell on external power.
+// NEVER on external power: a read that is not "on the battery" (VBUS good, no cell), a USB host (SOF), or S0 gives PP_OFF_NONE, throws the
+// timers away and, for external power, the drain history too. power_off.c checks VBUS once more, fresh, before it acts.
+#define PP_OFF_S2_MS            (30u * 60u * 1000u)
+#define PP_OFF_LOW_PCT          5
+#define PP_OFF_LOW_HOLD_MS      60000u
+#define PP_OFF_DRAIN_PCT_PER_H  15          // PROVISIONAL, see above
+#define PP_OFF_SAMPLE_MS        60000u      // one gauge sample a minute
+#define PP_OFF_SAMPLES          61          // 61 samples, a minute apart, span an hour
+
+typedef enum {
+    PP_OFF_NONE = 0,
+    PP_OFF_LOW_BATTERY = 1,   // (b)
+    PP_OFF_DRAIN = 2,         // (c)
+    PP_OFF_S2_TIMEOUT = 3,    // (a)
+} pp_off_reason_t;
+
+typedef struct {
+    bool     s2_armed;
+    uint32_t s2_since_ms;
+    bool     low_armed;
+    uint32_t low_since_ms;
+    // the gauge history: a ring of the last PP_OFF_SAMPLES percents
+    uint8_t  hist[PP_OFF_SAMPLES];
+    uint8_t  hist_next;
+    uint8_t  hist_count;
+    bool     have_sample;
+    uint32_t last_sample_ms;
+} pp_off_t;
+
+typedef struct {
+    uint32_t   now_ms;
+    pp_state_t state;       // the policy state after this poll's pp_step
+    bool       on_battery;  // the last fresh PMIC read said so (pp_on_battery)
+    bool       sof;         // a USB host is there
+    int        pct;         // the gauge's own percent, 0..100, or -1
+} pp_off_in_t;
+
+void pp_off_init(pp_off_t *o);
+// One step, every poll. Returns the reason the dial should be switched off for, or PP_OFF_NONE. A reason repeats on every step until it
+// stops holding; the caller acts once (power_off_request refuses a second one while the first runs).
+pp_off_reason_t pp_off_step(pp_off_t *o, const pp_off_in_t *in);
+// The fall in percent over the last hour, or -1 while there are fewer than PP_OFF_SAMPLES samples (or the history was thrown away).
+int pp_off_drain_per_hour(const pp_off_t *o);
+const char *pp_off_reason_name(pp_off_reason_t r);
+
+// "On the battery", the three facts of one fresh read (see the rules at the top of this file).
+bool pp_on_battery(const pp_in_t *in);

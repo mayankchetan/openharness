@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 #include "nvs.h"
 #include "power_sleep.h"
+#include "store_gate.h"
 #include <stdio.h>
 
 static const char *TAG = "batlog";
@@ -33,12 +34,14 @@ static bool blob_get(const char *key, void *buf, size_t cap, size_t *len)
 static bool blob_set(const char *key, const void *buf, size_t len)
 {
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    if (!store_gate_enter()) return false;   // the dial is being switched off (power_off.c): no write may start now
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) { store_gate_leave(); return false; }
     // Length 0 is "erase this block" (battery_ring.c drops a ring of another version); a key that is not there is erased already.
     esp_err_t e = len ? nvs_set_blob(h, key, buf, len) : nvs_erase_key(h, key);
     if (e == ESP_ERR_NVS_NOT_FOUND && !len) e = ESP_OK;
     if (e == ESP_OK) e = nvs_commit(h);
     nvs_close(h);
+    store_gate_leave();
     return e == ESP_OK;
 }
 static bool ring_load(int block, uint8_t *buf, size_t *len)

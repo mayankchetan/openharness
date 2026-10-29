@@ -41,6 +41,7 @@ set(BOARD_SRCS
     "voice_buffer.c"
     "ptt.c"
     "boot_key.c"
+    "store_gate.c"
     # the board
     "board/board_i2c.c"
     "board/board.c"
@@ -238,6 +239,18 @@ if(DEVICE_BATTERY_SLEEP)
     endif()
     target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_BATTERY_SLEEP=1)
     target_sources(${COMPONENT_LIB} PRIVATE "power_policy.c" "power_sleep.c")
+endif()
+
+# PMIC power-off (power_off.c, store_gate.c): -DDEVICE_BATTERY_POWEROFF=1, default OFF, needs DEVICE_BATTERY_SLEEP=1. From S2 (battery, screen off) the dial
+# switches itself off through the AXP2101 (REG 0x10 bit 0) after 30 min in S2, at 5 percent or less, or when the gauge falls faster than
+# 15 percent an hour (provisional); never on external power. Only a PWR hold brings it back. It also adds the bench command debug.power.off,
+# which runs the same sequence on a cable. Plan: workbench briefs/research/2026-10-29-battery-sleep-plan.md sections 3.6, 16, 16.1; bench gates P1-P6.
+if(DEVICE_BATTERY_POWEROFF)
+    if(NOT DEVICE_BATTERY_SLEEP)
+        message(FATAL_ERROR "DEVICE_BATTERY_POWEROFF needs DEVICE_BATTERY_SLEEP=1: the triggers are the sleep policy's (state S2)")
+    endif()
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_BATTERY_POWEROFF=1)
+    target_sources(${COMPONENT_LIB} PRIVATE "power_off.c")
 endif()
 
 # The UI gallery (ui/habitat/ui_gallery.inc): a UI-only image that walks every screen and animation of the firmware on a

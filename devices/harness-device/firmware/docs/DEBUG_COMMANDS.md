@@ -196,6 +196,54 @@ On failure:
 | `busy` | A gesture is already playing. |
 | `touch` | The touch controller is not up, or the gesture was lost (the touch task did not take it within 1 s, or did not finish within its length plus 2 s). |
 
+## Power off (bench only)
+
+**`debug.power.off`** runs the PMIC power-off sequence on a cable, so the bench gates P1-P3 of the battery sleep plan
+(`briefs/research/2026-10-29-battery-sleep-plan.md` sections 16 and 16.1 in the workbench repo) can be run without waiting for the
+real triggers. It exists **only** in an image built with `-DDEVICE_BATTERY_POWEROFF=1` (which needs `-DDEVICE_BATTERY_SLEEP=1`). In any other
+image the name is not ours and is counted as unknown, like any `debug.*` name this build does not have.
+
+### Request
+
+```json
+{"t":"debug.power.off","id":5}
+```
+
+`id` is optional (0..65535), as in every request. No other key is read.
+
+### Reply
+
+```json
+{"t":"debug.done","id":5,"cmd":"power.off"}
+```
+
+The reply is sent when the sequence has been started. The dial is gone about 1.2 s later. If the PMIC does not take the power away (VBUS keeps
+the system up, for instance), the dial logs `POWEROFF: still running 3000 ms after the PMIC write`, shows its home screen again and carries on.
+On failure:
+
+```json
+{"t":"debug.error","id":5,"cmd":"power.off","reason":"busy"}
+```
+
+| `reason` | Meaning |
+| --- | --- |
+| `busy` | A power-off sequence is already running. |
+| `shape` / `range` | `id` is not a whole number (shape) or not in 0..65535 (range). |
+
+### What it does
+
+The same sequence as the real triggers (plan 16.1 item 2), in this order: one log line `POWEROFF reason=debug pct=<p> mv=<mv> force=1`, the NVS
+writers stop (`store_gate.h`), a record `{reason, percent, mV, uptime}` is committed to NVS, 100 ms for the flash to settle, the screen wakes if it was off
+and shows `Off - hold PWR` for 1 s, then AXP2101 REG 0x10 bit 0 (Soft PWROFF) is set. The next boot logs the record once (`previous boot ended in a PMIC
+power-off: reason=debug ...`) together with the raw REG 0x20 and REG 0x21 bytes (power-on and power-off source status).
+
+The one difference from the real triggers: this command skips the "not on external power" checks (VBUS good, a USB host), which is the point of it. It
+still refuses during a firmware update, and the NVS writers are stopped as ever. With VBUS present whether the dial really stays off, and what brings it
+back, is exactly what gate P1 measures.
+
+`tools/dial_debug.py COM8 poweroff` sends it. It is not on the daemon's HTTP routes (those are the four commands above); stop the daemon first, or
+use a script that owns the port.
+
 ## How the screenshot is made, and why
 
 The panel is write-only: there is no way to read the picture back from it. The renderer
@@ -246,6 +294,7 @@ Host tests, no board (`make device-test`, or `test/run.sh`):
 | `test_debug_cmd_json.c` | Reading every request shape; the exact bytes of the replies; allocation failure at every point leaves no partial reply and no leak. Needs `IDF_PATH` (for cJSON), like `test_cable_features.c`. |
 | `test_touch_inject.py` | The production touch task with an injected gesture: tap and swipe reach `habitat_touch()` like a finger; stale ACKs; wake swallow while asleep; dead controller; no effect when nothing is armed. |
 | `test_cable_features.c` | The `debug` feature name. |
+| `test_power_off.py` | `debug.power.off`'s sequence on the host (see Power off): order of the log line, writer freeze, NVS record, screen and PMIC write; never on VBUS or a USB host unless forced; the boot report. |
 
 ## Through the daemon
 

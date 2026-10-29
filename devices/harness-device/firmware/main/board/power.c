@@ -154,3 +154,22 @@ bool power_is_on_external(void)
     int cs = axp_charge_state();
     return cs >= 0 && cs != 2;
 }
+
+#ifdef DEVICE_BATTERY_POWEROFF
+// REG 0x10 (AXP2101 datasheet V1.4 p.32, register map section 6.13.2.7). Bit 0 "Soft PWROFF: 0 normal, 1 PWROFF" (RWAC, default 0): writing 1
+// switches the PMIC off, every rail but RTCLDO (p.19, p.21); off-state battery current typ 40 uA (Table 5-5, p.11). Bit 1 "restart the SoC
+// system" (RWAC) is never written as 1 here. Bit 2 (PWRON 16 s shutdown, default 0) and bit 5 (internal off-discharge enable, default 1) keep
+// the values they read, which is why this is a read-modify-write and not a write of 0x01.
+#define AXP_REG_PWROFF        0x10
+#define AXP_PWROFF_SOFT       (1 << 0)
+#define AXP_PWROFF_RESTART    (1 << 1)
+
+bool power_pmic_soft_off(void)
+{
+    const int v = axp_read(AXP_REG_PWROFF);
+    if (v < 0) return false;
+    return axp_write(AXP_REG_PWROFF, (uint8_t)((v | AXP_PWROFF_SOFT) & ~AXP_PWROFF_RESTART)) == ESP_OK;
+}
+
+int power_read_reg(uint8_t reg) { return axp_read(reg); }
+#endif

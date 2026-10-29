@@ -5,11 +5,28 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_log.h"
+#include "store_gate.h"
 
 static const char *TAG = "config";
 static const char *NS = "pair";
 
 static void read_str(nvs_handle_t h, const char *key, char *dst, size_t cap);   // defined below
+
+// Every write opens through the store gate: when the dial is about to be switched off by the PMIC (power_off.c) the gate stops new writers
+// and waits for the one in flight, so the power goes after the commit and never in the middle of a flash write. A refused open is a write
+// that did not happen (the callers already handle a failed open).
+static esp_err_t open_rw(nvs_handle_t *h)
+{
+    if (!store_gate_enter()) return ESP_ERR_INVALID_STATE;
+    const esp_err_t e = nvs_open(NS, NVS_READWRITE, h);
+    if (e != ESP_OK) store_gate_leave();
+    return e;
+}
+static void close_rw(nvs_handle_t h)
+{
+    nvs_close(h);
+    store_gate_leave();
+}
 
 
 void config_store_init(void)
@@ -43,9 +60,9 @@ void config_load_voicelang(char *out, size_t cap)
 void config_save_voicelang(const char *lang)
 {
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return;
+    if (open_rw(&h) != ESP_OK) return;
     bool ok = nvs_set_str(h, "vlang", lang) == ESP_OK && nvs_commit(h) == ESP_OK;
-    nvs_close(h);
+    close_rw(h);
     ESP_LOGI(TAG, "save_voicelang '%s': %s", lang, ok ? "ok" : "FAILED");
 }
 
@@ -63,9 +80,9 @@ uint8_t config_load_brightness(void)
 void config_save_brightness(uint8_t level)
 {
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return;
+    if (open_rw(&h) != ESP_OK) return;
     bool ok = nvs_set_u8(h, "bright", level) == ESP_OK && nvs_commit(h) == ESP_OK;
-    nvs_close(h);
+    close_rw(h);
     ESP_LOGI(TAG, "save_brightness 0x%02x: %s", level, ok ? "ok" : "FAILED");
 }
 
@@ -84,9 +101,9 @@ bool config_load_muted(void)
 bool config_save_muted(bool muted)
 {
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    if (open_rw(&h) != ESP_OK) return false;
     bool ok = nvs_set_u8(h, "muted", muted ? 1 : 0) == ESP_OK && nvs_commit(h) == ESP_OK;
-    nvs_close(h);
+    close_rw(h);
     ESP_LOGI(TAG, "save_muted %d: %s", (int)muted, ok ? "ok" : "FAILED");
     return ok;
 }
@@ -104,9 +121,9 @@ uint8_t config_load_habitat_options(void)
 bool config_save_habitat_options(uint8_t options)
 {
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    if (open_rw(&h) != ESP_OK) return false;
     bool ok = nvs_set_u8(h, "habitat", options & 15) == ESP_OK && nvs_commit(h) == ESP_OK;
-    nvs_close(h);
+    close_rw(h);
     return ok;
 }
 
@@ -123,9 +140,9 @@ uint8_t config_load_habitat_character(uint8_t fallback)
 bool config_save_habitat_character(uint8_t character)
 {
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    if (open_rw(&h) != ESP_OK) return false;
     bool ok = nvs_set_u8(h, "habitat_char", character) == ESP_OK && nvs_commit(h) == ESP_OK;
-    nvs_close(h);
+    close_rw(h);
     return ok;
 }
 
@@ -151,9 +168,9 @@ bool config_load_scroll_reversed(void)
 void config_save_scroll_reversed(bool reversed)
 {
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return;
+    if (open_rw(&h) != ESP_OK) return;
     bool ok = nvs_set_u8(h, "scrollrev", reversed ? 1 : 0) == ESP_OK && nvs_commit(h) == ESP_OK;
-    nvs_close(h);
+    close_rw(h);
     ESP_LOGI(TAG, "save_scroll_reversed %d: %s", (int)reversed, ok ? "ok" : "FAILED");
 }
 
@@ -174,9 +191,9 @@ bool config_load_swipe_reversed(void)
 void config_save_swipe_reversed(bool reversed)
 {
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return;
+    if (open_rw(&h) != ESP_OK) return;
     bool ok = nvs_set_u8(h, "swiperev", reversed ? 1 : 0) == ESP_OK && nvs_commit(h) == ESP_OK;
-    nvs_close(h);
+    close_rw(h);
     ESP_LOGI(TAG, "save_swipe_reversed %d: %s", (int)reversed, ok ? "ok" : "FAILED");
 }
 
@@ -195,10 +212,10 @@ void config_save_swipe_reversed(bool reversed)
 bool config_clear_all(void)
 {
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    if (open_rw(&h) != ESP_OK) return false;
     nvs_erase_all(h);
     bool ok = nvs_commit(h) == ESP_OK;
-    nvs_close(h);
+    close_rw(h);
     ESP_LOGW(TAG, "clear_all: %s", ok ? "ok" : "FAILED");
     return ok;
 }

@@ -18,6 +18,8 @@ Checked here (plan sections 3.1, 3.2, 3.5 and tasks T6, T7):
   * a dial that is not the CST9217 + AXP2101 board never leaves S0 and never reads the PMIC;
   * a voice turn or a cable session holds the dial in S1; a USB host sends it to S0 at once;
   * the sleep statistics of the alive line (count and milliseconds) from the light sleep exit callback.
+A third build with DEVICE_BATTERY_POWEROFF=1 and a fake power_off_request() runs the S3 triggers through the real glue: 30 min in S2, a flat cell,
+the drain, each only from S2 and never on external power (VBUS good, a USB host, a plug-in on the way).
 A second build with PP_TOUCH_WAKE_ON_BATTERY=1 runs the two scenarios of the arming code that D1 turns off (the wake that cannot be
 armed, the driver that is lost), so the code kept for a later mode stays proved.
 """
@@ -221,6 +223,11 @@ bool touch_sleep_arm(void) {
 }
 void touch_sleep_disarm(void) { touch_armed = false; touch_disarms++; ev("TDIS"); }
 
+// DEVICE_BATTERY_POWEROFF: the glue asks power_off.c to switch the dial off; here the ask is only counted
+static int off_calls, off_first_reason, off_last_reason; static bool off_last_force, off_accept = true;
+bool power_off_request(int reason, bool force) { if (!off_calls++) off_first_reason = reason; off_last_reason = reason; off_last_force = force; return off_accept; }
+bool power_off_pending(void) { return false; }
+
 // ---- helpers ----
 static void clear_events(void) { g_events[0] = 0; }
 static bool in_order(const char *a, const char *b) {   // a occurs, and b occurs after it
@@ -247,6 +254,7 @@ static void reset_world(void) {
     cache_chg = -1; usb_host = asleep = voice = session = false; audio_stopped = false; audio_idle_ok = true; pmu0 = 0x08; g_logs[0] = 0;
     guard_stops = guard_starts = audio_idles = audio_resumes = touch_arms = touch_disarms = 0; pmic_state = 0; retention_result = ESP_OK;
     release_wakes_screen = false; release_plugs_usb = false; arm_fails = false; touch_armed = false;
+    off_calls = off_first_reason = off_last_reason = 0; off_last_force = false; off_accept = true;
     clear_events();
 }
 
@@ -543,6 +551,109 @@ static void scenario_input_gate(void) {
     assert(!strcmp(power_sleep_state_name(), "S0") && power_sleep_input_allowed());
 }
 
+#ifdef DEVICE_BATTERY_POWEROFF
+// to S2 on the battery with the gauge at `pct`
+static void to_s2(int pct) {
+    cache_pct = pct;
+    unplug(); tick(4000);
+    screen(false); tick(4000);
+    assert(!strcmp(power_sleep_state_name(), "S2"));
+}
+static void scenario_off_s2_timeout_0(void) {
+    reset_world();
+    power_sleep_init();
+    to_s2(80);
+    tick(29 * 60 * 1000);                                   // 29 minutes after S2 began (it began about 3 s into the 4 s of dark)
+    assert(off_calls == 0);
+    tick(70 * 1000);
+    assert(off_calls > 0 && off_first_reason == PP_OFF_S2_TIMEOUT && !off_last_force);   // asked for, never forced by the policy
+    assert(strstr(g_logs, "power-off asked for: s2_30min"));
+    // a wake in the middle restarts the 30 minutes
+}
+static void scenario_off_s2_timeout_1(void) {
+    reset_world();
+    power_sleep_init();
+    to_s2(80);
+    tick(25 * 60 * 1000);
+    screen(true); tick(1000); screen(false); tick(4000);
+    tick(25 * 60 * 1000);
+    assert(off_calls == 0);
+    tick(6 * 60 * 1000);
+    assert(off_calls > 0);
+}
+static void scenario_off_low_battery_0(void) {
+    reset_world();
+    power_sleep_init();
+    to_s2(5);
+    tick(50 * 1000);
+    assert(off_calls == 0);                                 // a minute of 5 percent or less, not less
+    tick(15 * 1000);
+    assert(off_calls > 0 && off_first_reason == PP_OFF_LOW_BATTERY);
+}
+static void scenario_off_low_battery_1(void) {
+    reset_world();
+    power_sleep_init();
+    to_s2(6);
+    tick(10 * 60 * 1000);
+    assert(off_calls == 0);
+    // with the screen on (S1) a flat cell is shown on the rim, not acted on
+}
+static void scenario_off_low_battery_2(void) {
+    reset_world();
+    power_sleep_init();
+    cache_pct = 2; unplug(); tick(2 * 3600 * 1000);
+    assert(!strcmp(power_sleep_state_name(), "S1") && off_calls == 0);
+}
+static void scenario_off_drain_0(void) {
+    reset_world();
+    power_sleep_init();
+    cache_pct = 90; unplug(); tick(4000);
+    for (int minute = 0; minute < 62; minute++) {
+        if (minute % 3 == 0 && minute) cache_pct--;
+        screen(minute % 2 == 0); tick(60 * 1000);           // awake on even minutes, dark on odd ones: never 30 min in S2
+    }
+    screen(false); tick(5000);
+    assert(!strcmp(power_sleep_state_name(), "S2") && off_calls > 0 && off_first_reason == PP_OFF_DRAIN);
+}
+static void scenario_off_never_on_external_power_0(void) {
+    reset_world();
+    power_sleep_init();
+    cache_pct = 1; plug_in(); tick(3 * 3600 * 1000);
+    assert(off_calls == 0 && !strcmp(power_sleep_state_name(), "S0"));
+    // a charger that is not charging (VBUS good, direction discharge) is still external power
+    pmic_state = 2; cache_chg = 2; pmu0 = 0x28; tick(2 * 3600 * 1000);
+    assert(off_calls == 0 && !strcmp(power_sleep_state_name(), "S0"));
+    // a USB host on the cable
+}
+static void scenario_off_never_on_external_power_1(void) {
+    reset_world();
+    power_sleep_init();
+    cache_pct = 1; unplug(); usb_host = true; screen(false); tick(2 * 3600 * 1000);
+    assert(off_calls == 0 && !strcmp(power_sleep_state_name(), "S0"));
+    // a plug-in on the way to the 30 minutes: nothing is carried over to the next spell on the battery
+}
+static void scenario_off_never_on_external_power_2(void) {
+    reset_world();
+    power_sleep_init();
+    to_s2(80);
+    tick(29 * 60 * 1000);
+    plug_in(); tick(5000);
+    assert(!strcmp(power_sleep_state_name(), "S0") && off_calls == 0);
+    unplug(); tick(14000 + 4000);                           // out of the anti-flap dwell and back on the battery
+    screen(false); tick(60 * 1000);
+    assert(!strcmp(power_sleep_state_name(), "S2") && off_calls == 0);   // ... a minute into the new spell, not 30
+    // and the refusal of a request (power_off.c is busy) is harmless
+}
+static void scenario_off_never_on_external_power_3(void) {
+    reset_world();
+    power_sleep_init();
+    off_accept = false;
+    to_s2(2);
+    tick(2 * 60 * 1000);
+    assert(off_calls > 0 && !strstr(g_logs, "power-off asked for"));
+}
+#endif
+
 static void scenario_stats(void) {
     reset_world();
     power_sleep_init();
@@ -571,6 +682,18 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "audio")) scenario_audio_retry();
     else if (!strcmp(argv[1], "input")) scenario_input_gate();
     else if (!strcmp(argv[1], "stats")) scenario_stats();
+#ifdef DEVICE_BATTERY_POWEROFF
+    else if (!strcmp(argv[1], "off_s2_timeout_0")) scenario_off_s2_timeout_0();
+    else if (!strcmp(argv[1], "off_s2_timeout_1")) scenario_off_s2_timeout_1();
+    else if (!strcmp(argv[1], "off_low_battery_0")) scenario_off_low_battery_0();
+    else if (!strcmp(argv[1], "off_low_battery_1")) scenario_off_low_battery_1();
+    else if (!strcmp(argv[1], "off_low_battery_2")) scenario_off_low_battery_2();
+    else if (!strcmp(argv[1], "off_drain_0")) scenario_off_drain_0();
+    else if (!strcmp(argv[1], "off_never_on_external_power_0")) scenario_off_never_on_external_power_0();
+    else if (!strcmp(argv[1], "off_never_on_external_power_1")) scenario_off_never_on_external_power_1();
+    else if (!strcmp(argv[1], "off_never_on_external_power_2")) scenario_off_never_on_external_power_2();
+    else if (!strcmp(argv[1], "off_never_on_external_power_3")) scenario_off_never_on_external_power_3();
+#endif
     else assert(!"unknown scenario");
     return 0;
 }
@@ -601,6 +724,10 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
     build('glue_arm', '-DPP_TOUCH_WAKE_ON_BATTERY=1')
     for name in ('noarm', 'lost'):
         subprocess.run([str(folder / 'glue_arm'), name], check=True)
+    # the S3 triggers through the real glue (power_off_request is a fake that counts)
+    build('glue_off', '-DDEVICE_BATTERY_POWEROFF=1')
+    for name in ('off_s2_timeout_0', 'off_s2_timeout_1', 'off_low_battery_0', 'off_low_battery_1', 'off_low_battery_2', 'off_drain_0', 'off_never_on_external_power_0', 'off_never_on_external_power_1', 'off_never_on_external_power_2', 'off_never_on_external_power_3'):
+        subprocess.run([str(folder / 'glue_off'), name], check=True)
     print('power sleep glue: ' + ', '.join(scenarios) + ' PASS (boot order, unplug, S2 entry and wake order without a touch wake, plug-in, 200 cycles balanced, '
           'no retention RAM, PWR wake during entry, other boards, host, holds, audio retry, D1 input gate, sleep statistics); '
-          'noarm, lost PASS with PP_TOUCH_WAKE_ON_BATTERY=1')
+          'noarm, lost PASS with PP_TOUCH_WAKE_ON_BATTERY=1; the S3 triggers PASS with DEVICE_BATTERY_POWEROFF=1')

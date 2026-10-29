@@ -2,6 +2,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 // AXP2101 datasheet V1.4 p.31 (workbench briefs/research/2026-10-29-axp2101-registers.md):
 //   REG 0x00 PMU status1: bit 5 = VBUS good (1 good), bit 3 = battery present (1 present), bits 7:6 reserved.
@@ -45,3 +46,12 @@ bool power_is_on_external(void);
 // read over I2C. Returns true once per short press. A LONG press is handled by the AXP2101 itself as a
 // hardware restart and is never seen here.
 bool power_take_pwrkey_tap(void);
+
+#ifdef DEVICE_BATTERY_POWEROFF
+// PMIC power-off (power_off.c only): set REG 0x10 bit 0 "Soft PWROFF" (AXP2101 datasheet V1.4 p.32) by read-modify-write. Every rail but
+// RTCLDO goes off; the dial comes back only on a PWR hold (power-on source is the PMIC's EFUSE setting, plan 16 bench gates P1-P3). True when
+// the write was accepted; on success the chip is without power a few milliseconds later and this does not return in practice.
+bool power_pmic_soft_off(void);
+// One raw PMIC register, or -1 on a failed read (for the boot log of the power-on and power-off source status bytes).
+int power_read_reg(uint8_t reg);
+#endif

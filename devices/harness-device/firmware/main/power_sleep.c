@@ -33,6 +33,9 @@
 #include "ui/habitat/runtime.h"
 #include "ui/touch.h"
 #include <stdatomic.h>
+#ifdef DEVICE_BATTERY_POWEROFF
+#include "power_off.h"
+#endif
 
 #if !CONFIG_PM_ENABLE || !CONFIG_FREERTOS_USE_TICKLESS_IDLE
 #error "DEVICE_BATTERY_SLEEP needs the options of sdkconfig.defaults.sleep (CONFIG_PM_ENABLE, CONFIG_FREERTOS_USE_TICKLESS_IDLE)"
@@ -71,6 +74,10 @@ static atomic_bool s_in_s2;            // S2 is applied (render task) or being a
 static atomic_int  s_want;             // the policy's state (pp_state_t), written by the ptt task
 static atomic_uint s_link_holds;       // PP_HOLD_LINK and friends, set by transports through power_sleep_hold()
 static pp_t        s_pp;               // the policy; the ptt task only
+#ifdef DEVICE_BATTERY_POWEROFF
+static pp_off_t    s_off;              // the PMIC power-off triggers (power_policy.h pp_off_step); the ptt task only
+static bool        s_last_on_battery;  // the last fresh PMIC read said "on the battery" (pp_on_battery)
+#endif
 static pp_state_t  s_applied;          // what the render task has applied
 static bool        s_pm_battery;       // power management is configured for battery (frequency scaling, maybe light sleep)
 static bool        s_audio_idle;       // the I2S channels are stopped (audio_capture_idle)
@@ -156,6 +163,9 @@ void power_sleep_init(void)
 {
     keep_output_pads();
     pp_init(&s_pp);
+#ifdef DEVICE_BATTERY_POWEROFF
+    pp_off_init(&s_off);
+#endif
     atomic_store(&s_want, PP_S0);
     s_applied = PP_S0;
     esp_err_t e = esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "dial_awake", &s_awake);
@@ -212,9 +222,21 @@ void power_sleep_poll(void)
         s_last_status0 = in.status0;
         s_last_status1 = status1;
         battery_set(battery_pct_raw(), in.chg);   // the 30 s cache follows what was just read: alive line, hello frame, battery log
+#ifdef DEVICE_BATTERY_POWEROFF
+        s_last_on_battery = pp_on_battery(&in);
+#endif
     }
     pp_out_t out;
     pp_step(&s_pp, &in, &out);
+#ifdef DEVICE_BATTERY_POWEROFF
+    {
+        // S3: from S2 only, never on external power. The sequence runs on its own task (power_off.c) and re-reads VBUS before it acts.
+        const pp_off_in_t oin = {.now_ms = in.now_ms, .state = out.state, .on_battery = s_last_on_battery, .sof = in.sof, .pct = battery_pct_raw()};
+        const pp_off_reason_t why = pp_off_step(&s_off, &oin);
+        if (why != PP_OFF_NONE && power_off_request((int)why, false))
+            ESP_LOGW(TAG, "power-off asked for: %s (state %s, pct %d)", pp_off_reason_name(why), pp_state_name(out.state), oin.pct);
+    }
+#endif
     if (out.action == PP_ACT_NONE) return;
 
     ESP_LOGI(TAG, "%s -> %s (chg=%d reg00=%#x reg01=%#x sof=%d asleep=%d holds=0x%x) int_free=%u largest=%u", pp_state_name(out.from),

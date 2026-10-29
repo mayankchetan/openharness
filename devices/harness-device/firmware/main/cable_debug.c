@@ -10,6 +10,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "power_off.h"
 #include "ui/display.h"
 #include "ui/touch.h"
 
@@ -137,6 +138,20 @@ bool cable_debug_inject_tap(int x, int y)
     return true;
 }
 
+#ifdef DEVICE_BATTERY_POWEROFF
+// debug.power.off: the PMIC power-off sequence, forced (it skips the VBUS and USB-host checks, so the bench can run it on a cable; it still
+// refuses during a firmware update). The reply goes out first: the dial is gone about 1.2 s after the request.
+static void poweroff(uint16_t id)
+{
+    if (!power_off_request(POWER_OFF_REASON_DEBUG, true)) {
+        refuse(DBG_CMD_POWEROFF, id, DBG_E_BUSY);   // one is already running
+        return;
+    }
+    ESP_LOGW(TAG, "power.off id=%u: forced PMIC power-off sequence started", (unsigned)id);
+    send_text(dbg_reply_done(DBG_CMD_POWEROFF, id));
+}
+#endif
+
 static volatile uint32_t s_commands_done, s_commands_started;
 uint32_t cable_debug_commands_done(void) { return s_commands_done; }
 uint32_t cable_debug_commands_started(void) { return s_commands_started; }
@@ -149,6 +164,9 @@ bool cable_debug_handle(const char *t, const cJSON *p)
     s_commands_started++;
     if (err) refuse(request.cmd, request.id, err);
     else if (request.cmd == DBG_CMD_SHOT) shot(request.id);
+#ifdef DEVICE_BATTERY_POWEROFF
+    else if (request.cmd == DBG_CMD_POWEROFF) poweroff(request.id);
+#endif
     else touch(&request);
     s_commands_done++;   // after the work: a screenshot is finished (picture sent) when this moves
     return true;

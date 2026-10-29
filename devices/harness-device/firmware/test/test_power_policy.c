@@ -69,6 +69,146 @@ static void to_s2(rig_t *r)
     assert(r->p.state == PP_S2);
 }
 
+// ---- the power-off triggers ----
+typedef struct { pp_off_t o; pp_off_in_t in; } offrig_t;
+static void offrig_init(offrig_t *r, uint32_t start, pp_state_t st, int pct)
+{
+    memset(r, 0, sizeof *r);
+    pp_off_init(&r->o);
+    r->in = (pp_off_in_t){.now_ms = start, .state = st, .on_battery = true, .sof = false, .pct = pct};
+}
+// One step `dt` ms later.
+static pp_off_reason_t offstep(offrig_t *r, uint32_t dt) { r->in.now_ms += dt; return pp_off_step(&r->o, &r->in); }
+// Run for `ms` in 1 s steps; returns the first reason seen (PP_OFF_NONE if none) and leaves the clock where it stopped.
+static pp_off_reason_t offrun(offrig_t *r, uint32_t ms)
+{
+    for (uint32_t t = 0; t < ms; t += 1000) {
+        const pp_off_reason_t e = offstep(r, 1000);
+        if (e != PP_OFF_NONE) return e;
+    }
+    return PP_OFF_NONE;
+}
+
+static void test_poweroff_triggers(void)
+{
+    // the constants the plan and the user decided (the drain threshold is provisional until the first long run)
+    assert(PP_OFF_S2_MS == 30u * 60u * 1000u && PP_OFF_LOW_PCT == 5 && PP_OFF_DRAIN_PCT_PER_H == 15);
+    assert(!strcmp(pp_off_reason_name(PP_OFF_NONE), "none") && !strcmp(pp_off_reason_name(PP_OFF_LOW_BATTERY), "low_battery") &&
+           !strcmp(pp_off_reason_name(PP_OFF_DRAIN), "drain") && !strcmp(pp_off_reason_name(PP_OFF_S2_TIMEOUT), "s2_30min"));
+    offrig_t r;
+
+    // (a) 30 min continuously in S2
+    offrig_init(&r, 5000, PP_S2, 80);
+    assert(offstep(&r, 0) == PP_OFF_NONE);                                    // the first S2 step starts the clock
+    assert(offrun(&r, PP_OFF_S2_MS - 1000) == PP_OFF_NONE);                   // 29 min 59 s
+    assert(offstep(&r, 999) == PP_OFF_NONE);                                  // 1,799,999 ms
+    assert(offstep(&r, 1) == PP_OFF_S2_TIMEOUT);                              // 1,800,000 ms
+    assert(offstep(&r, 1000) == PP_OFF_S2_TIMEOUT);                           // and it stays asked for until the dial is off or the state changes
+    // a visit to S1 (the screen woke) restarts the 30 min
+    offrig_init(&r, 5000, PP_S2, 80);
+    assert(offrun(&r, 20u * 60u * 1000u) == PP_OFF_NONE);
+    r.in.state = PP_S1; assert(offstep(&r, 1000) == PP_OFF_NONE);
+    r.in.state = PP_S2; assert(offstep(&r, 1000) == PP_OFF_NONE);
+    assert(offrun(&r, 29u * 60u * 1000u) == PP_OFF_NONE);                     // 29 min since the return: not yet
+    assert(offrun(&r, 2u * 60u * 1000u) == PP_OFF_S2_TIMEOUT);
+    // never from S1, however long the screen is on
+    offrig_init(&r, 0, PP_S1, 80);
+    assert(offrun(&r, 3u * 3600u * 1000u) == PP_OFF_NONE);
+    // the 32-bit clock wraps in the middle of the 30 min
+    offrig_init(&r, UINT32_MAX - 600000u, PP_S2, 80);
+    assert(offstep(&r, 0) == PP_OFF_NONE && offrun(&r, PP_OFF_S2_MS - 1000) == PP_OFF_NONE);
+    assert(offstep(&r, 1000) == PP_OFF_S2_TIMEOUT);
+
+    // (b) the cell is flat: at or below 5 percent for a full minute in S2
+    offrig_init(&r, 0, PP_S2, 5);
+    assert(offstep(&r, 0) == PP_OFF_NONE && offrun(&r, PP_OFF_LOW_HOLD_MS - 1000) == PP_OFF_NONE);
+    assert(offstep(&r, 999) == PP_OFF_NONE && offstep(&r, 1) == PP_OFF_LOW_BATTERY);
+    offrig_init(&r, 0, PP_S2, 6);                                             // 6 percent is not low
+    assert(offrun(&r, 10u * 60u * 1000u) == PP_OFF_NONE);
+    offrig_init(&r, 0, PP_S2, 5);                                             // a reading above 5 or an unknown one breaks the minute
+    offrun(&r, 50000); r.in.pct = 6; offstep(&r, 1000); r.in.pct = 5;
+    assert(offrun(&r, PP_OFF_LOW_HOLD_MS - 1000) == PP_OFF_NONE && offrun(&r, 2000) == PP_OFF_LOW_BATTERY);
+    offrig_init(&r, 0, PP_S2, 5);
+    offrun(&r, 50000); r.in.pct = -1; offstep(&r, 1000); r.in.pct = 5;
+    assert(offrun(&r, PP_OFF_LOW_HOLD_MS - 1000) == PP_OFF_NONE);
+    offrig_init(&r, 0, PP_S2, 0);                                             // a gauge that says 0 counts as low once it has held for the minute
+    assert(offrun(&r, PP_OFF_LOW_HOLD_MS + 1000) == PP_OFF_LOW_BATTERY);
+    offrig_init(&r, 0, PP_S1, 3);                                             // only from S2: the screen is on, the user sees the rim
+    assert(offrun(&r, 10u * 60u * 1000u) == PP_OFF_NONE);
+
+    // (c) the drain over the last hour (one gauge sample a minute while on the battery, S1 or S2). The history of an hour can only be made
+    // with the screen on part of the time: 30 min in S2 would have powered the dial off first. So it is built in S1 and read in S2.
+    offrig_init(&r, 0, PP_S1, 90);
+    {
+        // 20 percent an hour: one point every 3 minutes. The history needs 61 samples, an hour apart end to end.
+        for (uint32_t minutes = 0; minutes < 60; minutes++) {
+            if (minutes % 3 == 0 && minutes) r.in.pct--;
+            assert(offrun(&r, 60000) == PP_OFF_NONE);
+        }
+        assert(pp_off_drain_per_hour(&r.o) < 0);                               // 60 samples: not a full hour yet
+        r.in.state = PP_S2; assert(offstep(&r, 0) == PP_OFF_NONE);              // S2 begins: nothing to go on
+        r.in.state = PP_S1;
+        r.in.pct--;                                                             // minute 60: the 20th point
+        assert(offrun(&r, 60000) == PP_OFF_NONE);
+        assert(pp_off_drain_per_hour(&r.o) == 20);
+        r.in.state = PP_S2;
+        assert(offstep(&r, 0) == PP_OFF_DRAIN);                                 // 20 an hour is above 15
+    }
+    // exactly 15 an hour is not above the threshold; 16 is
+    for (int drop = 15; drop <= 16; drop++) {
+        offrig_init(&r, 0, PP_S1, 90);
+        offrun(&r, 60000);                                                    // the first sample, 90
+        r.in.pct = 90 - drop;
+        for (int m = 0; m < 60; m++) offrun(&r, 60000);                       // 60 more: 61 samples, the first an hour before the last
+        assert(pp_off_drain_per_hour(&r.o) == drop);
+        r.in.state = PP_S2;
+        assert(offstep(&r, 0) == (drop == 15 ? PP_OFF_NONE : PP_OFF_DRAIN));   // (no time passes: the next sample would push the first one out)
+    }
+    // the history is made on the battery in S1 too, but the power-off comes only from S2
+    offrig_init(&r, 0, PP_S1, 90);
+    offrun(&r, 60000); r.in.pct = 60;
+    for (int m = 0; m < 60; m++) assert(offrun(&r, 60000) == PP_OFF_NONE);
+    assert(pp_off_drain_per_hour(&r.o) == 30);
+    r.in.state = PP_S2;
+    assert(offstep(&r, 0) == PP_OFF_DRAIN);                                // the hour is already on record
+    // external power throws the history away
+    r.in.state = PP_S0; r.in.on_battery = false; offstep(&r, 1000);
+    r.in.state = PP_S2; r.in.on_battery = true;
+    assert(pp_off_drain_per_hour(&r.o) < 0 && offstep(&r, 1000) == PP_OFF_NONE);
+
+    // (d) NEVER on external power: VBUS good (not on the battery), a USB host, or S0 -- however long and however low
+    offrig_init(&r, 0, PP_S2, 1);
+    r.in.on_battery = false;
+    assert(offrun(&r, 3u * 3600u * 1000u) == PP_OFF_NONE);
+    offrig_init(&r, 0, PP_S2, 1);
+    r.in.sof = true;
+    assert(offrun(&r, 3u * 3600u * 1000u) == PP_OFF_NONE);
+    offrig_init(&r, 0, PP_S0, 1);
+    assert(offrun(&r, 3u * 3600u * 1000u) == PP_OFF_NONE);
+    // a plug-in during the 30 min throws the elapsed time away: it is not carried over to the next battery spell
+    offrig_init(&r, 0, PP_S2, 80);
+    offrun(&r, 29u * 60u * 1000u);
+    r.in.on_battery = false; assert(offstep(&r, 1000) == PP_OFF_NONE);
+    r.in.on_battery = true;  assert(offstep(&r, 1000) == PP_OFF_NONE);
+    assert(offrun(&r, 5u * 60u * 1000u) == PP_OFF_NONE);                      // 5 minutes after the return, not 1
+    // a plug-in in the middle of the flat-cell minute likewise
+    offrig_init(&r, 0, PP_S2, 4);
+    offrun(&r, 50000);
+    r.in.sof = true; assert(offstep(&r, 1000) == PP_OFF_NONE);
+    r.in.sof = false;
+    assert(offrun(&r, 30000) == PP_OFF_NONE);
+
+    // (e) priority when several hold at once: a flat cell first
+    offrig_init(&r, 0, PP_S2, 4);
+    assert(offrun(&r, PP_OFF_S2_MS + 1000) == PP_OFF_LOW_BATTERY);            // 60 s into S2 at 4 percent: low wins long before 30 min
+    // ... then the drain, before the 30 min: asked for the moment S2 begins with the hour on record
+    offrig_init(&r, 0, PP_S1, 90);
+    offrun(&r, 60000); r.in.pct = 50;
+    for (int m = 0; m < 60; m++) offrun(&r, 60000);
+    r.in.state = PP_S2;
+    assert(offstep(&r, 0) == PP_OFF_DRAIN);                                   // 40 an hour, asked for at the first step of S2
+}
+
 int main(void)
 {
     rig_t r;
@@ -365,6 +505,9 @@ int main(void)
     // The touch level wake is not armed on the battery (D1); the arming code stays for a later mode.
     assert(PP_TOUCH_WAKE_ON_BATTERY == 0);
 
-    puts("power policy: S0/S1/S2 transitions, PMIC read schedule, hold bits, anti-flap, 32-bit clock wrap, poller table, battery screen levels, D1 input gate PASS");
+    // --- The PMIC power-off triggers (S3, plan section 3.6 / 16): 30 min in S2, a flat cell, a fast drain; never on external power ---
+    test_poweroff_triggers();
+
+    puts("power policy: S0/S1/S2 transitions, PMIC read schedule, hold bits, anti-flap, 32-bit clock wrap, poller table, battery screen levels, D1 input gate, power-off triggers PASS");
     return 0;
 }

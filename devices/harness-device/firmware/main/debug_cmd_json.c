@@ -35,6 +35,9 @@ dbg_err_t dbg_request_parse(const char *t, const cJSON *p, dbg_request_t *out)
     static const struct { const char *name; dbg_cmd_t cmd; } names[] = {
         {"debug.shot", DBG_CMD_SHOT}, {"debug.tap", DBG_CMD_TAP},
         {"debug.press", DBG_CMD_PRESS}, {"debug.swipe", DBG_CMD_SWIPE},
+#ifdef DEVICE_BATTERY_POWEROFF
+        {"debug.power.off", DBG_CMD_POWEROFF},
+#endif
     };
     for (unsigned i = 0; i < sizeof names / sizeof names[0]; i++)
         if (!strcmp(t, names[i].name)) out->cmd = names[i].cmd;
@@ -64,6 +67,9 @@ const char *dbg_cmd_name(dbg_cmd_t cmd)
     case DBG_CMD_TAP:   return "tap";
     case DBG_CMD_PRESS: return "press";
     case DBG_CMD_SWIPE: return "swipe";
+#ifdef DEVICE_BATTERY_POWEROFF
+    case DBG_CMD_POWEROFF: return "power.off";
+#endif
     default:            return "";
     }
 }

@@ -132,7 +132,14 @@ void dbg_inject_abort(void);
 int dbg_inject_finish(int64_t now_us);
 
 // ── the requests ────────────────────────────────────────────────────────────────────────────────────
-typedef enum { DBG_CMD_NONE, DBG_CMD_SHOT, DBG_CMD_TAP, DBG_CMD_PRESS, DBG_CMD_SWIPE } dbg_cmd_t;
+// DBG_CMD_POWEROFF (debug.power.off) exists only in an image built with DEVICE_BATTERY_POWEROFF: it runs the PMIC power-off sequence even on a
+// cable, for the bench gates P1-P3 (power_off.h). In any other image the name is not ours and is counted as unknown.
+typedef enum {
+    DBG_CMD_NONE, DBG_CMD_SHOT, DBG_CMD_TAP, DBG_CMD_PRESS, DBG_CMD_SWIPE,
+#ifdef DEVICE_BATTERY_POWEROFF
+    DBG_CMD_POWEROFF,
+#endif
+} dbg_cmd_t;
 
 typedef struct {
     dbg_cmd_t cmd;
