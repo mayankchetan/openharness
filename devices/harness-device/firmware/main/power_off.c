@@ -57,6 +57,17 @@ static void write_record(int reason, int pct, int mv)
     if (e != ESP_OK) ESP_LOGW(TAG, "POWEROFF: the record was not written (%d); powering off without it", (int)e);
 }
 
+// Remove the record (the writers are frozen or it is boot: this is the one writer allowed to run, so it does not go through the gate).
+static void erase_record(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_erase_key(h, KEY);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
 // True when this is no time to power off: VBUS good (REG 0x00 bit 5), the register unreadable, or a USB host. Fresh, on this task: the cached state
 // may be 30 s old. Logs the reason.
 static bool external_power_now(const char *when)
@@ -74,9 +85,11 @@ static bool external_power_now(const char *when)
     return false;
 }
 
-// Give the dial back: the writers run again and the home screen returns.
+// Give the dial back: the record is erased (the dial is up, so the next boot must not report a power-off), then the writers run again and the
+// home screen returns.
 static void put_back(void)
 {
+    erase_record();
     store_gate_thaw();
     ui_leave_error_screen();
     s_next_try_us = esp_timer_get_time() + RETRY_US;
@@ -163,11 +176,7 @@ void power_off_boot_report(void)
     if (n == sizeof rec && rec.magic == REC_MAGIC)
         ESP_LOGW(TAG, "previous boot ended in a PMIC power-off: reason=%s pct=%d mv=%u up_s=%u", reason_name(rec.reason), rec.pct, (unsigned)rec.mv,
                  (unsigned)rec.up_s);
-    if (nvs_open(NS, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_erase_key(h, KEY);
-        nvs_commit(h);
-        nvs_close(h);
-    }
+    erase_record();
 }
 
 #endif

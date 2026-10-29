@@ -278,6 +278,7 @@ static void scenario_pmic_does_not_take_it(void) {
     store_gate_leave();
     assert(strstr(g_logs, "still running"));
     assert(delay_total_ms >= 1000 + 3000);
+    assert(!store.present && in_order("NVSERASE", "HOME") && in_order("NVSCOMMIT", "HOME"));   // the dial is up: no record may claim it went off
     // and a second request is possible afterwards
     assert(power_off_request(POWER_OFF_REASON_DEBUG, true) && tasks_created == 2);
     // a failed PMIC write is logged and treated the same
@@ -285,6 +286,7 @@ static void scenario_pmic_does_not_take_it(void) {
     soft_off_ok = false;
     assert(power_off_request(PP_OFF_DRAIN, false));
     assert(strstr(g_logs, "FAILED") && strstr(g_logs, "still running") && !store_gate_frozen());
+    assert(!store.present);
 }
 
 static void scenario_plugged_during_screen(void) {
@@ -299,6 +301,8 @@ static void scenario_plugged_during_screen(void) {
         assert(!store_gate_frozen() && store_gate_enter());
         store_gate_leave();
         assert(strstr(g_logs, "refused") && strstr(g_logs, "still running") == NULL);
+        assert(!store.present && in_order("NVSERASE", "HOME"));            // the record is erased before the gate opens again
+        assert(in_order("NVSCOMMIT", "NVSERASE") || count_of("NVSCOMMIT") >= 2);
         // and an unforced retry waits a minute
         assert(!power_off_request(PP_OFF_S2_TIMEOUT, false));
         // reset_world() of the next round moves the clock past the throttle; the busy flag is clear (the task ended)
