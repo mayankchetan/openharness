@@ -1,0 +1,58 @@
+# Bluetooth LE (NimBLE, peripheral) for the round dial. NOT loaded by default: ESP-IDF reads sdkconfig.defaults and
+# sdkconfig.defaults.esp32s3 by itself, and a file with this suffix only when it is named in SDKCONFIG_DEFAULTS. The
+# product image has no Bluetooth; this file is the starting point for the wireless design.
+#
+# Use (a new build directory and a fresh sdkconfig, because IDF reads the defaults only when it creates sdkconfig):
+#   idf.py -B build-ble -DSDKCONFIG=build-ble/sdkconfig \
+#       -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3;sdkconfig.defaults.ble" build
+#
+# What it is: the settings of the profile images P2 and P2f (diet2-r1-results.md section 8), without the bench-only
+# symbols (no FreeRTOS run-time statistics, no test options). The roles are peripheral and broadcaster, one connection,
+# one L2CAP credit-based channel.
+#
+# Measured on the dial (peripheral dial against a central dial, 1M PHY; the profile images also had the FreeRTOS run-time
+# statistics on, which this file leaves out, so absolute figures differ a little):
+#   P2  (the settings below without BT_CTRL_RUN_IN_FLASH_ONLY): internal RAM free after BLE is up 106,615 B, voice-rate
+#       stream 0 lost acks, round trip p95 44.6 ms, bulk 424 kbit/s.
+#   P2f (all of this file): 126,903 B, +20,288 B at run time (static DIRAM -15,748 B, the image +91,760 B because the
+#       controller code runs from flash); round trip p95 44.3 ms, bulk 422 kbit/s, no cost measured. Not yet measured: the
+#       plan's T14 (NVS saves every 5 s during a stream). The Kconfig help for BT_CTRL_RUN_IN_FLASH_ONLY says BLE can
+#       misbehave during a flash erase unless SPI_FLASH_AUTO_SUSPEND is on; that option is not set in this tree.
+#
+# The 2M PHY. BT_NIMBLE_50_FEATURE_SUPPORT=n (below) is the lean setting that was measured. With it off the dial MUST NOT
+# ask for the 2M PHY: a phone (Pixel 10 Pro) dropped the link 6 s after connect (status 520, HCI 0x08) when the dial asked
+# for 2M, and held it when the dial did not ask (results section 2). The other route, measured and not chosen (image P2b5):
+# BT_NIMBLE_50_FEATURE_SUPPORT=y (the 2M and coded PHY options then default on) with the 2M request left in. It cost
+# 5,392 B of internal RAM more than P2 at run time and gave 720 kbit/s bulk dial to dial against 424 kbit/s (PHY 2M
+# reached). A variant with the coded PHY off was not built.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=n
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_L2CAP_COC_MAX_NUM=1
+CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=30
+CONFIG_BT_NIMBLE_MSYS_1_BLOCK_SIZE=512
+
+# Lean controller and host sizes (nothing in the voice or bulk path needed more).
+CONFIG_BT_CTRL_BLE_MAX_ACT=2
+CONFIG_BT_CTRL_ADV_DUP_FILT_MAX=1
+CONFIG_BT_CTRL_BLE_ADV_REPORT_FLOW_CTRL_SUPP=n
+CONFIG_BT_CTRL_BLE_SCAN_DUPL=n
+CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=0
+CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=n
+CONFIG_BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT=12
+CONFIG_BT_NIMBLE_TRANSPORT_EVT_COUNT=15
+CONFIG_BT_NIMBLE_GATT_MAX_PROCS=2
+CONFIG_BT_NIMBLE_MAX_BONDS=1
+CONFIG_BT_NIMBLE_MAX_CCCDS=1
+
+# The NimBLE host's own allocations (mbuf pools, GATT, L2CAP and security state) come from PSRAM. The controller has no such
+# option: IDF 5.5.6 allocates its memory from internal DMA RAM. Needs SPIRAM_USE_MALLOC (already set).
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+
+# Plan C12: the controller's code runs from flash instead of IRAM. +20,288 B of internal RAM at run time.
+CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY=y

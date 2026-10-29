@@ -75,4 +75,31 @@ if generated:
     checked = f'generated config {Path(generated).name} agrees with {len(defaults)} default symbols'
 else:
     checked = 'no generated sdkconfig found (set SDKCONFIG=path to check one)'
-print(f'sdkconfig defaults: {len(EXPECTED)} radio/memory symbols explicit and consistent; {checked} PASS')
+
+# sdkconfig.defaults.ble: the BLE settings proven on the profile images (P2, P2f), kept OUT of the default list. IDF loads
+# sdkconfig.defaults and sdkconfig.defaults.<target> by itself; a file with another suffix is read only when it is named in
+# -DSDKCONFIG_DEFAULTS, so the product (no Bluetooth) is unchanged.
+ble_text = (firmware / 'sdkconfig.defaults.ble').read_text()
+ble = dict(re.findall(r'^(CONFIG_\w+)=(.*?)\s*$', ble_text, re.M))
+BLE_EXPECTED = {
+    'CONFIG_BT_ENABLED': 'y', 'CONFIG_BT_NIMBLE_ENABLED': 'y', 'CONFIG_BT_BLUEDROID_ENABLED': 'n',
+    'CONFIG_BT_NIMBLE_L2CAP_COC_MAX_NUM': '1',
+    'CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL': 'y',          # host pools in PSRAM
+    'CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT': 'n',               # with this off the dial must not request the 2M PHY
+    'CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY': 'y',                  # plan C12: +20,288 B internal RAM at run time
+}
+for symbol, value in BLE_EXPECTED.items():
+    assert ble.get(symbol) == value, f'{symbol}: sdkconfig.defaults.ble says {ble.get(symbol)!r}, expected {value!r}'
+assert not (set(ble) & set(defaults)) or all(ble[s] == defaults[s] for s in set(ble) & set(defaults)), 'no conflict with the defaults'
+assert not [s for s in ble if 'BENCH' in s or s.startswith('CONFIG_FREERTOS_')], 'nothing bench-only'
+assert not any('BT_' in s for s in defaults), 'the default files stay Bluetooth-free'
+assert 'sdkconfig.defaults.ble' not in (firmware / 'CMakeLists.txt').read_text().split('file(GLOB')[0], 'not added to the load list'
+ble_checked = 'no BLE build config given (set SDKCONFIG_BLE=path to a build made with the BLE defaults list)'
+ble_build = os.environ.get('SDKCONFIG_BLE')
+if ble_build:
+    config = read_generated(ble_build)
+    for symbol, value in {**defaults, **ble}.items():
+        assert config.get(symbol, 'n') == value.strip('"') or config.get(symbol) == value, f'{symbol}: expected {value!r}, BLE build config {config.get(symbol)!r}'
+    ble_checked = f'BLE build config {Path(ble_build).name} agrees with {len(ble)} BLE symbols'
+print(f'sdkconfig defaults: {len(EXPECTED)} radio/memory symbols explicit and consistent; {checked}; '
+      f'sdkconfig.defaults.ble has {len(ble)} symbols, not in the default list; {ble_checked} PASS')
