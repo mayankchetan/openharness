@@ -5732,6 +5732,13 @@ void ui_ota_boot_pct(int percent)
 bool ui_voice_is_recording(void) { return audio_client_recording(); }
 bool ui_voice_is_active(void) { return audio_client_active(); }
 uint32_t ui_voice_start_tick(void) { return s.voice_started; }
+uint32_t ui_voice_generation(void)
+{
+    display_lock();
+    const uint32_t g = s.voice_generation;
+    display_unlock();
+    return g;
+}
 bool ui_voice_can_start(void)
 {
     display_lock();

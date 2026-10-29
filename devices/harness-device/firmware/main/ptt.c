@@ -76,10 +76,14 @@ static void ptt_task(void *arg)
             ESP_LOGI(TAG, "BOOT tap → back / stop turn");
             ui_boot_pressed();
             break;
-        case BK_HOLD_START:
+        case BK_HOLD_START: {
             ESP_LOGI(TAG, "BOOT hold → record");
+            const uint32_t before = ui_voice_generation();
             ui_voice_start();
+            const uint32_t after = ui_voice_generation();
+            if (after != before) bk_capture_begin(&boot_key, after);   // the capture this hold started, and the only one it will send or cancel
             break;
+        }
         case BK_HOLD_END:
             ESP_LOGI(TAG, "BOOT release → send");
             break;
@@ -89,7 +93,20 @@ static void ptt_task(void *arg)
         case BK_NONE:
             break;
         }
-        if (bk_stop_poll(&boot_key, now_ms, ui_voice_is_recording())) ui_voice_stop();   // right after the release, or when the capture begins
+        if (bk_capture_active(&boot_key)) {
+            switch (bk_capture_poll(&boot_key, now_ms, ui_voice_is_recording(), ui_voice_generation())) {
+            case BK_CAP_SEND:
+                ESP_LOGI(TAG, "BOOT clip → send");
+                ui_voice_stop();
+                break;
+            case BK_CAP_CANCEL:
+                ESP_LOGI(TAG, "BOOT clip shorter than %d ms → cancelled, nothing sent", BK_MIN_CLIP_MS);
+                ui_voice_route_abort();   // the existing cancel: audio_client_abort, voice_close, the host told, back to the screen it came from
+                break;
+            case BK_CAP_NONE:
+                break;
+            }
+        }
 
         vTaskDelay(pdMS_TO_TICKS(power_sleep_ptt_poll_ms(POLL_MS)));   // POLL_MS; 250 ms while the chip may sleep (power_sleep.h)
     }

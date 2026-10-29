@@ -18,7 +18,7 @@ board_c = (main / 'board/board.c').read_text()
 task = re.search(r'static void ptt_task\(void \*arg\)\n\{.*?^\}', ptt, re.M | re.S)[0]
 assert 'bk_init_ex(&boot_key, gpio_get_level(BSP_BOOT_BUTTON) == 0,' in task, 'a key held through power-on is ignored until released'
 assert 'bk_step(&boot_key, now_ms, gpio_get_level(BSP_BOOT_BUTTON) == 0, power_sleep_input_allowed(), ui_voice_can_start)' in task
-for needle in ('case BK_TAP:', 'ui_boot_pressed();', 'case BK_HOLD_START:', 'ui_voice_start();', 'bk_stop_poll(&boot_key, now_ms, ui_voice_is_recording())) ui_voice_stop();'):
+for needle in ('case BK_TAP:', 'ui_boot_pressed();', 'case BK_HOLD_START:', 'ui_voice_start();', 'bk_capture_poll(&boot_key, now_ms, ui_voice_is_recording(), ui_voice_generation())', 'case BK_CAP_SEND:', 'ui_voice_stop();', 'case BK_CAP_CANCEL:', 'ui_voice_route_abort();', 'bk_capture_begin(&boot_key, after)'):
     assert needle in task, needle
 assert 'BOOT_LONG_PRESS_MS' not in ptt
 assert 'bk_init_ex(&boot_key, gpio_get_level(BSP_BOOT_BUTTON) == 0, !pwr_key);' in task, 'toggle mode exactly where there is no PWR key'

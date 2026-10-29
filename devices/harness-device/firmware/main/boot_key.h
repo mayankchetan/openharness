@@ -19,6 +19,7 @@
 #define BK_HOLD_MS        400    // down this long: hold-to-talk (a tap is shorter; 300 ms thumbs are taps)
 #define BK_TOGGLE_MS      800    // toggle mode (no PWR key): held this long, the screen toggles
 #define BK_STOP_WAIT_MS   3000   // released before the capture began: wait this long for it to begin, then give up
+#define BK_MIN_CLIP_MS    700    // released less than this long after the recording began: cancel it, send nothing
 #define BK_RESET_HOLD_MS  5000   // BOOT held this long after power-on: wipe the settings (16.1 item 3)
 
 typedef enum {
@@ -26,7 +27,7 @@ typedef enum {
     BK_PRESS,        // the press edge, input allowed: the caller wakes a dark screen (external power only)
     BK_TAP,          // released as a tap (or a hold that was denied): interrupt the running turn
     BK_HOLD_START,   // the hold threshold passed and a capture can start: start it
-    BK_HOLD_END,     // released after a hold that started: the capture is sent (bk_stop_poll says when it can be stopped)
+    BK_HOLD_END,     // released after a hold that started: the capture is sent (bk_capture_poll says when, and whether to send or cancel)
     BK_LONG,         // toggle mode only: held for BK_TOGGLE_MS, once per press: toggle the screen
 } bk_event_t;
 
@@ -37,7 +38,11 @@ typedef struct {
     bool     hold_fired;    // BK_HOLD_START was returned for this press
     bool     talk_denied;   // the hold threshold passed and no capture could start
     uint32_t down_ms;
-    bool     stop_pending;  // a hold ended: the capture has to be stopped once it is recording
+    bool     has_token;     // a capture was started by this hold (bk_capture_begin); token names it
+    uint32_t token;
+    bool     rec_seen;      // that capture was seen recording
+    uint32_t rec_began_ms;  // ... first at this poll
+    bool     stop_pending;  // the hold ended: the capture has to be sent (or cancelled) once it is recording
     uint32_t stop_since_ms;
 } bk_t;
 
@@ -47,9 +52,18 @@ void bk_init_ex(bk_t *k, bool pressed_now, bool toggle_mode);
 // One poll. `now_ms` is a free-running 32-bit millisecond clock (wrap is fine). `pressed` is the pin level (true = down). `allowed` is
 // power_sleep_input_allowed() (D1). `can_talk` is asked once per press, when the hold threshold passes: true when a capture can start.
 bk_event_t bk_step(bk_t *k, uint32_t now_ms, bool pressed, bool allowed, bool (*can_talk)(void));
-// After a BK_HOLD_END: true exactly once, when `recording` is true (the capture has begun): the caller stops it. False while the capture
-// is still starting; after BK_STOP_WAIT_MS it gives up (nothing started, nothing to stop). A new press cancels it.
-bool bk_stop_poll(bk_t *k, uint32_t now_ms, bool recording);
+
+// THE CAPTURE THE HOLD STARTED. After BK_HOLD_START the caller starts the capture, and if that took (the UI's voice generation moved), names it:
+// bk_capture_begin(token). From then on the machine touches that capture and no other: bk_capture_poll() takes the token of the capture that is
+// current now, and when it differs (a touch started another, or this one was closed) everything is forgotten and nothing is returned.
+void bk_capture_begin(bk_t *k, uint32_t token);
+bool bk_capture_active(const bk_t *k);   // a capture is being followed: the caller needs to feed bk_capture_poll
+typedef enum { BK_CAP_NONE = 0, BK_CAP_SEND, BK_CAP_CANCEL } bk_cap_t;
+// Every poll while bk_capture_active(). After the release: BK_CAP_SEND exactly once when the capture is recording and has recorded at least
+// BK_MIN_CLIP_MS (measured from the first poll that saw it recording), BK_CAP_CANCEL exactly once when it has recorded less (a tap-length
+// clip is an accident, not a message). BK_CAP_NONE while it is still starting; after BK_STOP_WAIT_MS it gives up (nothing started, nothing to
+// stop), as it does when the capture ended by itself. A new press forgets the capture.
+bk_cap_t bk_capture_poll(bk_t *k, uint32_t now_ms, bool recording, uint32_t token_now);
 
 // ---- the settings wipe at power-on ----
 typedef enum { BKR_NONE = 0, BKR_COUNTING, BKR_CANCELLED, BKR_DONE } bkr_result_t;

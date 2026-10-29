@@ -5,6 +5,8 @@
 // (now - since) >= ms on a free-running 32-bit clock: right across the wrap as long as the span is under 49 days.
 static bool span_reached(uint32_t now, uint32_t since, uint32_t ms) { return (uint32_t)(now - since) >= ms; }
 
+static void capture_forget(bk_t *k);
+
 void bk_init(bk_t *k, bool pressed_now) { bk_init_ex(k, pressed_now, false); }
 
 void bk_init_ex(bk_t *k, bool pressed_now, bool toggle_mode)
@@ -25,7 +27,7 @@ bk_event_t bk_step(bk_t *k, uint32_t now_ms, bool pressed, bool allowed, bool (*
         k->down_ms = now_ms;
         k->hold_fired = false;
         k->talk_denied = false;
-        k->stop_pending = false;                         // a new press ends the wait for the old capture
+        capture_forget(k);                               // a new press ends the wait for the old capture
         k->ignored = !allowed;
         return k->ignored ? BK_NONE : BK_PRESS;
     }
@@ -64,15 +66,40 @@ bk_event_t bk_step(bk_t *k, uint32_t now_ms, bool pressed, bool allowed, bool (*
     return BK_TAP;
 }
 
-bool bk_stop_poll(bk_t *k, uint32_t now_ms, bool recording)
+void bk_capture_begin(bk_t *k, uint32_t token)
 {
-    if (!k->stop_pending) return false;
-    if (recording) {
-        k->stop_pending = false;
-        return true;
+    k->has_token = true;
+    k->token = token;
+    k->rec_seen = false;
+}
+
+bool bk_capture_active(const bk_t *k) { return k->has_token; }
+
+static void capture_forget(bk_t *k)
+{
+    k->has_token = false;
+    k->rec_seen = false;
+    k->stop_pending = false;
+}
+
+bk_cap_t bk_capture_poll(bk_t *k, uint32_t now_ms, bool recording, uint32_t token_now)
+{
+    if (!k->has_token) return BK_CAP_NONE;
+    if (token_now != k->token) {                       // not the capture this hold started: leave it alone
+        capture_forget(k);
+        return BK_CAP_NONE;
     }
-    if (span_reached(now_ms, k->stop_since_ms, BK_STOP_WAIT_MS)) k->stop_pending = false;   // it never began: nothing to stop
-    return false;
+    if (recording && !k->rec_seen) {
+        k->rec_seen = true;
+        k->rec_began_ms = now_ms;
+    }
+    if (!k->stop_pending) return BK_CAP_NONE;          // the key is still down
+    if (recording) {
+        capture_forget(k);
+        return span_reached(now_ms, k->rec_began_ms, BK_MIN_CLIP_MS) ? BK_CAP_SEND : BK_CAP_CANCEL;
+    }
+    if (k->rec_seen || span_reached(now_ms, k->stop_since_ms, BK_STOP_WAIT_MS)) capture_forget(k);   // it ended by itself, or it never began
+    return BK_CAP_NONE;
 }
 
 bool bkr_begin(bkr_t *r, uint32_t now_ms, bool pressed)

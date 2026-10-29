@@ -136,7 +136,7 @@ static void test_no_pwr_key_board(void)
     assert(poll(&r, true, true) == BK_LONG);                                // 800 ms down: the screen toggles
     for (int i = 0; i < 20; i++) assert(poll(&r, true, true) == BK_NONE);   // once per press
     assert(poll(&r, false, true) == BK_NONE);                               // the release after a long press is not a tap, and sends nothing
-    assert(talk_calls == 0 && !bk_stop_poll(&r.k, r.now + 100, true));
+    assert(talk_calls == 0 && !bk_capture_active(&r.k));
     // the D1 gate still ignores a press on a dark battery screen, and a key held through power-on waits for its release
     rig_init(&r, 0, false);
     bk_init_ex(&r.k, false, true);
@@ -161,38 +161,89 @@ static void test_clock_wrap(void)
     assert(strcmp(r.log, "PSE") == 0);
 }
 
-static void test_stop_pending(void)
+// ---- the capture a hold started: send it, or cancel it if it is too short, and never touch another one ----
+// Run a hold to its start (press at 100 ms, start at 500 ms) with a capture token, then the caller drives the polls.
+static void hold_to_start(rig_t *r, uint32_t token)
 {
-    // The release arrives before the recording began (the start goes through a queue): wait for it, then stop; give up after BK_STOP_WAIT_MS.
-    rig_t r; rig_init(&r, 0, false);
     talk_answer = true;
-    press_for(&r, 600, true);
-    assert(strcmp(r.log, "PSE") == 0);
-    assert(!bk_stop_poll(&r.k, r.now, false));
-    assert(!bk_stop_poll(&r.k, r.now + 1000, false));                       // still starting
-    assert(bk_stop_poll(&r.k, r.now + 1500, true));                         // recording: stop it, once
-    assert(!bk_stop_poll(&r.k, r.now + 1600, true));
-    // recorded already at the release: stop at once
-    rig_init(&r, 0, false);
-    press_for(&r, 600, true);
-    assert(bk_stop_poll(&r.k, r.now, true));
-    assert(!bk_stop_poll(&r.k, r.now + 100, true));
-    // never started (not connected): give up quietly, never stop a recording the key did not start
-    rig_init(&r, 0, false);
-    press_for(&r, 600, true);
+    rig_init(r, 0, false);
+    for (int i = 0; i < 4; i++) poll(r, true, true);                 // 100 press, 200, 300, 400
+    assert(poll(r, true, true) == BK_HOLD_START);                    // 500
+    bk_capture_begin(&r->k, token);
+    assert(bk_capture_active(&r->k));
+}
+static bk_cap_t cap(rig_t *r, bool recording, uint32_t token) { return bk_capture_poll(&r->k, r->now, recording, token); }
+
+static void test_capture(void)
+{
+    rig_t r;
+    // (a) a normal talk: recording begins during the hold, the release sends it
+    hold_to_start(&r, 7);
+    assert(poll(&r, true, true) == BK_NONE && cap(&r, false, 7) == BK_CAP_NONE);   // 600: still starting
+    assert(poll(&r, true, true) == BK_NONE && cap(&r, true, 7) == BK_CAP_NONE);    // 700: recording began (seen here)
+    for (int i = 0; i < 8; i++) { poll(&r, true, true); assert(cap(&r, true, 7) == BK_CAP_NONE); }   // held on: nothing yet
+    assert(poll(&r, false, true) == BK_HOLD_END);                     // 1500: 800 ms of recording
+    assert(cap(&r, true, 7) == BK_CAP_SEND);
+    assert(cap(&r, true, 7) == BK_CAP_NONE && !bk_capture_active(&r.k));   // once
+
+    // (b) the minimum clip: released less than BK_MIN_CLIP_MS after recording began is cancelled, not sent. Began at 700.
+    assert(BK_MIN_CLIP_MS == 700);
+    const struct { int polls_after_began; bk_cap_t want; } rows[] = {{1, BK_CAP_CANCEL}, {6, BK_CAP_CANCEL}, {7, BK_CAP_SEND}, {8, BK_CAP_SEND}};
+    for (unsigned i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        hold_to_start(&r, 9);
+        poll(&r, true, true); cap(&r, false, 9);                      // 600
+        poll(&r, true, true); cap(&r, true, 9);                       // 700: began
+        for (int k = 1; k < rows[i].polls_after_began; k++) { poll(&r, true, true); cap(&r, true, 9); }
+        assert(poll(&r, false, true) == BK_HOLD_END);                 // the release, polls_after_began * 100 ms after it began
+        assert(cap(&r, true, 9) == rows[i].want);
+    }
+    // (c) released before the capture began: when it does begin it has recorded 0 ms, so it is cancelled
+    hold_to_start(&r, 11);
+    assert(poll(&r, false, true) == BK_HOLD_END);                     // 600
+    assert(cap(&r, false, 11) == BK_CAP_NONE);
+    for (int i = 0; i < 5; i++) { poll(&r, false, true); assert(cap(&r, false, 11) == BK_CAP_NONE); }
+    poll(&r, false, true);
+    assert(cap(&r, true, 11) == BK_CAP_CANCEL);
+    // (d) it never began (not connected): give up quietly after BK_STOP_WAIT_MS, and a recording that begins later is not ours to touch
+    hold_to_start(&r, 12);
+    poll(&r, false, true);
     const uint32_t t0 = r.now;
-    assert(!bk_stop_poll(&r.k, t0 + BK_STOP_WAIT_MS - 1, false));
-    assert(!bk_stop_poll(&r.k, t0 + BK_STOP_WAIT_MS, false));               // gave up
-    assert(!bk_stop_poll(&r.k, t0 + BK_STOP_WAIT_MS + 100, true));          // a recording that begins later is not ours to stop
-    // a new press cancels a pending stop
-    rig_init(&r, 0, false);
-    press_for(&r, 600, true);
+    assert(bk_capture_poll(&r.k, t0 + BK_STOP_WAIT_MS - 1, false, 12) == BK_CAP_NONE && bk_capture_active(&r.k));
+    assert(bk_capture_poll(&r.k, t0 + BK_STOP_WAIT_MS, false, 12) == BK_CAP_NONE && !bk_capture_active(&r.k));
+    assert(bk_capture_poll(&r.k, t0 + BK_STOP_WAIT_MS + 100, true, 12) == BK_CAP_NONE);
+    // (e) ANOTHER CAPTURE: the token moved on (a touch started one, or this one was closed). Nothing is sent or cancelled, ever.
+    hold_to_start(&r, 20);
     poll(&r, true, true);
-    assert(!bk_stop_poll(&r.k, r.now, true));
-    // a tap never arms it
+    assert(cap(&r, true, 21) == BK_CAP_NONE && !bk_capture_active(&r.k));   // the capture the hold started is gone
+    assert(poll(&r, false, true) == BK_HOLD_END);
+    assert(cap(&r, true, 21) == BK_CAP_NONE && cap(&r, true, 20) == BK_CAP_NONE);
+    // the same when the token moves after the release
+    hold_to_start(&r, 30);
+    poll(&r, true, true); cap(&r, true, 30);
+    assert(poll(&r, false, true) == BK_HOLD_END);
+    assert(cap(&r, true, 31) == BK_CAP_NONE && !bk_capture_active(&r.k));
+    // (f) a hold whose start did not take (no token): its release has nothing to send, whatever is recording
+    talk_answer = true;
+    rig_init(&r, 0, false);
+    for (int i = 0; i < 5; i++) poll(&r, true, true);
+    assert(r.log[1] == 'S' && !bk_capture_active(&r.k));
+    assert(poll(&r, false, true) == BK_HOLD_END);
+    assert(cap(&r, true, 99) == BK_CAP_NONE && cap(&r, true, 0) == BK_CAP_NONE);
+    // (g) a new press ends the wait for the old capture
+    hold_to_start(&r, 40);
+    assert(poll(&r, false, true) == BK_HOLD_END);
+    assert(poll(&r, true, true) == BK_PRESS);
+    assert(cap(&r, true, 40) == BK_CAP_NONE && !bk_capture_active(&r.k));
+    // (h) the capture ended by itself (the 30 s limit) while the key was still down: the release finds nothing to stop
+    hold_to_start(&r, 50);
+    poll(&r, true, true); cap(&r, true, 50);
+    poll(&r, true, true); cap(&r, false, 50);                         // recording was seen, now it is not
+    assert(poll(&r, false, true) == BK_HOLD_END);
+    assert(cap(&r, false, 50) == BK_CAP_NONE && !bk_capture_active(&r.k));
+    // (i) a tap never has a capture
     rig_init(&r, 0, false);
     press_for(&r, 100, true);
-    assert(!bk_stop_poll(&r.k, r.now, true));
+    assert(!bk_capture_active(&r.k) && cap(&r, true, 1) == BK_CAP_NONE);
 }
 
 static void test_reset_countdown(void)
@@ -239,9 +290,9 @@ int main(void)
     test_held_at_start();
     test_clock_wrap();
     test_no_pwr_key_board();
-    test_stop_pending();
+    test_capture();
     test_reset_countdown();
     assert(BK_HOLD_MS == 400 && BK_STOP_WAIT_MS == 3000);
-    puts("boot key: tap on release, hold-to-talk start and end, talk denied keeps the tap, D1 gate, held at start, stop pending, 5 s reset countdown PASS");
+    puts("boot key: tap on release, hold-to-talk start and end, talk denied keeps the tap, D1 gate, held at start, capture token, minimum clip, 5 s reset countdown PASS");
     return 0;
 }
