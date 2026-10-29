@@ -90,6 +90,7 @@ int power_pmu_read(int *status0, int *status1);
 bool power_pmic_soft_off(void);
 int power_read_reg(uint8_t reg);
 ''',
+'board/board.h': '#pragma once\n#include <stdbool.h>\ntypedef struct { bool has_pmic; } board_t;\nconst board_t *board(void);\n',
 'battery.h': '#pragma once\nint battery_pct_raw(void);\nint battery_mv(void);\n',
 'driver/usb_serial_jtag.h': '#pragma once\n#include <stdbool.h>\nbool usb_serial_jtag_is_connected(void);\n',
 'fw_update.h': '#pragma once\n#include <stdbool.h>\nbool fw_update_active(void);\n',
@@ -105,6 +106,7 @@ HARNESS = r'''
 #include "freertos/task.h"
 #include "nvs.h"
 #include "board/power.h"
+#include "board/board.h"
 #include <assert.h>
 #include <setjmp.h>
 
@@ -115,6 +117,9 @@ int64_t g_now_us = 1000000;
 // ---- fake world ----
 static int status0 = 0x08, status1 = 0x40;       // on the battery: VBUS not good, cell present, discharging
 static bool usb_host, ota, asleep = true, soft_off_ok = true, dies_on_soft_off = true, nvs_fail;
+static board_t the_board = {true};
+const board_t *board(void) { return &the_board; }
+static int reg_reads;
 static int pct = 4, mv = 3300, reg20 = 0x04, reg21 = 0x02, soft_off_calls, delays;
 static jmp_buf death;                            // the PMIC cuts the power: the task never runs another line
 static bool armed_death;
@@ -124,7 +129,7 @@ static int writer_in_flight_ms;                  // a writer holds the gate for 
 
 int power_pmu_read(int *s0, int *s1) { ev("PMUREAD"); *s0 = status0; *s1 = status1; return status1 < 0 ? -1 : (status1 >> 5) & 3; }
 bool power_pmic_soft_off(void) { ev("REG10"); soft_off_calls++; if (dies_on_soft_off && soft_off_ok && armed_death) longjmp(death, 1); return soft_off_ok; }
-int power_read_reg(uint8_t reg) { return reg == 0x20 ? reg20 : reg == 0x21 ? reg21 : -1; }
+int power_read_reg(uint8_t reg) { reg_reads++; return reg == 0x20 ? reg20 : reg == 0x21 ? reg21 : -1; }
 int battery_pct_raw(void) { return pct; }
 int battery_mv(void) { return mv; }
 bool usb_serial_jtag_is_connected(void) { return usb_host; }
@@ -172,7 +177,7 @@ static bool has(const char *s) { return strstr(g_events, s) != NULL; }
 static int count_of(const char *needle) { int n = 0; for (const char *p = g_events; (p = strstr(p, needle)); p += strlen(needle)) n++; return n; }
 static void reset_world(void) {
     status0 = 0x08; status1 = 0x40; usb_host = ota = false; asleep = true; soft_off_ok = true; dies_on_soft_off = true; nvs_fail = false;
-    pct = 4; mv = 3300; reg20 = 0x04; reg21 = 0x02; soft_off_calls = delays = 0; delay_total_ms = 0; writer_in_flight_ms = 0; plug_during_show = 0; armed_death = true;
+    pct = 4; mv = 3300; reg20 = 0x04; reg21 = 0x02; soft_off_calls = delays = 0; delay_total_ms = 0; writer_in_flight_ms = 0; plug_during_show = 0; the_board.has_pmic = true; reg_reads = 0; armed_death = true;
     defer = false; store.present = pending.present = false; tasks_created = 0; g_now_us += 10LL * 1000000 * 100;   // far past any retry throttle
     store_gate_thaw();
     clear_events();
@@ -348,6 +353,11 @@ static void scenario_boot_report(void) {
     clear_events();
     power_off_boot_report();
     assert(!strstr(g_logs, "reason=drain") && strstr(g_logs, "REG 0x20"));  // the second boot says nothing about it
+    // a board without the PMIC never reads its registers (the bus has nothing at that address)
+    reset_world();
+    the_board.has_pmic = false;
+    power_off_boot_report();
+    assert(reg_reads == 0 && !strstr(g_logs, "REG 0x20"));
     // a record with a wrong magic is ignored and erased
     reset_world();
     store.present = true; store.len = sizeof(rec_t); memset(store.data, 0xA5, store.len);

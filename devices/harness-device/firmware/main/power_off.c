@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "battery.h"
+#include "board/board.h"
 #include "board/power.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
@@ -164,8 +165,10 @@ bool power_off_pending(void) { return atomic_load(&s_busy); }
 void power_off_boot_report(void)
 {
     // Raw bytes, for the bench gates P1-P3: REG 0x20 holds the power-on source bits and REG 0x21 the power-off source bits (datasheet V1.4 p.35-36).
-    ESP_LOGI(TAG, "AXP2101 REG 0x20=%#x REG 0x21=%#x at boot (power-on and power-off source status)", (unsigned)power_read_reg(0x20),
-             (unsigned)power_read_reg(0x21));
+    // (A board without the PMIC has nothing at that bus address: no reads, no failed transactions.)
+    if (board()->has_pmic)
+        ESP_LOGI(TAG, "AXP2101 REG 0x20=%#x REG 0x21=%#x at boot (power-on and power-off source status)", (unsigned)power_read_reg(0x20),
+                 (unsigned)power_read_reg(0x21));
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return;
     poff_rec_t rec;
