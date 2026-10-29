@@ -32,11 +32,11 @@ static atomic_bool asleep, force_frame;
 static atomic_uint last_activity;
 static atomic_uint requested_brightness = 40;
 #define ESP_LOGI(...) ((void)0)
-static unsigned last_brightness;
+static unsigned last_brightness, brightness_writes, writes_at_panel_on;
 #ifdef DEVICE_BATTERY_SLEEP
 static bool keep_dimmed;   /* a run continues the render loop of the one before: the dimmed flag survives it */
 #endif
-static int esp_lcd_panel_co5300_set_brightness(int p, unsigned level) { (void)p; assert(level <= 100); last_brightness = level; return 0; }
+static int esp_lcd_panel_co5300_set_brightness(int p, unsigned level) { (void)p; assert(level <= 100); last_brightness = level; brightness_writes++; return 0; }
 static void ht_illustrated_prepare(ht_scene_t *scene) { (void)scene; }
 static ht_scene_t scenes[2];
 static bool painted;
@@ -104,6 +104,7 @@ static void habitat_scene_presented(uint32_t receipt) { assert(receipt==77 && pa
 static uint32_t habitat_next_wake_ms(void) { return next_wake_ms; }
 static int esp_lcd_panel_disp_on_off(int p, bool on) {
     (void)p; panel_on=on;
+    if (on) writes_at_panel_on = brightness_writes;   /* how many brightness writes came before the panel was lit */
     // Power input arrives after the renderer sampled asleep, during panel OFF.
     if (!on && mode==1) display_wake();
     return 0;
@@ -195,6 +196,15 @@ int main(void) {
     run(0,300000,0,false,1); assert(!display_is_asleep());
     run(0,300001,0,false,1); assert(display_is_asleep() && sleeps == 1);
     run(0,100000,0,false,1); assert(!display_is_asleep() && last_brightness == 40);                 /* no dimming on external power */
+    /* No panel writes while the screen is asleep (they would wake the SPI bus for nothing); the user's brightness goes out on the wake,
+       before the panel is lit and the first frame is drawn. */
+    fake_state = PP_S1;
+    brightness_writes = 0;
+    run(5,1000,1000,true,2); assert(brightness_writes == 0 && !panel_on);            /* asleep for two passes: not one write */
+    brightness_writes = 0; writes_at_panel_on = 99;
+    run(3,1000,1000,true,2);                                                           /* asleep, then the wake lands during the first wait */
+    assert(brightness_writes == 1 && last_brightness == 40 && panel_on && writes_at_panel_on == 1);   /* written before the panel lit */
+    fake_state = PP_S0;
 #endif
     puts("Display power: production render-loop wake/repaint and touch/idle races, quiet wake, boundaries and wrap PASS");
 }

@@ -568,23 +568,34 @@ static void render_task(void *arg)
         display_unlock();
         unsigned brightness = atomic_load(&requested_brightness);
 #ifdef DEVICE_BATTERY_SLEEP
+        // The screen state is sampled ONCE for this pass (also used for `on` below): no panel writes while it is asleep, and on a wake
+        // the user's brightness goes out in the pass that lights the panel, before the first frame.
+        const bool awake = !display_is_asleep();
         {   // battery screen policy: dim after 30 s without a touch to a quarter of the user's setting (never below 3 percent), and
             // stay dimmed until the panel goes off at 60 s, so the glass does not flash bright just before it turns off. On external
             // power the level is only FULL or OFF: nothing was dimmed, so nothing stays dimmed.
             const pp_screen_t level = power_sleep_screen_level(elapsed_since(&last_activity));
-            const bool dim = !display_is_asleep() && (level == PP_SCREEN_DIM || (level == PP_SCREEN_OFF && atomic_load(&screen_dimmed)));
+            const bool dim = awake && (level == PP_SCREEN_DIM || (level == PP_SCREEN_OFF && atomic_load(&screen_dimmed)));
             atomic_store(&screen_dimmed, dim);
             if (dim)
                 brightness = pp_dimmed_percent(brightness);
         }
 #endif
-        if (brightness != applied_brightness) {
+        if (brightness != applied_brightness
+#ifdef DEVICE_BATTERY_SLEEP
+            && awake   // a sleeping panel is written again on the wake; a write now would only wake the bus
+#endif
+        ) {
             render_progress(RENDER_POWER);
             ESP_ERROR_CHECK(esp_lcd_panel_co5300_set_brightness(panel, brightness));
             applied_brightness = brightness;
             ESP_LOGI("habitat", "OLED brightness %u%%", brightness);
         }
+#ifdef DEVICE_BATTERY_SLEEP
+        bool on = awake;   // the same sample as the brightness above; a wake that lands in between is picked up next pass (force_frame is kept)
+#else
         bool on = !display_is_asleep();
+#endif
         if (on != panel_on) {
             render_progress(RENDER_POWER);
             ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, on));
