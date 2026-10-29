@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "power_policy.h"
+#include "board/power.h"
 
 // A small harness: one policy, one input record, a clock. step() advances the clock and takes the fresh PMIC read the
 // policy asks for (the glue's loop), exactly as ptt.c does.
@@ -68,6 +69,14 @@ static void to_s2(rig_t *r)
 int main(void)
 {
     rig_t r;
+
+    // --- AXP2101 status decoding (board/power.h, datasheet V1.4 p.31) ---
+    assert(POWER_STATUS0_VBUS_GOOD == (1 << 5) && POWER_STATUS0_BATT_PRESENT == (1 << 3));
+    assert(power_chg_from_status2(0x00) == 0 && power_chg_from_status2(0x20) == 1 && power_chg_from_status2(0x40) == 2);   // standby, charge, discharge
+    assert(power_chg_from_status2(0x60) == 3);                                    // reserved stays 3 (not "discharging", not a valid state)
+    assert(power_chg_from_status2(0xC0) == 2 && power_chg_from_status2(0xA0) == 1 && power_chg_from_status2(0x80) == 0);   // bit 7 is reserved: masked off
+    assert(power_chg_from_status2(0x5F) == 2 && power_chg_from_status2(0x1F) == 0);                    // the low bits (charging status) do not leak in
+    assert(power_chg_from_status2(-1) == -1);
 
     // --- S0 is the resting state, and the cheap one ---
     rig_init(&r, 1000);

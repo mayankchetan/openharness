@@ -11,7 +11,7 @@ static const char *TAG = "power";
 static i2c_master_dev_handle_t s_dev;
 
 // AXP2101 registers we touch.
-#define AXP_REG_STATUS0   0x00   // PMU status: VBUS/battery presence + current direction
+#define AXP_REG_STATUS0   0x00   // PMU status1: bit 5 VBUS good, bit 3 battery present (datasheet V1.4 p.31)
 #define AXP_REG_IRQ_EN1   0x41   // IRQ enable set 1 (holds the PONKEY power-key bits)
 #define AXP_REG_IRQ_ST0   0x48   // IRQ status set 0 (write-1-to-clear)
 #define AXP_REG_IRQ_ST1   0x49   // IRQ status set 1 (PONKEY power-key events)
@@ -120,19 +120,26 @@ int power_battery_mv(void)
     return mv;
 }
 
-// AXP2101 PMU_STATUS2 (REG 0x01) bits [7:5] = battery activity: 0 = standby (idle/full), 1 = charging,
-// 2 = discharging. This is the reliable source — REG 0x00 bit5 is the charge-CURRENT direction, which
-// reads 0 when the battery is full but still plugged in.
+// AXP2101 PMU_STATUS2 (REG 0x01) bits [6:5] = battery current direction: 0 = standby (idle/full), 1 = charging,
+// 2 = discharging, 3 reserved; bit 7 is reserved (datasheet V1.4 p.31). This is the source of the charge state. REG 0x00 bit 5
+// is NOT a current direction: it is "VBUS good" (1 = good), read with bit 3 "battery present" by power_pmu_read().
 #define AXP_REG_STATUS2   0x01
-static int axp_charge_state(void)   // 0/1/2, or -1 on read error
+static int axp_charge_state(void)   // 0/1/2 (3 reserved), or -1 on read error
 {
-    int s = axp_read(AXP_REG_STATUS2);
-    return s < 0 ? -1 : (s >> 5) & 0x07;
+    return power_chg_from_status2(axp_read(AXP_REG_STATUS2));
 }
 
 int power_charge_state(void)
 {
     return axp_charge_state();
+}
+
+int power_pmu_read(int *status0, int *status1)
+{
+    const int s0 = axp_read(AXP_REG_STATUS0), s1 = axp_read(AXP_REG_STATUS2);
+    if (status0) *status0 = s0;
+    if (status1) *status1 = s1;
+    return power_chg_from_status2(s1);
 }
 
 bool power_is_charging(void)
