@@ -10,6 +10,7 @@
 #include "esp_pm.h"
 #include "esp_sleep.h"
 #include "sdkconfig.h"
+#include <stdatomic.h>
 
 #if !CONFIG_PM_ENABLE || !CONFIG_FREERTOS_USE_TICKLESS_IDLE
 #error "DEVICE_BATTERY_SLEEP needs the options of sdkconfig.defaults.sleep (CONFIG_PM_ENABLE, CONFIG_FREERTOS_USE_TICKLESS_IDLE)"
@@ -18,6 +19,7 @@
 static const char *TAG = "pm";
 
 static esp_pm_lock_handle_t s_awake;   // ESP_PM_NO_LIGHT_SLEEP: held in S0 and S1, released in S2
+static atomic_bool s_relaxed;          // the pollers run at their S2 rates (set when S2 is entered, cleared the moment it is left)
 
 static int resolve_gpio(int gpio)
 {
@@ -86,3 +88,17 @@ void power_sleep_pm_leave_battery(void)
     const esp_err_t e = esp_pm_configure(&cfg);
     if (e != ESP_OK) ESP_LOGE(TAG, "esp_pm_configure(240/240) failed: %s", esp_err_to_name(e));
 }
+
+uint32_t power_sleep_wait_ms(pp_poller_t who, uint32_t awake_ms)
+{
+    return pp_wait_ms(atomic_load_explicit(&s_relaxed, memory_order_relaxed) ? PP_S2 : PP_S1, who, awake_ms);
+}
+
+uint32_t power_sleep_ptt_poll_ms(uint32_t awake_ms)
+{
+    if (!atomic_load_explicit(&s_relaxed, memory_order_relaxed)) return awake_ms;
+    const uint32_t relaxed = pp_ptt_poll_ms(PP_S2);
+    return awake_ms > relaxed ? awake_ms : relaxed;
+}
+
+bool power_sleep_relaxed(void) { return atomic_load_explicit(&s_relaxed, memory_order_relaxed); }

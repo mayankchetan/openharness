@@ -10,6 +10,7 @@
 #include "esp_lcd_touch_cst9217.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "power_sleep.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdatomic.h>
@@ -22,9 +23,19 @@ static esp_lcd_panel_io_handle_t io;
 static TaskHandle_t touch_task_handle;
 static atomic_uint presses, failures, inferred, last_press;
 static atomic_bool held, controller_ready;
+#ifdef DEVICE_BATTERY_SLEEP
+#include "driver/gpio.h"
+// True while GPIO11 is armed as the LOW-level light-sleep wake source (touch_sleep_arm). A level interrupt stays asserted for as
+// long as INT is low, so the first hit switches the interrupt off; the touch task puts the pin back when the contact is handled.
+static atomic_bool s_level_wake;
+#endif
 static void touch_irq(esp_lcd_touch_handle_t tp)
 {
     (void)tp;
+#ifdef DEVICE_BATTERY_SLEEP
+    if (atomic_load_explicit(&s_level_wake, memory_order_relaxed))
+        gpio_intr_disable(BSP_TOUCH_INT);
+#endif
     BaseType_t wake = pdFALSE;
     if (touch_task_handle)
         vTaskNotifyGiveFromISR(touch_task_handle, &wake);
@@ -59,6 +70,12 @@ static bool open_touch(void)
     }
     atomic_store(&controller_ready, true);
     return true;
+}
+// How long the touch task waits for its next sample. A contact is read every 4 ms; an idle controller every 20 ms (the IRQ wakes the
+// task at once, this only catches a missed one). While the chip may sleep the idle wait is the relaxed poll (power_policy.h).
+static TickType_t touch_wait_ticks(bool down)
+{
+    return down ? pdMS_TO_TICKS(4) : pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_TOUCH, 20));
 }
 static void task(void *arg)
 {
@@ -187,7 +204,7 @@ static void task(void *arg)
         atomic_store(&held, down);
         // GPIO wakes immediately. Active samples have a 4ms fallback; idle fallback catches a
         // missed IRQ.
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(down ? 4 : 20));
+        ulTaskNotifyTake(pdTRUE, touch_wait_ticks(down));
     }
 }
 void touch_init(void)

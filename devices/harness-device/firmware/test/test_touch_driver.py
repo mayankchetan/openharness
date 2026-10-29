@@ -42,6 +42,7 @@ static jmp_buf stop;
 static int64_t esp_timer_get_time(void) { return samples[at].ms*1000ll; }
 static bool open_touch(void) {controller=(void*)1;return true;}
 static void ulTaskNotifyTake(int a,int t) { (void)a;(void)t;if(++at==count)longjmp(stop,1); }
+static int touch_wait_ticks(bool down) { return down ? 4 : 20; }   /* the production helper (power_sleep.h) gives these in S0 and S1 */
 static int esp_lcd_touch_read_data(void *c) {
  (void)c;if(at==power_off_at)asleep=true;if(at==power_on_at)asleep=false;return samples[at].rc;
 }

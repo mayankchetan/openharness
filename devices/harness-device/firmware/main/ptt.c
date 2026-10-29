@@ -12,6 +12,7 @@
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "task_util.h"
+#include "power_sleep.h"
 
 static const char *TAG = "ptt";
 #define POLL_MS      100               // key poll cadence (latency only — the PMIC key event latches; BOOT is level-read)
@@ -73,7 +74,7 @@ static void ptt_task(void *arg)
         }
         boot_prev = boot_now;
 
-        vTaskDelay(pdMS_TO_TICKS(POLL_MS));
+        vTaskDelay(pdMS_TO_TICKS(power_sleep_ptt_poll_ms(POLL_MS)));   // POLL_MS; 250 ms while the chip may sleep (power_sleep.h)
     }
 }
 

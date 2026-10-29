@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "power_policy.h"
+
 #ifdef DEVICE_BATTERY_SLEEP
 
 // Create the "dial_awake" no-light-sleep lock and take it: nothing sleeps until the policy lets go. Call once, early in
@@ -17,8 +19,18 @@ void power_sleep_init(void);
 bool power_sleep_pm_enter_battery(bool light);
 void power_sleep_pm_leave_battery(void);
 
+// THE POLLERS (power_policy.h pp_poller_t). Each loop that wakes the chip asks for its wait here and passes the wait it has
+// today: the same number comes back in S0 and S1, the relaxed one in S2. power_sleep_ptt_poll_ms() is the same for the ptt
+// task's own delay. power_sleep_relaxed() is true while the dial is in S2 (the pollers run at their relaxed rates).
+uint32_t power_sleep_wait_ms(pp_poller_t who, uint32_t awake_ms);
+uint32_t power_sleep_ptt_poll_ms(uint32_t awake_ms);
+bool power_sleep_relaxed(void);
+
 #else
 
 static inline void power_sleep_init(void) {}
+static inline uint32_t power_sleep_wait_ms(pp_poller_t who, uint32_t awake_ms) { (void)who; return awake_ms; }
+static inline uint32_t power_sleep_ptt_poll_ms(uint32_t awake_ms) { return awake_ms; }
+static inline bool power_sleep_relaxed(void) { return false; }
 
 #endif
