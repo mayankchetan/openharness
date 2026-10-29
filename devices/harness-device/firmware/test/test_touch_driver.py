@@ -35,7 +35,8 @@ static const void *board_(void) { return &b; }
 #define board() ((const typeof(b)*)board_())
 typedef struct {uint32_t ms; int rc; bool down; uint16_t x,y;} sample_t;
 static sample_t *samples; static int count, at, forwarded_down, forwarded_up, canceled, woke;
-static bool asleep;
+static bool asleep, input_ok = true;
+static int bumps;
 static int power_off_at, power_on_at, sleep_on_lock, locks;
 static ht_gallery_t gallery;
 static jmp_buf stop;
@@ -55,7 +56,8 @@ static void display_lock(void){if(++locks==sleep_on_lock)asleep=true;}
 static void display_unlock(void){}
 static bool display_is_asleep(void){return asleep;}
 static void display_wake(void){asleep=false;woke++;}
-static void display_bump_activity(void){}
+static void display_bump_activity(void){bumps++;}
+static bool power_sleep_input_allowed(void){return input_ok;}   /* the production helper (power_sleep.h): false on the battery with the screen off (D1) */
 static void habitat_input_stamp(int64_t n){(void)n;}
 static void habitat_touch_cancel(void){canceled++;ht_gallery_cancel(&gallery);}
 static void habitat_touch(bool down,int x,int y,uint32_t n) {
@@ -63,7 +65,7 @@ static void habitat_touch(bool down,int x,int y,uint32_t n) {
 }
 '''+body+r'''
 static void run(sample_t *s,int n,bool sleep,int off,int on,int lock_sleep) {
- samples=s;count=n;at=forwarded_down=forwarded_up=canceled=woke=0;asleep=sleep;
+ samples=s;count=n;at=forwarded_down=forwarded_up=canceled=woke=bumps=0;asleep=sleep;
  power_off_at=off;power_on_at=on;sleep_on_lock=lock_sleep;locks=0;
  ht_gallery_init(&gallery,s[0].ms);
  gallery.creature=0; // Exercise original reaction traces, independent of gallery boot art.
@@ -85,10 +87,17 @@ int main(void) {
  sample_t corrupt[]={ {0,0,1,900,220},{20,0,1,233,220},{80,0,0,233,220},
                      {200,0,1,233,220},{270,0,0,233,220} };
  RUN(corrupt,false);assert(forwarded_down==1&&forwarded_up==1&&canceled==1);
+ sample_t wake_hold_check[]={ {0,0,1,233,220},{20,0,1,233,220},{60,0,1,233,220},{80,0,0,233,220} };   // a finger that stays down is dropped whole
  sample_t wake[]={ {0,0,1,233,220},{20,0,1,233,220},{80,0,0,233,220},
                   {200,0,1,233,220},{270,0,0,233,220} };
  RUN(wake,true);assert(forwarded_down==1&&forwarded_up==1&&canceled==1&&woke==1);
  assert(gallery.booped); // First real tap after the swallowed wake tap must work.
+ // D1 "PWR only": on the battery a dark screen drops every contact: no wake, no action, no activity stamp. Then the same taps work again.
+ input_ok=false;
+ RUN(wake,true);assert(woke==0&&forwarded_down==0&&forwarded_up==0&&canceled==0&&bumps==0&&asleep);
+ RUN(wake_hold_check,true);assert(woke==0&&forwarded_down==0&&forwarded_up==0&&bumps==0&&asleep);
+ input_ok=true;
+ RUN(wake,true);assert(forwarded_down==1&&forwarded_up==1&&canceled==1&&woke==1&&bumps>0);
  sample_t wake_swipe[]={ {0,0,1,233,220},{20,0,1,233,220},{80,0,0,233,220},
                         {200,0,1,233,220},{230,0,1,100,220},{270,0,0,100,220} };
  RUN(wake_swipe,true);assert(gallery.creature==1&&!gallery.booped);
@@ -115,7 +124,7 @@ int main(void) {
  // Screen power may change after the initial wake check, while waiting for the UI lock.
  RUN_POWER(off_mid_swipe,-1,-1,2);
  assert(gallery.creature==0&&!gallery.booped&&canceled==1&&forwarded_up==0);
- puts("touch driver: PASS (production task + gallery; ACK/error recovery, wake gestures, power off/on during contact and sleep at dispatch)");
+ puts("touch driver: PASS (production task + gallery; ACK/error recovery, wake gestures, power off/on during contact, sleep at dispatch, D1 dropped contact on a dark battery screen)");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='harness-touch-driver-') as d:

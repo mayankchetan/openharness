@@ -101,6 +101,8 @@ void pp_step(pp_t *p, const pp_in_t *in, pp_out_t *out)
     out->state = p->state;
 }
 
+bool pp_screen_input_allowed(pp_state_t s, bool screen_asleep) { return s == PP_S0 || !screen_asleep; }
+
 uint32_t pp_ptt_poll_ms(pp_state_t s) { return s == PP_S2 ? PP_POLL_SLEEP_MS : PP_POLL_AWAKE_MS; }
 
 const char *pp_state_name(pp_state_t s)

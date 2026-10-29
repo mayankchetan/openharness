@@ -352,6 +352,19 @@ int main(void)
     assert(pp_dimmed_percent(100) == 25 && pp_dimmed_percent(40) == 10 && pp_dimmed_percent(8) == 3 && pp_dimmed_percent(0) == 3);
     assert(pp_dimmed_percent(12) == 3 && pp_dimmed_percent(16) == 4);
 
-    puts("power policy: S0/S1/S2 transitions, PMIC read schedule, hold bits, anti-flap, 32-bit clock wrap, poller table, battery screen levels PASS");
+    // --- D1 "PWR only, always" (plan section 16): on the battery a dark screen takes no input ---
+    // The S2 PWR-key poll is a named constant (250 ms: the latched REG 0x49 status keeps a tap that lands between two polls).
+    assert(PP_PWR_POLL_MS == 250 && PP_POLL_SLEEP_MS == PP_PWR_POLL_MS && pp_ptt_poll_ms(PP_S2) == PP_PWR_POLL_MS);
+    // On external power (S0) touch and BOOT wake the screen as they always did, asleep or not.
+    assert(pp_screen_input_allowed(PP_S0, true) && pp_screen_input_allowed(PP_S0, false));
+    // On the battery (S1, S2) with the screen on, input works; with the screen off it is dropped (S1 too: the 3 s before S2).
+    for (pp_state_t s = PP_S1; s <= PP_S2; s++) {
+        assert(pp_screen_input_allowed(s, false));
+        assert(!pp_screen_input_allowed(s, true));
+    }
+    // The touch level wake is not armed on the battery (D1); the arming code stays for a later mode.
+    assert(PP_TOUCH_WAKE_ON_BATTERY == 0);
+
+    puts("power policy: S0/S1/S2 transitions, PMIC read schedule, hold bits, anti-flap, 32-bit clock wrap, poller table, battery screen levels, D1 input gate PASS");
     return 0;
 }

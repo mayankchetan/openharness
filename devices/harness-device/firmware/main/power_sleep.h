@@ -50,6 +50,11 @@ uint32_t power_sleep_slept_ms(void);
 // power: full, then off after 300 s. On the battery (policy S1 or S2): full, dim after 30 s, off after 60 s.
 pp_screen_t power_sleep_screen_level(uint32_t idle_ms);
 
+// D1, "PWR only" (power_policy.h pp_screen_input_allowed): false while the dial runs on its battery (policy S1 or S2) and the screen is
+// off. The touch task then drops the contact instead of waking the screen, and the ptt task ignores BOOT. True on external power and
+// whenever the screen is on. Cheap and lock-free: any task may call it.
+bool power_sleep_input_allowed(void);
+
 #else
 
 static inline void power_sleep_init(void) {}
@@ -62,5 +67,6 @@ static inline void power_sleep_release(uint32_t bits) { (void)bits; }
 static inline uint32_t power_sleep_wait_ms(pp_poller_t who, uint32_t awake_ms) { (void)who; return awake_ms; }
 static inline uint32_t power_sleep_ptt_poll_ms(uint32_t awake_ms) { return awake_ms; }
 static inline bool power_sleep_relaxed(void) { return false; }
+static inline bool power_sleep_input_allowed(void) { return true; }
 
 #endif

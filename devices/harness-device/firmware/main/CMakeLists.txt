@@ -224,8 +224,8 @@ if(DEVICE_BATTERY_LOG)
 endif()
 
 # Battery sleep (power_policy.c, power_sleep.c): -DDEVICE_BATTERY_SLEEP=1, default OFF. On the CST9217 + AXP2101 dial, while the PMIC says
-# "discharging", no USB host is there and the screen has been off for 3 s, the chip goes into light sleep; a touch (GPIO11, level wake)
-# wakes it. External power, a host, a missing PMIC or any doubt keeps the dial exactly as it was (policy state S0). The screen policy on
+# "discharging", no USB host is there and the screen has been off for 3 s, the chip goes into light sleep; the PWR key wakes it (D1,
+# plan section 16: on the battery a dark screen takes no touch and no BOOT; the touch level wake is compiled out, PP_TOUCH_WAKE_ON_BATTERY). External power, a host, a missing PMIC or any doubt keeps the dial exactly as it was (policy state S0). The screen policy on
 # battery (dim at 30 s, off at 60 s) comes with it. Plan: workbench briefs/research/2026-10-29-battery-sleep-plan.md.
 #   idf.py -DDEVICE_BATTERY_SLEEP=1 -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3;sdkconfig.defaults.sleep" build
 # The overlay sdkconfig.defaults.sleep (power management, tickless idle, USB-Serial-JTAG guard) is NOT loaded by default; without it this

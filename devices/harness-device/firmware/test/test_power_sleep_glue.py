@@ -8,8 +8,9 @@ Checked here (plan sections 3.1, 3.2, 3.5 and tasks T6, T7):
   * boot: the awake lock is made and taken, the output pads are kept, nothing is configured, the policy is in S0;
   * unplug: two PMIC reads 2 s apart, then power management is configured for battery (240/80 MHz, light sleep on) once, with the
     retention RAM allocated first;
-  * screen off for 3 s: the I2S clocks stop, the stall guard stops, the touch wake is armed, THEN the awake lock is released;
-  * a wake: the awake lock is taken back by the screen hook BEFORE anything else, then the render task disarms the touch wake;
+  * screen off for 3 s: the I2S clocks stop, the stall guard stops, THEN the awake lock is released (D1: the touch wake is NOT armed);
+  * a wake (PWR): the awake lock is taken back by the screen hook BEFORE anything else, then the render task restores the rest;
+  * D1 "PWR only": on the battery a dark screen takes no input (power_sleep_input_allowed), on external power it does;
   * plug in while asleep: noticed on the 2 s read, lock back first, power management back to 240/240;
   * 200 plug/unplug cycles: the lock count is balanced, arm/disarm and stop/start are paired, configure calls are paired;
   * no retention RAM: frequency scaling only, the dial still works;
@@ -17,6 +18,8 @@ Checked here (plan sections 3.1, 3.2, 3.5 and tasks T6, T7):
   * a dial that is not the CST9217 + AXP2101 board never leaves S0 and never reads the PMIC;
   * a voice turn or a cable session holds the dial in S1; a USB host sends it to S0 at once;
   * the sleep statistics of the alive line (count and milliseconds) from the light sleep exit callback.
+A second build with PP_TOUCH_WAKE_ON_BATTERY=1 runs the two scenarios of the arming code that D1 turns off (the wake that cannot be
+armed, the driver that is lost), so the code kept for a later mode stays proved.
 """
 from pathlib import Path
 import os
@@ -168,13 +171,19 @@ static bool usb_host, asleep, voice, session, audio_idle_ok = true, audio_stoppe
 static void (*sleep_cb)(bool);
 static esp_pm_light_sleep_cb_t exit_cb;
 static int notifies, guard_stops, guard_starts, audio_idles, audio_resumes, touch_arms, touch_disarms;
-static bool arm_wakes_screen;         // the screen wakes in the middle of the S2 entry
-static bool arm_plugs_usb;            // the policy goes to S0 (a USB host appears) in the middle of the S2 entry
-static bool arm_fails, touch_armed;   // the touch wake cannot be armed (no pin lock, controller not ready) / is armed now
+static bool arm_fails, touch_armed;   // the touch wake cannot be armed (no pin lock, controller not ready) / is armed now (PP_TOUCH_WAKE_ON_BATTERY=1 only)
 
 esp_err_t esp_pm_lock_create(esp_pm_lock_type_t t, int arg, const char *name, esp_pm_lock_handle_t *out) { assert(t == ESP_PM_NO_LIGHT_SLEEP && arg == 0); lock_creates++; the_lock.name = name; *out = &the_lock; return ESP_OK; }
 esp_err_t esp_pm_lock_acquire(esp_pm_lock_handle_t h) { assert(h == &the_lock); h->count++; lock_acquires++; ev("LOCK+"); return ESP_OK; }
-esp_err_t esp_pm_lock_release(esp_pm_lock_handle_t h) { assert(h == &the_lock && h->count > 0); h->count--; lock_releases++; ev("LOCK-"); return ESP_OK; }
+static void screen(bool on_);
+static bool release_wakes_screen;     // the screen wakes just as the awake lock is let go (a PWR press while S2 is being entered)
+static bool release_plugs_usb;        // the policy goes to S0 (a USB host appears) just as the awake lock is let go
+esp_err_t esp_pm_lock_release(esp_pm_lock_handle_t h) {
+    assert(h == &the_lock && h->count > 0); h->count--; lock_releases++; ev("LOCK-");
+    if (release_wakes_screen) { release_wakes_screen = false; screen(true); }
+    if (release_plugs_usb) { release_plugs_usb = false; usb_host = true; power_sleep_poll(); }   // the ptt task runs here and sends the policy to S0
+    return ESP_OK;
+}
 esp_err_t esp_pm_configure(const void *cfg) {
     last_cfg = *(const esp_pm_config_t *)cfg; configure_calls++;
     if (last_cfg.min_freq_mhz == 240) { configure_usb++; ev("PM240"); } else { configure_battery++; ev(last_cfg.light_sleep_enable ? "PM80L" : "PM80"); }
@@ -203,14 +212,11 @@ bool display_is_asleep(void) { return asleep; }
 void display_set_sleep_cb(void (*cb)(bool)) { sleep_cb = cb; }
 void display_render_guard(bool run) { if (run) { guard_starts++; ev("GUARD+"); } else { guard_stops++; ev("GUARD-"); } }
 void habitat_render_notify(void) { notifies++; }
-static void screen(bool on_);
 bool touch_sleep_armed(void) { return touch_armed; }
 bool touch_sleep_arm(void) {
     if (arm_fails) { ev("TARM-FAIL"); return false; }
     touch_armed = true;
     touch_arms++; ev("TARM");
-    if (arm_wakes_screen) { arm_wakes_screen = false; screen(true); }   // a finger lands while the wake is being armed
-    if (arm_plugs_usb) { arm_plugs_usb = false; usb_host = true; power_sleep_poll(); }   // the ptt task runs here and sends the policy to S0
     return true;
 }
 void touch_sleep_disarm(void) { touch_armed = false; touch_disarms++; ev("TDIS"); }
@@ -240,7 +246,7 @@ static void reset_world(void) {
     configure_calls = configure_battery = configure_usb = 0; pads_kept = 0; pmic_reads = 0;
     cache_chg = -1; usb_host = asleep = voice = session = false; audio_stopped = false; audio_idle_ok = true; pmu0 = 0x08; g_logs[0] = 0;
     guard_stops = guard_starts = audio_idles = audio_resumes = touch_arms = touch_disarms = 0; pmic_state = 0; retention_result = ESP_OK;
-    arm_wakes_screen = false; arm_plugs_usb = false; arm_fails = false; touch_armed = false;
+    release_wakes_screen = false; release_plugs_usb = false; arm_fails = false; touch_armed = false;
     clear_events();
 }
 
@@ -275,23 +281,24 @@ static void scenario_boot_and_cycle(void) {
     clear_events();
     screen(false);
     tick(2800);
-    assert(!power_sleep_relaxed() && guard_stops == 0 && touch_arms == 0 && the_lock.count == 1);   // 2.8 s: not yet
+    assert(!power_sleep_relaxed() && guard_stops == 0 && the_lock.count == 1);   // 2.8 s: not yet
     tick(500);
     assert(power_sleep_relaxed() && !strcmp(power_sleep_state_name(), "S2"));
-    assert(guard_stops == 1 && audio_stopped && touch_arms == 1);
+    assert(guard_stops == 1 && audio_stopped);
+    assert(touch_arms == 0 && !touch_armed && !strstr(g_events, "TARM"));   // D1: the touch level wake is NOT armed on the battery
     assert(power_sleep_wait_ms(PP_POLLER_TOUCH, 20) == 1000 && power_sleep_wait_ms(PP_POLLER_RENDER, 1000) == 5000 && power_sleep_ptt_poll_ms(100) == 250);
     assert(the_lock.count == 0);                           // the chip may sleep
-    assert(in_order("AUDIO-", "TARM") && in_order("GUARD-", "TARM") && in_order("TARM", "LOCK-"));   // arm the wake, THEN let go of the lock
+    assert(in_order("AUDIO-", "LOCK-") && in_order("GUARD-", "LOCK-"));   // the I2S clocks and the stall guard stop, THEN the lock goes
 
     // ---------- a wake: the lock first ----------
     clear_events();
     screen(true);                                           // the hook runs inside display_wake()
     assert(the_lock.count == 1 && !power_sleep_relaxed());  // before the render task has run: lock back, pollers back to their S1 rates
     assert(power_sleep_wait_ms(PP_POLLER_TOUCH, 20) == 20);
-    assert(strncmp(g_events, "LOCK+", 5) == 0 && touch_disarms == 0);
+    assert(strncmp(g_events, "LOCK+", 5) == 0);
     tick(300);
-    assert(touch_disarms == 1 && guard_starts == 1 && audio_resumes == 1 && !audio_stopped);
-    assert(in_order("LOCK+", "TDIS") && in_order("TDIS", "AUDIO+") && in_order("AUDIO+", "GUARD+"));
+    assert(touch_disarms == 0 && guard_starts == 1 && audio_resumes == 1 && !audio_stopped);
+    assert(in_order("LOCK+", "AUDIO+") && in_order("AUDIO+", "GUARD+"));
     assert(the_lock.count == 1);
 
     // ---------- plug in while asleep ----------
@@ -308,8 +315,8 @@ static void scenario_boot_and_cycle(void) {
     assert(the_lock.count == 1 && g_events[0] == 'L');      // the ptt task took the lock back first, in the same step it noticed
     tick(500);
     assert(configure_usb == 1 && last_cfg.max_freq_mhz == 240 && last_cfg.min_freq_mhz == 240 && !last_cfg.light_sleep_enable);
-    assert(guard_starts == 2 && touch_disarms == 2 && !audio_stopped);
-    assert(in_order("LOCK+", "TDIS") && in_order("TDIS", "GUARD+") && in_order("GUARD+", "PM240"));   // lock, pin back to the driver, guard, then the clocks
+    assert(guard_starts == 2 && touch_disarms == 0 && !audio_stopped);
+    assert(in_order("LOCK+", "GUARD+") && in_order("GUARD+", "PM240"));   // lock, guard, then the clocks
     assert(!strcmp(power_sleep_state_name(), "S0"));
 }
 
@@ -332,8 +339,8 @@ static void scenario_cycles(void) {
     assert(configure_battery == configure_usb);             // paired
     assert(configure_battery > 100);
     assert(guard_stops == guard_starts);                    // the stall guard is stopped and started in pairs
-    assert(touch_arms == touch_disarms && touch_arms > 50); // the wake is armed and put back in pairs
-    assert(audio_resumes >= touch_arms && !audio_stopped);  // (audio_resumes also counts nothing else)
+    assert(touch_arms == 0 && touch_disarms == 0);          // D1: the wake is never armed
+    assert(audio_resumes > 50 && audio_resumes == audio_idles && !audio_stopped);   // every S2 entry stopped the clocks and every exit started them
     assert(!power_sleep_relaxed());
 }
 
@@ -355,12 +362,12 @@ static void scenario_wake_during_entry(void) {
     power_sleep_init();
     unplug(); tick(4000);
     screen(false);
-    arm_wakes_screen = true;
-    tick(3300);                                             // the finger lands while the wake is being armed
-    assert(the_lock.count == 1);                            // the chip is NOT left free to sleep under the finger
+    release_wakes_screen = true;
+    tick(3300);                                             // the PWR key lands just as the awake lock is let go
+    assert(lock_releases == 1 && the_lock.count == 1);      // the chip is NOT left free to sleep after the wake
     assert(!power_sleep_relaxed());
     tick(500);
-    assert(touch_arms == touch_disarms && the_lock.count == 1 && !power_sleep_relaxed());
+    assert(touch_arms == 0 && the_lock.count == 1 && !power_sleep_relaxed());
     assert(guard_stops == guard_starts && !audio_stopped);
 }
 
@@ -369,12 +376,12 @@ static void scenario_policy_leaves_during_entry(void) {
     power_sleep_init();
     unplug(); tick(4000);
     screen(false);
-    arm_plugs_usb = true;
-    while (touch_arms == 0) tick(100);                      // up to the pass that enters S2; the policy goes to S0 between the relaxed flag and the lock release
+    release_plugs_usb = true;
+    while (lock_releases == 0) tick(100);                   // up to the pass that enters S2; the policy goes to S0 as the lock is let go
     assert(the_lock.count == 1);                            // the chip is NOT left free to sleep with the policy in S0 (checked at the end of that very pass)
     assert(!power_sleep_relaxed());
     tick(500);                                              // the next render pass runs the S2 exit and the S0 step
-    assert(the_lock.count == 1 && touch_arms == touch_disarms && configure_usb == 1 && !power_sleep_relaxed());
+    assert(the_lock.count == 1 && touch_arms == 0 && configure_usb == 1 && !power_sleep_relaxed());
     assert(guard_stops == guard_starts && !audio_stopped && !strcmp(power_sleep_state_name(), "S0"));
 }
 
@@ -475,7 +482,7 @@ static void scenario_usb_host(void) {
     usb_host = true; tick(100);
     assert(!power_sleep_relaxed() && the_lock.count == 1);  // at once, on the ptt task
     tick(300);
-    assert(configure_usb == 1 && the_lock.count == 1 && touch_disarms == 1);
+    assert(configure_usb == 1 && the_lock.count == 1 && touch_disarms == 0);
 }
 
 static void scenario_holds(void) {
@@ -507,6 +514,35 @@ static void scenario_audio_retry(void) {
     assert(audio_stopped);
 }
 
+static void scenario_input_gate(void) {
+    // ---------- D1: on the battery a dark screen takes no input; on external power it does ----------
+    reset_world();
+    power_sleep_init();
+    assert(power_sleep_input_allowed());                    // S0, screen on
+    screen(false);
+    assert(power_sleep_input_allowed());                    // S0, screen off (USB): a touch or BOOT wakes it, as it always did
+    screen(true);
+    unplug(); tick(4000);                                   // S1
+    assert(!strcmp(power_sleep_state_name(), "S1") && power_sleep_input_allowed());   // screen on: input works
+    screen(false);
+    assert(!power_sleep_input_allowed());                   // at once, 0 ms into the 3 s settle (S1 with a dark screen)
+    tick(4000);
+    assert(!strcmp(power_sleep_state_name(), "S2") && the_lock.count == 0 && !power_sleep_input_allowed());
+    assert(touch_arms == 0 && !touch_armed);                // no touch wake source: the chip sleeps through every touch
+    tick(60000);
+    assert(!power_sleep_input_allowed() && touch_arms == 0);
+    screen(true);                                           // a PWR tap (ptt.c) wakes the screen
+    assert(power_sleep_input_allowed() && the_lock.count == 1);
+    tick(300);
+    assert(power_sleep_input_allowed() && !power_sleep_relaxed());
+    // plugged in while dark: input is allowed again as soon as the policy is back in S0
+    screen(false); tick(4000);
+    assert(!power_sleep_input_allowed());
+    plug_in();
+    tick(2600);
+    assert(!strcmp(power_sleep_state_name(), "S0") && power_sleep_input_allowed());
+}
+
 static void scenario_stats(void) {
     reset_world();
     power_sleep_init();
@@ -533,6 +569,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "host")) scenario_usb_host();
     else if (!strcmp(argv[1], "holds")) scenario_holds();
     else if (!strcmp(argv[1], "audio")) scenario_audio_retry();
+    else if (!strcmp(argv[1], "input")) scenario_input_gate();
     else if (!strcmp(argv[1], "stats")) scenario_stats();
     else assert(!"unknown scenario");
     return 0;
@@ -551,12 +588,19 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
     for name in ('power_sleep.c', 'power_policy.c'):
         (folder / name).write_text((main / name).read_text())
     (folder / 'harness.c').write_text(HARNESS)
-    subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', '-O1', '-g', '-DDEVICE_BATTERY_SLEEP=1', '-DDEVICE_NO_OTA=1',
-                    '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
-                    '-I', str(main), str(folder / 'harness.c'), str(folder / 'power_sleep.c'), str(folder / 'power_policy.c'),
-                    '-o', str(folder / 'glue')], check=True)
-    scenarios = ('boot', 'cycles', 'noret', 'race', 'policy', 'noarm', 'lost', 'facts', 'boards', 'host', 'holds', 'audio', 'stats')
+    def build(exe, *defs):
+        subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', '-O1', '-g', '-DDEVICE_BATTERY_SLEEP=1', '-DDEVICE_NO_OTA=1', *defs,
+                        '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
+                        '-I', str(main), str(folder / 'harness.c'), str(folder / 'power_sleep.c'), str(folder / 'power_policy.c'),
+                        '-o', str(folder / exe)], check=True)
+    build('glue')
+    scenarios = ('boot', 'cycles', 'noret', 'race', 'policy', 'facts', 'boards', 'host', 'holds', 'audio', 'input', 'stats')
     for name in scenarios:
         subprocess.run([str(folder / 'glue'), name], check=True)
-    print('power sleep glue: ' + ', '.join(scenarios) + ' PASS (boot order, unplug, S2 entry and wake order, plug-in, 200 cycles balanced, '
-          'no retention RAM, wake during entry, other boards, host, holds, audio retry, sleep statistics)')
+    # the arming code D1 turns off still has to work for a later mode: build it in and run its two scenarios
+    build('glue_arm', '-DPP_TOUCH_WAKE_ON_BATTERY=1')
+    for name in ('noarm', 'lost'):
+        subprocess.run([str(folder / 'glue_arm'), name], check=True)
+    print('power sleep glue: ' + ', '.join(scenarios) + ' PASS (boot order, unplug, S2 entry and wake order without a touch wake, plug-in, 200 cycles balanced, '
+          'no retention RAM, PWR wake during entry, other boards, host, holds, audio retry, D1 input gate, sleep statistics); '
+          'noarm, lost PASS with PP_TOUCH_WAKE_ON_BATTERY=1')

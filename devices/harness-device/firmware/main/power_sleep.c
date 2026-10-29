@@ -76,7 +76,9 @@ static bool        s_pm_battery;       // power management is configured for bat
 static bool        s_audio_idle;       // the I2S channels are stopped (audio_capture_idle)
 static bool        s_s2_live;          // the S2 steps that let the chip sleep are done: touch wake armed, pollers relaxed, lock released
 static int         s_last_status0 = -1, s_last_status1 = -1;   // the raw AXP2101 bytes of the last fresh read (-1: it failed), for the log
+#if PP_TOUCH_WAKE_ON_BATTERY
 static bool        s_touch_warned;     // "touch wake not armed" is logged once per boot, not once per retry
+#endif
 
 static int resolve_gpio(int gpio)
 {
@@ -258,17 +260,20 @@ static void leave_battery(void)
     s_pm_battery = false;
 }
 
-// Let the chip sleep: arm the touch wake, relax the pollers, release the awake lock. Returns false, with the lock kept and the
-// pollers as they were, if the wake cannot be armed (no pin lock, the touch controller is not up): without a wake source the dial
-// could not be woken by a touch, so it behaves as in S1 until a later pass succeeds.
+// Let the chip sleep: relax the pollers, release the awake lock. With PP_TOUCH_WAKE_ON_BATTERY (off under D1, "PWR only") the touch
+// wake is armed first, and the function returns false, with the lock kept and the pollers as they were, if that cannot be done (no
+// pin lock, the touch controller is not up): without a wake source the dial could not be woken by a touch, so it behaves as in S1
+// until a later pass succeeds. Without it, the PWR key (polled by the ptt task on its timer wake) is the only wake source.
 static bool s2_go_live(void)
 {
+#if PP_TOUCH_WAKE_ON_BATTERY
     if (!touch_sleep_arm()) {                    // INT (GPIO11) becomes the LOW-level wake source
         if (!s_touch_warned) ESP_LOGW(TAG, "touch wake not armed (no pin lock or controller not ready): the awake lock is kept");
         s_touch_warned = true;
         return false;
     }
-    atomic_store(&s_relaxed, true);              // the pollers go to their S2 rates (after the arm: a wake during it cleared the flag, and the check below clears it again)
+#endif
+    atomic_store(&s_relaxed, true);              // the pollers go to their S2 rates (a wake during the arm, or during the release below, clears the flag again in the check that follows)
     lock_release_once();                         // the chip may sleep from here
     // Look again after the release: the screen may have woken (its hook ran before the release took effect), or the ptt task may have
     // sent the policy back to S0 or S1 (a USB host, a plug-in, work started) while this ran. Either way take the lock back
@@ -293,7 +298,9 @@ static void exit_s2(void)
     lock_acquire_once();                         // FIRST, and idempotent: the ptt task or the screen hook may have done it
     atomic_store(&s_relaxed, false);
     s_s2_live = false;
+#if PP_TOUCH_WAKE_ON_BATTERY
     touch_sleep_disarm();                        // the pin goes back to the touch driver's falling-edge interrupt
+#endif
     if (s_audio_idle) audio_capture_idle(false);
     s_audio_idle = false;
     display_render_guard(true);
@@ -323,12 +330,14 @@ void power_sleep_render_service(void)
         if (!s_audio_idle) s_audio_idle = audio_capture_idle(true);   // a beep was playing when S2 began: try again
         if (!s_s2_live && want == PP_S2 && display_is_asleep()) {
             s_s2_live = s2_go_live();                                 // the touch wake could not be armed: try again
+#if PP_TOUCH_WAKE_ON_BATTERY
         } else if (s_s2_live && !touch_sleep_armed()) {
             // The touch driver was deleted (read errors) and not yet reopened: no wake source. Keep the dial up until it is armed again.
             ESP_LOGW(TAG, "touch wake lost: the awake lock is back until the controller is up again");
             lock_acquire_once();
             atomic_store(&s_relaxed, false);
             s_s2_live = false;
+#endif
         }
     }
     if (have != s_applied) ESP_LOGI(TAG, "applied %s -> %s", pp_state_name(s_applied), pp_state_name(have));
@@ -341,6 +350,13 @@ pp_screen_t power_sleep_screen_level(uint32_t idle_ms)
 {
     // "On the battery" is the policy's own call (two fresh reads, no host): S1 or S2. A dial the policy cannot confirm keeps 300 s.
     return pp_screen_level((pp_state_t)atomic_load_explicit(&s_want, memory_order_relaxed), idle_ms);
+}
+
+bool power_sleep_input_allowed(void)
+{
+    // The policy's own state, as for the screen levels. Between a plug-in and the PMIC read that notices it (2 s at most) a dark screen
+    // on a charger still ignores touch; the PWR key works the whole time.
+    return pp_screen_input_allowed((pp_state_t)atomic_load_explicit(&s_want, memory_order_relaxed), display_is_asleep());
 }
 
 // ── the pollers ─────────────────────────────────────────────────────────────────────────────────────

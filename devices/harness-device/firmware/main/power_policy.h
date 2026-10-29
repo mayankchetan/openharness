@@ -9,7 +9,7 @@
 //   S1 BATT_AWAKE   the PMIC said "discharging" on two fresh reads at least PP_CONFIRM_MS apart, no USB host, and
 //                   the board can do it. Screen on (or off for less than PP_SETTLE_MS, or work in flight).
 //   S2 BATT_SLEEP   S1, and the screen has been off for PP_SETTLE_MS, and nobody holds the chip awake. The chip may
-//                   enter light sleep.
+//                   enter light sleep. The PWR key (polled every PP_PWR_POLL_MS) is the only way to wake it (D1).
 // Deep sleep (S3, plan Stage 2) is not here.
 //
 // Rules, first match wins, in this order every step:
@@ -40,7 +40,9 @@ typedef enum {
 #define PP_DWELL_MS      10000  // after a drop to S0, no S1 for this long (anti-flap)
 #define PP_PMIC_READ_MS  2000   // a fresh PMIC read this often in S1 and S2 (plug-in detection)
 #define PP_POLL_AWAKE_MS 100    // the ptt task's delay in S0 and S1 (today's POLL_MS)
-#define PP_POLL_SLEEP_MS 250    // ... and in S2
+#define PP_PWR_POLL_MS   250    // the PWR-key poll in S2: the only wake source on the battery (D1). The AXP2101 latches the key press
+                                // (REG 0x49), so a tap that lands between two polls is still seen at the next one
+#define PP_POLL_SLEEP_MS PP_PWR_POLL_MS   // the ptt task's delay in S2
 
 // Hold bits: work in flight that keeps the chip awake. Whoever starts the work sets its bit, whoever ends it clears it.
 #define PP_HOLD_VOICE    (1u << 0)   // a voice turn (audio_client_active())
@@ -97,6 +99,16 @@ bool pp_wants_read(const pp_t *p, const pp_in_t *in);
 // The ptt task's delay.
 uint32_t pp_ptt_poll_ms(pp_state_t s);
 const char *pp_state_name(pp_state_t s);
+
+// D1, "PWR only, always" (plan section 16, user decision 2026-10-29): on the battery, with the screen off, ONLY the PWR key wakes the
+// dial. Touch never wakes it and touch events are dropped, BOOT does not wake it and is ignored. On external power (S0) nothing
+// changes. "On the battery" is the policy state (S1 or S2), so the 3 s before S2 is covered as well.
+bool pp_screen_input_allowed(pp_state_t s, bool screen_asleep);
+// 1: arm GPIO11 (the touch controller's INT) as the light-sleep level wake in S2 (power_sleep.c, touch_habitat.c). 0 under D1: the
+// arming code stays in the image's source for a later mode but is not called, so the chip sleeps through every touch.
+#ifndef PP_TOUCH_WAKE_ON_BATTERY
+#define PP_TOUCH_WAKE_ON_BATTERY 0
+#endif
 
 // THE POLLERS. Each loop that wakes the chip asks for its wait here, passing the wait it has today. S0 and S1 return
 // that wait unchanged; S2 returns the relaxed one. A new poller is a new row in pp_relaxed_ms().

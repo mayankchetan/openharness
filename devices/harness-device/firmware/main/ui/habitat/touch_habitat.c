@@ -305,7 +305,11 @@ static void task(void *arg)
             if (atomic_load(&presses) <= 16) ESP_LOGI("PERF", "touch raw x=%u y=%u", x, y);
 #endif
             atomic_store(&last_press, (uint32_t)(now / 1000));
-            if (display_is_asleep()) {
+            if (!power_sleep_input_allowed()) {
+                // D1, "PWR only": on the battery a dark screen is woken by the PWR key and by nothing else. The contact is dropped, whole:
+                // no wake, no action, and (below) no activity stamp, so a pocket cannot keep the dial or the idle timer going.
+                swallow = true;
+            } else if (display_is_asleep()) {
                 display_lock();
                 habitat_touch_cancel();
                 display_wake();
@@ -314,7 +318,7 @@ static void task(void *arg)
             } else
                 habitat_input_stamp(now);
         }
-        if (down)
+        if (down && power_sleep_input_allowed())
             display_bump_activity();
         if (!swallow && (down || prev)) {
             display_lock();

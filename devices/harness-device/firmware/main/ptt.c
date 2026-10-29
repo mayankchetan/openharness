@@ -47,7 +47,7 @@ static void ptt_task(void *arg)
     gpio_config(&bcfg);
     int boot_prev = 1;       // released (active-low: 1 = up, 0 = pressed)
     int64_t press_start_us = 0;
-    bool long_fired = false;
+    bool long_fired = false, boot_ignored = false;
     const bool pwr_key = board()->has_pmic;
     battery_poll_t battery_poll = {0};
 
@@ -63,12 +63,17 @@ static void ptt_task(void *arg)
 
         int boot_now = gpio_get_level(BSP_BOOT_BUTTON);
         if (boot_prev == 1 && boot_now == 0) {                 // fresh press
-            if (display_is_asleep()) { display_lock(); display_wake(); display_unlock(); }
-            ESP_LOGI(TAG, "BOOT press → back / stop turn");
-            ui_boot_pressed();
+            // D1, "PWR only": on the battery with the screen off, BOOT neither wakes the dial nor does anything else (the press is
+            // ignored whole, including its hold).
+            boot_ignored = !power_sleep_input_allowed();
+            if (!boot_ignored) {
+                if (display_is_asleep()) { display_lock(); display_wake(); display_unlock(); }
+                ESP_LOGI(TAG, "BOOT press → back / stop turn");
+                ui_boot_pressed();
+            }
             press_start_us = esp_timer_get_time();
             long_fired = false;
-        } else if (boot_now == 0 && !long_fired
+        } else if (boot_now == 0 && !long_fired && !boot_ignored
                    && esp_timer_get_time() - press_start_us >= (int64_t)BOOT_LONG_PRESS_MS * 1000) {
             long_fired = true;                                 // once per press
             screen_toggle("BOOT hold");

@@ -41,6 +41,7 @@ static const void *board_(void) { return &b; }
 typedef struct {uint32_t ms; int rc;} pass_t;
 static pass_t *passes; static int count, at, bumps, canceled, woke;
 static bool asleep, open_ok;
+static bool power_sleep_input_allowed(void) { return true; }   /* the production helper (power_sleep.h): true with the flag off and on external power */
 static jmp_buf stop;
 typedef struct {bool down; int x, y;} event_t;
 static event_t events[400]; static int event_count;
