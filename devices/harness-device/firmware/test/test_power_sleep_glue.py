@@ -154,6 +154,7 @@ static void (*sleep_cb)(bool);
 static esp_pm_light_sleep_cb_t exit_cb;
 static int notifies, guard_stops, guard_starts, audio_idles, audio_resumes, touch_arms, touch_disarms;
 static bool arm_wakes_screen;         // the screen wakes in the middle of the S2 entry
+static bool arm_plugs_usb;            // the policy goes to S0 (a USB host appears) in the middle of the S2 entry
 
 esp_err_t esp_pm_lock_create(esp_pm_lock_type_t t, int arg, const char *name, esp_pm_lock_handle_t *out) { assert(t == ESP_PM_NO_LIGHT_SLEEP && arg == 0); lock_creates++; the_lock.name = name; *out = &the_lock; return ESP_OK; }
 esp_err_t esp_pm_lock_acquire(esp_pm_lock_handle_t h) { assert(h == &the_lock); h->count++; lock_acquires++; ev("LOCK+"); return ESP_OK; }
@@ -184,6 +185,7 @@ static void screen(bool on_);
 void touch_sleep_arm(void) {
     touch_arms++; ev("TARM");
     if (arm_wakes_screen) { arm_wakes_screen = false; screen(true); }   // a finger lands while the wake is being armed
+    if (arm_plugs_usb) { arm_plugs_usb = false; usb_host = true; power_sleep_poll(); }   // the ptt task runs here and sends the policy to S0
 }
 void touch_sleep_disarm(void) { touch_disarms++; ev("TDIS"); }
 
@@ -212,7 +214,7 @@ static void reset_world(void) {
     configure_calls = configure_battery = configure_usb = 0; pads_kept = 0; pmic_reads = 0;
     cache_chg = -1; usb_host = asleep = voice = session = false; audio_stopped = false; audio_idle_ok = true;
     guard_stops = guard_starts = audio_idles = audio_resumes = touch_arms = touch_disarms = 0; pmic_state = 0; retention_result = ESP_OK;
-    arm_wakes_screen = false;
+    arm_wakes_screen = false; arm_plugs_usb = false;
     clear_events();
 }
 
@@ -336,6 +338,20 @@ static void scenario_wake_during_entry(void) {
     assert(guard_stops == guard_starts && !audio_stopped);
 }
 
+static void scenario_policy_leaves_during_entry(void) {
+    reset_world();
+    power_sleep_init();
+    unplug(); tick(4000);
+    screen(false);
+    arm_plugs_usb = true;
+    while (touch_arms == 0) tick(100);                      // up to the pass that enters S2; the policy goes to S0 between the relaxed flag and the lock release
+    assert(the_lock.count == 1);                            // the chip is NOT left free to sleep with the policy in S0 (checked at the end of that very pass)
+    assert(!power_sleep_relaxed());
+    tick(500);                                              // the next render pass runs the S2 exit and the S0 step
+    assert(the_lock.count == 1 && touch_arms == touch_disarms && configure_usb == 1 && !power_sleep_relaxed());
+    assert(guard_stops == guard_starts && !audio_stopped && !strcmp(power_sleep_state_name(), "S0"));
+}
+
 static void scenario_other_boards(void) {
     // ---------- other boards never leave S0 ----------
     reset_world();
@@ -412,6 +428,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "cycles")) scenario_cycles();
     else if (!strcmp(argv[1], "noret")) scenario_no_retention();
     else if (!strcmp(argv[1], "race")) scenario_wake_during_entry();
+    else if (!strcmp(argv[1], "policy")) scenario_policy_leaves_during_entry();
     else if (!strcmp(argv[1], "boards")) scenario_other_boards();
     else if (!strcmp(argv[1], "host")) scenario_usb_host();
     else if (!strcmp(argv[1], "holds")) scenario_holds();
@@ -438,7 +455,7 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
                     '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
                     '-I', str(main), str(folder / 'harness.c'), str(folder / 'power_sleep.c'), str(folder / 'power_policy.c'),
                     '-o', str(folder / 'glue')], check=True)
-    scenarios = ('boot', 'cycles', 'noret', 'race', 'boards', 'host', 'holds', 'audio', 'stats')
+    scenarios = ('boot', 'cycles', 'noret', 'race', 'policy', 'boards', 'host', 'holds', 'audio', 'stats')
     for name in scenarios:
         subprocess.run([str(folder / 'glue'), name], check=True)
     print('power sleep glue: ' + ', '.join(scenarios) + ' PASS (boot order, unplug, S2 entry and wake order, plug-in, 200 cycles balanced, '

@@ -258,8 +258,11 @@ static void enter_s2(void)
     atomic_store(&s_relaxed, true);              // the pollers go to their S2 rates (before the arm: a wake in between clears it, and stays cleared)
     touch_sleep_arm();                           // INT (GPIO11) becomes the LOW-level wake source
     lock_release_once();                         // the chip may sleep from here
-    if (!display_is_asleep()) {                  // the screen woke while this ran: its hook may have run before the release took effect
-        lock_acquire_once();                     // (idempotent) take it back; the next render pass undoes the rest
+    // Look again after the release: the screen may have woken (its hook ran before the release took effect), or the ptt task may have
+    // sent the policy back to S0 or S1 (a USB host, a plug-in, work started) while this ran. Either way take the lock back
+    // (idempotent). s_in_s2 stays set so the next render pass runs exit_s2 and undoes the rest.
+    if (!display_is_asleep() || (pp_state_t)atomic_load(&s_want) != PP_S2) {
+        lock_acquire_once();
         atomic_store(&s_relaxed, false);
     }
 }
