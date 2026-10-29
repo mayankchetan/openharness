@@ -605,15 +605,27 @@ static void scenario_off_low_battery_2(void) {
     assert(!strcmp(power_sleep_state_name(), "S1") && off_calls == 0);
 }
 static void scenario_off_drain_0(void) {
+    // the gauge falls a point every 2 minutes (30 an hour) while the chip sits in S2: asked for at 20 minutes of S2, not before, and long before the 30
+    reset_world();
+    power_sleep_init();
+    to_s2(90);
+    for (int minute = 0; minute < 18; minute++) { if (minute % 2 == 0 && minute) cache_pct--; tick(60 * 1000); }
+    assert(off_calls == 0);
+    for (int minute = 18; minute < 25 && off_calls == 0; minute++) { if (minute % 2 == 0) cache_pct--; tick(60 * 1000); }
+    assert(off_calls > 0 && off_first_reason == PP_OFF_DRAIN && !off_last_force);
+    assert(strstr(g_logs, "power-off asked for: drain"));
+}
+static void scenario_off_drain_1(void) {
+    // AN HOUR OF S1 DOES NOT COUNT: two hours with the screen on and the gauge falling 30 points, then the screen goes off. Nothing is asked for
+    // at the first S2 poll, nor for the next 19 minutes.
     reset_world();
     power_sleep_init();
     cache_pct = 90; unplug(); tick(4000);
-    for (int minute = 0; minute < 62; minute++) {
-        if (minute % 3 == 0 && minute) cache_pct--;
-        screen(minute % 2 == 0); tick(60 * 1000);           // awake on even minutes, dark on odd ones: never 30 min in S2
-    }
+    for (int minute = 0; minute < 120; minute++) { if (minute % 4 == 0 && minute) cache_pct--; tick(60 * 1000); }
+    assert(!strcmp(power_sleep_state_name(), "S1") && off_calls == 0);
     screen(false); tick(5000);
-    assert(!strcmp(power_sleep_state_name(), "S2") && off_calls > 0 && off_first_reason == PP_OFF_DRAIN);
+    assert(!strcmp(power_sleep_state_name(), "S2") && off_calls == 0);
+    for (int minute = 0; minute < 18; minute++) { tick(60 * 1000); assert(off_calls == 0); }
 }
 static void scenario_off_never_on_external_power_0(void) {
     reset_world();
@@ -689,6 +701,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "off_low_battery_1")) scenario_off_low_battery_1();
     else if (!strcmp(argv[1], "off_low_battery_2")) scenario_off_low_battery_2();
     else if (!strcmp(argv[1], "off_drain_0")) scenario_off_drain_0();
+    else if (!strcmp(argv[1], "off_drain_1")) scenario_off_drain_1();
     else if (!strcmp(argv[1], "off_never_on_external_power_0")) scenario_off_never_on_external_power_0();
     else if (!strcmp(argv[1], "off_never_on_external_power_1")) scenario_off_never_on_external_power_1();
     else if (!strcmp(argv[1], "off_never_on_external_power_2")) scenario_off_never_on_external_power_2();
@@ -726,7 +739,7 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
         subprocess.run([str(folder / 'glue_arm'), name], check=True)
     # the S3 triggers through the real glue (power_off_request is a fake that counts)
     build('glue_off', '-DDEVICE_BATTERY_POWEROFF=1')
-    for name in ('off_s2_timeout_0', 'off_s2_timeout_1', 'off_low_battery_0', 'off_low_battery_1', 'off_low_battery_2', 'off_drain_0', 'off_never_on_external_power_0', 'off_never_on_external_power_1', 'off_never_on_external_power_2', 'off_never_on_external_power_3'):
+    for name in ('off_s2_timeout_0', 'off_s2_timeout_1', 'off_low_battery_0', 'off_low_battery_1', 'off_low_battery_2', 'off_drain_0', 'off_drain_1', 'off_never_on_external_power_0', 'off_never_on_external_power_1', 'off_never_on_external_power_2', 'off_never_on_external_power_3'):
         subprocess.run([str(folder / 'glue_off'), name], check=True)
     print('power sleep glue: ' + ', '.join(scenarios) + ' PASS (boot order, unplug, S2 entry and wake order without a touch wake, plug-in, 200 cycles balanced, '
           'no retention RAM, PWR wake during entry, other boards, host, holds, audio retry, D1 input gate, sleep statistics); '

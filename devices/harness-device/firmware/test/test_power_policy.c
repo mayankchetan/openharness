@@ -136,42 +136,58 @@ static void test_poweroff_triggers(void)
     offrig_init(&r, 0, PP_S1, 3);                                             // only from S2: the screen is on, the user sees the rim
     assert(offrun(&r, 10u * 60u * 1000u) == PP_OFF_NONE);
 
-    // (c) the drain over the last hour (one gauge sample a minute while on the battery, S1 or S2). The history of an hour can only be made
-    // with the screen on part of the time: 30 min in S2 would have powered the dial off first. So it is built in S1 and read in S2.
-    offrig_init(&r, 0, PP_S1, 90);
+    // (c) the drain, measured on S2 samples only: one gauge sample a minute while in S2, the history starts again every time S2 is left,
+    // and nothing is judged before PP_OFF_DRAIN_MIN_MS (20 min) of unbroken S2. The rate is the fall over those minutes, scaled to an hour.
+    assert(PP_OFF_DRAIN_MIN_MS == 20u * 60u * 1000u);
     {
-        // 20 percent an hour: one point every 3 minutes. The history needs 61 samples, an hour apart end to end.
-        for (uint32_t minutes = 0; minutes < 60; minutes++) {
-            if (minutes % 3 == 0 && minutes) r.in.pct--;
-            assert(offrun(&r, 60000) == PP_OFF_NONE);
+        // 30 percent an hour (one point every 2 minutes): asked for at 20 minutes, when the 21st sample is in, not before
+        offrig_init(&r, 0, PP_S2, 90);
+        pp_off_reason_t e = PP_OFF_NONE;
+        uint32_t minutes = 0;
+        for (; minutes < 19 && e == PP_OFF_NONE; minutes++) {
+            if (minutes % 2 == 0 && minutes) r.in.pct--;
+            e = offrun(&r, 60000);
         }
-        assert(pp_off_drain_per_hour(&r.o) < 0);                               // 60 samples: not a full hour yet
-        r.in.state = PP_S2; assert(offstep(&r, 0) == PP_OFF_NONE);              // S2 begins: nothing to go on
-        r.in.state = PP_S1;
-        r.in.pct--;                                                             // minute 60: the 20th point
-        assert(offrun(&r, 60000) == PP_OFF_NONE);
-        assert(pp_off_drain_per_hour(&r.o) == 20);
-        r.in.state = PP_S2;
-        assert(offstep(&r, 0) == PP_OFF_DRAIN);                                 // 20 an hour is above 15
+        assert(e == PP_OFF_NONE && pp_off_drain_per_hour(&r.o) < 0);          // 19 minutes of S2: nothing to judge yet, however fast it falls
+        for (; minutes < 22 && e == PP_OFF_NONE; minutes++) {
+            if (minutes % 2 == 0) r.in.pct--;
+            e = offrun(&r, 60000);
+        }
+        assert(e == PP_OFF_DRAIN && pp_off_drain_per_hour(&r.o) >= 27);
     }
-    // exactly 15 an hour is not above the threshold; 16 is
-    for (int drop = 15; drop <= 16; drop++) {
-        offrig_init(&r, 0, PP_S1, 90);
+    // the threshold: exactly 15 an hour is not above it, 18 is. 5 points in the 20 minutes is 15 an hour, 6 is 18.
+    for (int drop = 5; drop <= 6; drop++) {
+        offrig_init(&r, 0, PP_S2, 90);
         offrun(&r, 60000);                                                    // the first sample, 90
         r.in.pct = 90 - drop;
-        for (int m = 0; m < 60; m++) offrun(&r, 60000);                       // 60 more: 61 samples, the first an hour before the last
-        assert(pp_off_drain_per_hour(&r.o) == drop);
-        r.in.state = PP_S2;
-        assert(offstep(&r, 0) == (drop == 15 ? PP_OFF_NONE : PP_OFF_DRAIN));   // (no time passes: the next sample would push the first one out)
+        for (int m = 0; m < 19; m++) assert(offrun(&r, 60000) == PP_OFF_NONE);   // 20 samples: 19 minutes of history
+        assert(pp_off_drain_per_hour(&r.o) < 0);
+        pp_off_reason_t e = offrun(&r, 60000);                                // the 21st sample: 20 minutes of history
+        assert(pp_off_drain_per_hour(&r.o) == drop * 3);
+        assert(e == (drop == 5 ? PP_OFF_NONE : PP_OFF_DRAIN));
     }
-    // the history is made on the battery in S1 too, but the power-off comes only from S2
+    // a slow fall (12 an hour) never asks for it by the drain: the 30 min is what ends that S2
+    offrig_init(&r, 0, PP_S2, 90);
+    for (int m = 0; m < 29; m++) { if (m % 5 == 0 && m) r.in.pct--; assert(offrun(&r, 60000) == PP_OFF_NONE); }
+    assert(offrun(&r, 90000) == PP_OFF_S2_TIMEOUT);
+    // AN HOUR OF S1 DOES NOT COUNT: a screen-on hour on the battery with the gauge falling 30 points, then the screen goes off. The first
+    // S2 poll, and every poll for the next 19 minutes, asks for nothing.
     offrig_init(&r, 0, PP_S1, 90);
-    offrun(&r, 60000); r.in.pct = 60;
-    for (int m = 0; m < 60; m++) assert(offrun(&r, 60000) == PP_OFF_NONE);
-    assert(pp_off_drain_per_hour(&r.o) == 30);
+    for (int m = 0; m < 62; m++) { if (m % 2 == 0 && m) r.in.pct--; assert(offrun(&r, 60000) == PP_OFF_NONE); }
+    assert(pp_off_drain_per_hour(&r.o) < 0);                                  // no S1 sample is kept
     r.in.state = PP_S2;
-    assert(offstep(&r, 0) == PP_OFF_DRAIN);                                // the hour is already on record
+    assert(offstep(&r, 0) == PP_OFF_NONE && offstep(&r, 1000) == PP_OFF_NONE);   // the first S2 polls
+    for (int m = 0; m < 18; m++) { r.in.pct -= (m % 2 == 0); assert(offrun(&r, 60000) == PP_OFF_NONE); }
+    // a visit to S1 in the middle of S2 starts the history again
+    offrig_init(&r, 0, PP_S2, 90);
+    for (int m = 0; m < 15; m++) { r.in.pct -= (m % 2); assert(offrun(&r, 60000) == PP_OFF_NONE); }
+    r.in.state = PP_S1; offstep(&r, 1000);
+    assert(pp_off_drain_per_hour(&r.o) < 0);
+    r.in.state = PP_S2;
+    for (int m = 0; m < 18; m++) { r.in.pct -= (m % 2 == 0); assert(offrun(&r, 60000) == PP_OFF_NONE); }   // 18 minutes since the return
     // external power throws the history away
+    offrig_init(&r, 0, PP_S2, 90);
+    for (int m = 0; m < 19; m++) { r.in.pct -= (m % 2 == 0); offrun(&r, 60000); }
     r.in.state = PP_S0; r.in.on_battery = false; offstep(&r, 1000);
     r.in.state = PP_S2; r.in.on_battery = true;
     assert(pp_off_drain_per_hour(&r.o) < 0 && offstep(&r, 1000) == PP_OFF_NONE);
@@ -201,12 +217,11 @@ static void test_poweroff_triggers(void)
     // (e) priority when several hold at once: a flat cell first
     offrig_init(&r, 0, PP_S2, 4);
     assert(offrun(&r, PP_OFF_S2_MS + 1000) == PP_OFF_LOW_BATTERY);            // 60 s into S2 at 4 percent: low wins long before 30 min
-    // ... then the drain, before the 30 min: asked for the moment S2 begins with the hour on record
-    offrig_init(&r, 0, PP_S1, 90);
-    offrun(&r, 60000); r.in.pct = 50;
-    for (int m = 0; m < 60; m++) offrun(&r, 60000);
-    r.in.state = PP_S2;
-    assert(offstep(&r, 0) == PP_OFF_DRAIN);                                   // 40 an hour, asked for at the first step of S2
+    // ... then the drain, before the 30 min: 40 an hour, asked for at 20 minutes of S2
+    offrig_init(&r, 0, PP_S2, 90);
+    pp_off_reason_t e = PP_OFF_NONE;
+    for (int m = 0; m < 28 && e == PP_OFF_NONE; m++) { if (m) r.in.pct -= (m % 3 != 0) ? 1 : 0; e = offrun(&r, 60000); }
+    assert(e == PP_OFF_DRAIN && r.in.now_ms >= PP_OFF_DRAIN_MIN_MS && r.in.now_ms < PP_OFF_S2_MS);
 }
 
 int main(void)

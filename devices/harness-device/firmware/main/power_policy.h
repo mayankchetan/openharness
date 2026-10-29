@@ -142,18 +142,20 @@ uint32_t pp_dimmed_percent(uint32_t user_percent);
 //   (a) PP_OFF_S2_MS, 30 min, continuously in S2;
 //   (b) the gauge reads PP_OFF_LOW_PCT percent or less, without a break, for PP_OFF_LOW_HOLD_MS (the minute keeps a gauge that has not
 //       started yet, and reads 0, from being taken for a flat cell right after a boot);
-//   (c) the gauge fell by more than PP_OFF_DRAIN_PCT_PER_H over the last hour (61 samples a minute apart, kept in RAM while on the battery).
-//       THE 15 PERCENT AN HOUR IS PROVISIONAL: the plan wants it set from the measured light-sleep drain (T0/G6), which is not in yet. It
-//       catches a chip that does not sleep. An hour of history cannot be made in S2 alone (the 30 min fires first), so it is made over
-//       S1 and S2 together, and is lost at every boot and at every spell on external power.
+//   (c) the gauge fell faster than PP_OFF_DRAIN_PCT_PER_H, measured on S2 samples only: one sample a minute while in S2, the history starts
+//       again whenever S2 is left, and nothing is judged before PP_OFF_DRAIN_MIN_MS (20 min) of unbroken S2. The rate is the fall over
+//       the minutes of history, scaled to an hour, so it catches a chip that does not sleep (what light sleep is for) and never the hours of
+//       screen-on use that came before the S2. THE 15 PERCENT AN HOUR IS PROVISIONAL: the plan wants it set from the measured light-sleep
+//       drain (T0/G6), which is not in yet. The 30 min of (a) ends an S2 that is not draining.
 // NEVER on external power: a read that is not "on the battery" (VBUS good, no cell), a USB host (SOF), or S0 gives PP_OFF_NONE, throws the
 // timers away and, for external power, the drain history too. power_off.c checks VBUS once more, fresh, before it acts.
 #define PP_OFF_S2_MS            (30u * 60u * 1000u)
 #define PP_OFF_LOW_PCT          5
 #define PP_OFF_LOW_HOLD_MS      60000u
 #define PP_OFF_DRAIN_PCT_PER_H  15          // PROVISIONAL, see above
-#define PP_OFF_SAMPLE_MS        60000u      // one gauge sample a minute
-#define PP_OFF_SAMPLES          61          // 61 samples, a minute apart, span an hour
+#define PP_OFF_DRAIN_MIN_MS     (20u * 60u * 1000u)   // unbroken S2 history needed before the drain is judged
+#define PP_OFF_SAMPLE_MS        60000u      // one gauge sample a minute, in S2
+#define PP_OFF_SAMPLES          61          // the ring: up to an hour of S2 samples
 
 typedef enum {
     PP_OFF_NONE = 0,
@@ -187,7 +189,7 @@ void pp_off_init(pp_off_t *o);
 // One step, every poll. Returns the reason the dial should be switched off for, or PP_OFF_NONE. A reason repeats on every step until it
 // stops holding; the caller acts once (power_off_request refuses a second one while the first runs).
 pp_off_reason_t pp_off_step(pp_off_t *o, const pp_off_in_t *in);
-// The fall in percent over the last hour, or -1 while there are fewer than PP_OFF_SAMPLES samples (or the history was thrown away).
+// The fall in percent, scaled to an hour, over the S2 history, or -1 while there is less than PP_OFF_DRAIN_MIN_MS of it (or it was thrown away).
 int pp_off_drain_per_hour(const pp_off_t *o);
 const char *pp_off_reason_name(pp_off_reason_t r);
 

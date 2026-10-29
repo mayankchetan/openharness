@@ -164,10 +164,12 @@ static void hist_reset(pp_off_t *o)
 
 int pp_off_drain_per_hour(const pp_off_t *o)
 {
-    if (o->hist_count < PP_OFF_SAMPLES) return -1;
-    const int oldest = o->hist[o->hist_next];   // the ring is full: the next slot to write holds the oldest sample
+    if (o->hist_count < 2 || (o->hist_count - 1u) * PP_OFF_SAMPLE_MS < PP_OFF_DRAIN_MIN_MS) return -1;
+    const unsigned first = o->hist_count < PP_OFF_SAMPLES ? 0u : o->hist_next;   // the oldest sample: slot 0, or, once the ring is full, the next to write
+    const int oldest = o->hist[first];
     const int newest = o->hist[(o->hist_next + PP_OFF_SAMPLES - 1) % PP_OFF_SAMPLES];
-    return oldest > newest ? oldest - newest : 0;   // a gauge that rose (a cell that relaxed) is a drain of 0
+    if (oldest <= newest) return 0;                // a gauge that rose (a cell that relaxed) is a drain of 0
+    return (int)((unsigned)(oldest - newest) * 60u / (o->hist_count - 1u));   // percent over (count-1) minutes, per hour (rounded down)
 }
 
 pp_off_reason_t pp_off_step(pp_off_t *o, const pp_off_in_t *in)
@@ -179,8 +181,15 @@ pp_off_reason_t pp_off_step(pp_off_t *o, const pp_off_in_t *in)
         hist_reset(o);
         return PP_OFF_NONE;
     }
-    // One gauge sample a minute, in S1 and S2. A gap of two sample periods (the gauge unreadable for a while) throws the history away: it would
-    // no longer span an hour.
+    // The drain is judged on S2 samples only: anything else resets the history (a screen-on hour is not light-sleep drain).
+    if (in->state != PP_S2) {
+        o->s2_armed = false;
+        o->low_armed = false;
+        hist_reset(o);
+        return PP_OFF_NONE;
+    }
+    // One gauge sample a minute, in S2. A gap of two sample periods (the gauge unreadable for a while) throws the history away: it would
+    // not be one run of minutes.
     if (in->pct >= 0 && (!o->have_sample || span_reached(in->now_ms, o->last_sample_ms, PP_OFF_SAMPLE_MS))) {
         if (o->have_sample && span_reached(in->now_ms, o->last_sample_ms, 2 * PP_OFF_SAMPLE_MS)) hist_reset(o);
         o->hist[o->hist_next] = (uint8_t)(in->pct > 100 ? 100 : in->pct);
@@ -188,12 +197,6 @@ pp_off_reason_t pp_off_step(pp_off_t *o, const pp_off_in_t *in)
         if (o->hist_count < PP_OFF_SAMPLES) o->hist_count++;
         o->have_sample = true;
         o->last_sample_ms = in->now_ms;
-    }
-    // A power-off is only ever asked for from S2: with the screen on the user sees the battery rim.
-    if (in->state != PP_S2) {
-        o->s2_armed = false;
-        o->low_armed = false;
-        return PP_OFF_NONE;
     }
     if (!o->s2_armed) {
         o->s2_armed = true;
