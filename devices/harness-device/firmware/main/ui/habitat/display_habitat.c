@@ -42,6 +42,11 @@ void cable_transport_benchmark(void);
 #ifdef DEVICE_UI_METRICS
 #include "uim.h"
 #endif
+#ifdef DEVICE_SLEEP_PROFILE
+#include "sleep_profile.h"
+static volatile display_slp_stamps_t s_slp;
+void display_slp_stamps(display_slp_stamps_t *out) { *out = *(const display_slp_stamps_t *)&s_slp; }
+#endif
 
 #define STRIP_LINES 24
 
@@ -246,6 +251,9 @@ void display_sleep(void)
 {
     if (atomic_exchange(&asleep, true))
         return;
+#ifdef DEVICE_SLEEP_PROFILE
+    s_slp.sleep_us = esp_timer_get_time();
+#endif
     if (power_cb)
         power_cb(false);
     habitat_render_notify();
@@ -254,6 +262,9 @@ void display_wake(void)
 {
     if (!atomic_exchange(&asleep, false))
         return;
+#ifdef DEVICE_SLEEP_PROFILE
+    s_slp.wake_us = esp_timer_get_time();
+#endif
     display_bump_activity();
     atomic_store(&force_frame, true);
     if (power_cb)
@@ -496,6 +507,9 @@ static void render_task(void *arg)
             render_progress(RENDER_POWER);
             ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, on));
             panel_on = on;
+#ifdef DEVICE_SLEEP_PROFILE
+            if (!on) { s_slp.off_us = esp_timer_get_time(); s_slp.off_seq++; }
+#endif
         }
         // A touch/PWR wake can arrive after we sampled `on`, including during
         // panel power-off. Keep its repaint request until an awake iteration.
@@ -515,6 +529,9 @@ static void render_task(void *arg)
 #endif
             if (damage.count)
                 paint(&scenes[front ^ 1], &damage);
+#ifdef DEVICE_SLEEP_PROFILE
+            if (force) { s_slp.frame_us = esp_timer_get_time(); s_slp.frame_seq++; }   // the full repaint after a wake is on the glass
+#endif
 #ifdef DEVICE_OCTOPUS_BENCH
             octopus_perf_commit(tag, damage.pixels * 2, model_us, damage_us);
 #endif

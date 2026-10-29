@@ -43,6 +43,9 @@
 #ifdef DEVICE_BATTERY_LOG
 #include "battery_log.h"
 #endif
+#ifdef DEVICE_SLEEP_PROFILE
+#include "sleep_profile.h"
+#endif
 #ifdef DEVICE_XIP_PROBE
 #include "xip_probe.h"
 #endif
@@ -316,8 +319,15 @@ void app_main(void)
     battery_log_start();   // after the cable link, so a dump reaches the daemon's dial log
 #endif
     ram_telemetry_checkpoint("app_ready");
+#ifdef DEVICE_SLEEP_PROFILE
+    sleep_profile_app_ready();
+    sleep_profile_start();
+#endif
 #ifdef DEVICE_XIP_PROBE
     xip_probe_start();   // diagnostic build only; see xip_probe.c
+#endif
+#ifdef DEVICE_SLEEP_PROFILE
+    sleep_profile_main_end();   // the main task's stack mark just before it ends
 #endif
     vTaskDelete(NULL);
 }

@@ -25,3 +25,8 @@ uint32_t cable_debug_commands_done(void);
 
 // From the reader's tick: report an injected gesture that has finished (or failed). Cheap when idle.
 void cable_debug_tick(void);
+
+// Play a tap at (x, y) through the touch task, exactly as a host's debug.tap would be, without a host waiting for an
+// answer (the DEVICE_SLEEP_PROFILE run wakes the panel with it). False when the touch controller is down or another
+// injected gesture is still in flight; try again.
+bool cable_debug_inject_tap(int x, int y);

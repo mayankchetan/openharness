@@ -116,8 +116,25 @@ static void touch(const dbg_request_t *r)
 void cable_debug_tick(void)
 {
     const int outcome = dbg_inject_finish(esp_timer_get_time());
-    if (outcome > 0) send_text(dbg_reply_done(s_touch_cmd, s_touch_id));
-    else if (outcome < 0) refuse(s_touch_cmd, s_touch_id, DBG_E_TOUCH);
+    if (!outcome) return;
+    // A gesture the firmware armed itself (cable_debug_inject_tap) has no host waiting for an answer.
+    if (s_touch_cmd != DBG_CMD_NONE) {
+        if (outcome > 0) send_text(dbg_reply_done(s_touch_cmd, s_touch_id));
+        else refuse(s_touch_cmd, s_touch_id, DBG_E_TOUCH);
+    }
+    s_touch_cmd = DBG_CMD_NONE;
+}
+
+bool cable_debug_inject_tap(int x, int y)
+{
+    dbg_gesture_t g;
+    if (dbg_tap_make(x, y, &g) != DBG_OK) return false;
+    touch_stats_t stats;
+    touch_stats(&stats);
+    if (!stats.controller_ok || !dbg_inject_arm(&g, esp_timer_get_time())) return false;
+    s_touch_cmd = DBG_CMD_NONE;   // quiet: no reply goes to the host
+    touch_inject_wake();
+    return true;
 }
 
 static volatile uint32_t s_commands_done;

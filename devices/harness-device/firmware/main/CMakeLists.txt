@@ -168,6 +168,17 @@ if(DEVICE_RAM_REGIONS)
     target_include_directories(${COMPONENT_LIB} PRIVATE "${heap_dir}")
 endif()
 
+# Sleep/wake and boot profile (sleep_profile.c): -DDEVICE_SLEEP_PROFILE=1, default OFF. 500 sleep/wake cycles 20 s after boot
+# through the real sleep and touch-wake paths, with wake and sleep times, free internal memory and a summary every 50, and
+# the main task's stack mark at app_ready and at the end of app_main. Needs the debug commands (the wake is an injected tap).
+if(DEVICE_SLEEP_PROFILE)
+    if(DEVICE_NO_DEBUG_COMMANDS OR DEVICE_UI_GALLERY OR DEVICE_XIP_PROBE OR DEVICE_PERF_BENCH OR DEVICE_LAYOUT_BENCH OR DEVICE_CREATURE_GALLERY)
+        message(FATAL_ERROR "DEVICE_SLEEP_PROFILE needs the debug commands and cannot be combined with a bench, the gallery or the XiP probe")
+    endif()
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_SLEEP_PROFILE=1)
+    target_sources(${COMPONENT_LIB} PRIVATE "sleep_profile.c" "slp_stats.c")
+endif()
+
 # Battery history (battery_log.c): -DDEVICE_BATTERY_LOG=1, default OFF. While the dial runs on its battery, one sample a
 # minute ({boot, uptime_s, percent}) goes into an NVS ring of 1,440 samples (24 blobs of 360 B, about 10 KB of the 24 KB NVS partition); back on
 # external power with the cable session up, the new samples are logged once as "BATLOG" lines. Writes NVS: not a daily image.

@@ -143,6 +143,11 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
 "$out/test_battery_ring"
 python3 "$here/test_alive_line.py"
 
+# The sleep/wake profile's percentiles and summary line.
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" -o "$out/test_slp_stats" \
+   "$here/test_slp_stats.c" "$here/../main/slp_stats.c"
+"$out/test_slp_stats"
+
 # The UI gallery's tour table: names, holds, and that every view_t value and home face has an item.
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -I "$here/../main/ui/habitat" -o "$out/test_ui_gallery_items" "$here/test_ui_gallery_items.c"
 "$out/test_ui_gallery_items"
