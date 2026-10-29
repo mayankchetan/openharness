@@ -150,6 +150,10 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" -o "$out/test_battery_ring" \
    "$here/test_battery_ring.c" "$here/../main/battery_ring.c"
 "$out/test_battery_ring"
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" -o "$out/test_battery_rim" \
+   "$here/test_battery_rim.c" "$here/../main/battery.c" "$here/../main/ui/habitat/battery_rim.c" \
+   "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" -lm
+"$out/test_battery_rim"
 python3 "$here/test_alive_line.py"
 
 # The sleep/wake profile's percentiles and summary line.

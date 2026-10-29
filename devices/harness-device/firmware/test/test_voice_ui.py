@@ -62,12 +62,14 @@ static struct {
     int pet_pose, view, voice_return, offset, pressed, active, pane_pos;
     uint32_t error_until;
     uint32_t pet_until, nap_until, voice_retry_until, voice_started, voice_wait_until, voice_generation, voice_question_revision, voice_draft_revision;
-    int voice_question_index;
+    int voice_question_index, battery_rim_seen;
     char title[80], message[256], voice_target[64], voice_engine[12], pending_focus[64], pending_machine[64], opening_notice[48];
     struct { bool valid, supported, loading, pending, uncertain; uint32_t revision, deadline; int index; char error[120],speech_error[96],agent[64],token[48]; struct { bool can_text; } item[4]; } q;
     agent_t agents[1];
     struct { bool live_summary; } memory[PANE_MEMORY_MAX];
 } s;
+static int rim_pct = -1, rim_changes;   // battery_rim_pct(): -1 = hidden (external power); habitat_tick marks the scene dirty when it moves
+static int battery_rim_pct(void) { return rim_pct; }
 static uint32_t now;
 static bool audio_active, recording, abort_requested, queue_full;
 static int starts, stops, aborts, cancels, confirms, scroll, gesture, reviews;
@@ -76,7 +78,7 @@ static agent_t *active(void) { return &s.agents[0]; }
 #define COPY(dst, src) snprintf(dst, sizeof(dst), "%s", (src) ? (src) : "")
 #define ESP_LOGI(...) ((void)0)
 uint32_t ms(void) { return now; }
-void change(void) {}
+void change(void) { rim_changes++; }
 void surface_tick(uint32_t value) { (void)value; }
 void display_lock(void) {}
 void display_unlock(void) {}
@@ -268,6 +270,14 @@ int main(void) {
     assert(s.voice_retry_until==1); now=1; habitat_tick(); assert(!s.voice_retry_until);
     begin(); done(); finish_audio(); ui_voice_error("Didn't catch that");
     ui_set_connected(false); assert(!s.voice_retry_until);
+
+    // The battery rim: the tick marks the scene dirty when what the rim shows changes (appears, moves, goes), and not otherwise.
+    reset(); rim_pct = -1; rim_changes = 0; habitat_tick(); assert(rim_changes == 0 && s.battery_rim_seen == 0);
+    rim_pct = 80; habitat_tick(); assert(rim_changes == 1 && s.battery_rim_seen == 81);
+    habitat_tick(); habitat_tick(); assert(rim_changes == 1);           // the same percent: no redraw
+    rim_pct = 79; habitat_tick(); assert(rim_changes == 2 && s.battery_rim_seen == 80);
+    rim_pct = -1; habitat_tick(); assert(rim_changes == 3 && s.battery_rim_seen == 0);   // plugged in: the rim goes
+    habitat_tick(); assert(rim_changes == 3);
 
     reset(); begin(); now = 601000; habitat_tick();
     assert(stops == 1 && s.voice_waiting);

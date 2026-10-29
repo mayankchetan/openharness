@@ -31,3 +31,6 @@
 #define HT_THEME_DONE      0x0dbc79u
 #define HT_THEME_QUESTION  0xe5e510u
 #define HT_THEME_FAILED    0xcd3131u
+// The battery rim (battery_rim.h): amber at 20 percent and below (red is HT_THEME_FAILED, at 10 and below), and the dim track.
+#define HT_THEME_WARN      0xf0a020u
+#define HT_THEME_RIM_TRACK 0x222122u

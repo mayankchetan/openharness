@@ -15,6 +15,8 @@
 #include "perf_bench.h"
 #include "command_face.h"
 #include "theme.h"
+#include "battery_rim.h"
+#include "../../battery.h"
 #include "focus_faces.h"
 #ifdef DEVICE_CREATURE_GALLERY
 #include "creature_gallery.h"
@@ -258,6 +260,7 @@ static EXT_RAM_BSS_ATTR struct {
     uint32_t coast_until;
     uint32_t character_activity;
     uint8_t status_phase;
+    int battery_rim_seen;     // the percent last seen for the rim arc, plus 1; 0 = hidden (habitat_tick marks the scene dirty on a change)
     unsigned bell_unread;     // the bell's count at the last home render, to see a notice arrive
     uint32_t notice_ms;       // the face clock when it last went up, 0 = none since boot (the pet's alert bubble)
     ht_focus_working_pick_t working_pick;   // which working scene the shown agent's pet plays (Claude: chef or builder)
@@ -2374,6 +2377,15 @@ static struct {
     ui_settings_t values;
     uint32_t fields;
 } settings_pending;
+/*
+ * THE BATTERY RIM, last on every screen: while the dial runs on its battery, a thin arc along the bottom of the glass (battery_rim.h).
+ * Nothing on the external power. The percent is the one the dial shows (battery.c); habitat_tick marks the scene dirty when it
+ * changes, so this is rebuilt, and ht_damage repaints only the strip it sits in.
+ */
+static void render_battery_rim(ht_scene_t *f)
+{
+    ht_battery_rim(f, battery_rim_pct(), DIM, color(HT_THEME_WARN), color(HT_THEME_FAILED), color(HT_THEME_RIM_TRACK));
+}
 bool habitat_scene_take(ht_scene_t *f)
 {
 #ifdef DEVICE_CREATURE_GALLERY
@@ -2481,6 +2493,7 @@ bool habitat_scene_take(ht_scene_t *f)
         ui_wrap(f, FACE_CX(336), 161, 336, 5, 0, UI_FONT, FG, s.message);
         break;
     }
+    render_battery_rim(f);
     return true;
 }
 
@@ -3734,6 +3747,10 @@ void habitat_tick(void)
     if (s.voice_retry_until && (int32_t)(now - s.voice_retry_until) >= 0) {
         s.voice_retry_until = 0;
         change();
+    }
+    {   // the battery rim: redraw only when what it shows changes (it appears, goes, or the percent moves)
+        const int rim = battery_rim_pct() + 1;
+        if (rim != s.battery_rim_seen) { s.battery_rim_seen = rim; change(); }
     }
     surface_tick(now);
     if (ht_workspace_tick(&workspace,now)) workspace_failed("The tab did not open. Choose it again.");

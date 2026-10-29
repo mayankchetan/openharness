@@ -1,4 +1,5 @@
 #include "terminal.h"
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include "arc_geometry.inc"
@@ -650,7 +651,7 @@ bool ht_ring_arc(ht_scene_t *s, int cx16, int cy16, int radius16, int width16, i
     r->ring.ux = (int16_t)ux; r->ring.uy = (int16_t)uy; r->ring.cosh = (int16_t)cs;
     int rin = imax(0, radius16 - width16 / 2 - 16), rout = radius16 + (width16 + 1) / 2 + 16;
     // The slice's extremes: its two edges at both radii, and every axis it spans at the outer radius.
-    int x0 = cx16, x1 = cx16, y0 = cy16, y1 = cy16;
+    int x0 = INT_MAX, x1 = INT_MIN, y0 = INT_MAX, y1 = INT_MIN;   // the slice's own extremes: the centre is not in it unless rin is 0
 #define RING_PT(R, ANG) do { int pc, ps; ring_trig(ANG, &pc, &ps); \
         int px = cx16 + ((R) * pc >> 14), py = cy16 - ((R) * ps >> 14); \
         x0 = imin(x0, px); x1 = imax(x1, px); y0 = imin(y0, py); y1 = imax(y1, py); } while (0)
@@ -1817,11 +1818,28 @@ static void ring_raster(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
     int x1 = imax(clip.x, b.x), x2 = imin(clip.x + clip.w, b.x + b.w);
     int y1 = imax(clip.y, b.y), y2 = imin(clip.y + clip.h, b.y + b.h);
     int half = r->ring.w16 / 2, rad = r->ring.r16;
+    // The band has coverage only where the distance d from the centre is in [rad - half - 7, rad + half + 8) sixteenths. On a
+    // row that confines the columns to two short runs either side of the centre (outside |vx| < sqrt(outer^2 - vy^2), and
+    // not inside |vx| < sqrt(inner^2 - vy^2)), so a thin arc far from the centre costs its own pixels, not its bounding box's.
+    const int64_t outer_d = (int64_t)rad + half + 8, inner_d = (int64_t)rad - half - 7;
     for (int y = y1; y < y2; y++) {
         uint16_t *row = out + (y - clip.y) * clip.w - clip.x;
         int vy = r->ring.cy16 - (y * 16 + 8);
-        for (int x = x1; x < x2; x++) {
+        int xa = x1, xb = x2, gap = 0;
+        if (outer_d < 46000) {   // the squares stay inside isqrt's 32 bits
+            int64_t outer = outer_d * outer_d - (int64_t)vy * vy;
+            if (outer <= 0) continue;
+            int reach = (int)isqrt((uint32_t)outer) + 1;
+            xa = imax(xa, ((r->ring.cx16 - reach) >> 4) - 1);
+            xb = imin(xb, ((r->ring.cx16 + reach) >> 4) + 2);
+            if (inner_d > 0) {
+                int64_t inner = inner_d * inner_d - (int64_t)vy * vy;
+                if (inner > 0) gap = (int)isqrt((uint32_t)inner) - 16;   // a pixel of margin
+            }
+        }
+        for (int x = xa; x < xb; x++) {
             int vx = x * 16 + 8 - r->ring.cx16;
+            if (gap > 0 && vx > -gap && vx < gap) { x = ((r->ring.cx16 + gap - 8 + 15) >> 4) - 1; continue; }   // the hollow
             int d = (int)isqrt((uint32_t)(vx * vx + vy * vy));
             int cov = half - (d > rad ? d - rad : rad - d) + 8;   // 16 inside the band, 0 a pixel out
             if (cov <= 0) continue;

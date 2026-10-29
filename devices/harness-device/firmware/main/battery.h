@@ -30,6 +30,15 @@ int battery_chg(void);
 // the cell is flat in the middle. -1 for a value outside 0..100. Pure function of its argument.
 int battery_discharge_pct(int raw);
 
+// THE RIM ARC (ui_habitat.c, render_battery_rim): a thin arc at the bottom of the glass while the dial runs on its battery.
+// battery_rim_pct(): the percent it shows, or -1 for "draw nothing" (on external power, or no percent). The fill spans
+// battery_rim_half_deg(pct) degrees either side of 6 o'clock out of BATTERY_RIM_HALF_DEG (never empty above 0 %); the colour
+// tier is 0 normal, 1 amber (20 % and below), 2 red (10 % and below).
+#define BATTERY_RIM_HALF_DEG 30
+int battery_rim_pct(void);
+int battery_rim_half_deg(int pct);
+int battery_rim_tier(int pct);
+
 // Battery voltage in mV, or -1 (not read, ADC off, outside 2,500..4,600 mV). Set by the one poller, like the percent.
 void battery_set_mv(int mv);
 int battery_mv(void);

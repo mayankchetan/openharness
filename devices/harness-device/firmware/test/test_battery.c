@@ -56,6 +56,22 @@ int main(void)
     assert(battery_mv_from_regs(-1, 0x10) == -1 && battery_mv_from_regs(0x0F, -1) == -1);
     assert(battery_mv_from_regs(0, 0) == -1 && battery_mv_from_regs(0x3F, 0xFF) == -1);      // 0 mV (ADC off) and 16,383 mV
 
+    // The rim arc (ui_habitat.c): drawn only on battery, with a known percent; the fill is half-degrees of a 30-degree half span,
+    // proportional to the percent shown, and never empty above 0; amber at 20 and below, red at 10 and below.
+    battery_set(73, 0); assert(battery_rim_pct() == -1);          // standby on external power: hidden
+    battery_set(73, 1); assert(battery_rim_pct() == -1);          // charging: hidden
+    battery_set(-1, 2); assert(battery_rim_pct() == -1);          // on battery, percent unknown: hidden
+    battery_set(-1, -1); assert(battery_rim_pct() == -1);
+    battery_set(88, 2); assert(battery_rim_pct() == battery_pct() && battery_rim_pct() == battery_discharge_pct(88));
+    assert(battery_rim_half_deg(100) == BATTERY_RIM_HALF_DEG && BATTERY_RIM_HALF_DEG == 30);
+    assert(battery_rim_half_deg(50) == 15 && battery_rim_half_deg(0) == 0 && battery_rim_half_deg(1) == 1 && battery_rim_half_deg(3) == 1);
+    assert(battery_rim_half_deg(-1) == 0 && battery_rim_half_deg(101) == BATTERY_RIM_HALF_DEG);
+    for (int p = 1; p <= 100; p++) assert(battery_rim_half_deg(p) >= battery_rim_half_deg(p - 1) && battery_rim_half_deg(p) >= 1);
+    assert(battery_rim_tier(100) == 0 && battery_rim_tier(21) == 0 && battery_rim_tier(20) == 1 && battery_rim_tier(11) == 1 &&
+           battery_rim_tier(10) == 2 && battery_rim_tier(0) == 2);
+    // A change of the shown percent is the only thing that has to redraw: two raw values the table maps to one shown value do not differ.
+    battery_set(64, 2); int shown_a = battery_rim_pct(); battery_set(64, 2); assert(battery_rim_pct() == shown_a);
+
     // The poll schedule: the first call is due at once; then every BATTERY_POLL_MS, wrap-safe, no burst after a stall.
     battery_poll_t poll = {0};
     assert(battery_poll_due(&poll, 1000) && poll.next_ms == 1000 + BATTERY_POLL_MS);

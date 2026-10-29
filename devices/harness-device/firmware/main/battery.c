@@ -40,6 +40,16 @@ int battery_discharge_pct(int raw)
     return 100;
 }
 
+int battery_rim_pct(void) { return s_chg == 2 ? battery_pct() : -1; }
+int battery_rim_half_deg(int pct)
+{
+    if (pct <= 0) return 0;
+    if (pct >= 100) return BATTERY_RIM_HALF_DEG;
+    const int half = (pct * BATTERY_RIM_HALF_DEG + 50) / 100;
+    return half < 1 ? 1 : half;
+}
+int battery_rim_tier(int pct) { return pct <= 10 ? 2 : pct <= 20 ? 1 : 0; }
+
 void battery_set_mv(int mv) { s_mv = mv >= BATTERY_MV_MIN && mv <= BATTERY_MV_MAX ? mv : -1; }
 int battery_mv(void) { return s_mv; }
 int battery_mv_from_regs(int high, int low)
