@@ -120,8 +120,10 @@ void display_render_guard(bool run);
 'ui/habitat/runtime.h': '#pragma once\nvoid habitat_render_notify(void);\n',
 'ui/touch.h': '''
 #pragma once
-void touch_sleep_arm(void);
+#include <stdbool.h>
+bool touch_sleep_arm(void);
 void touch_sleep_disarm(void);
+bool touch_sleep_armed(void);
 ''',
 }
 
@@ -155,6 +157,7 @@ static esp_pm_light_sleep_cb_t exit_cb;
 static int notifies, guard_stops, guard_starts, audio_idles, audio_resumes, touch_arms, touch_disarms;
 static bool arm_wakes_screen;         // the screen wakes in the middle of the S2 entry
 static bool arm_plugs_usb;            // the policy goes to S0 (a USB host appears) in the middle of the S2 entry
+static bool arm_fails, touch_armed;   // the touch wake cannot be armed (no pin lock, controller not ready) / is armed now
 
 esp_err_t esp_pm_lock_create(esp_pm_lock_type_t t, int arg, const char *name, esp_pm_lock_handle_t *out) { assert(t == ESP_PM_NO_LIGHT_SLEEP && arg == 0); lock_creates++; the_lock.name = name; *out = &the_lock; return ESP_OK; }
 esp_err_t esp_pm_lock_acquire(esp_pm_lock_handle_t h) { assert(h == &the_lock); h->count++; lock_acquires++; ev("LOCK+"); return ESP_OK; }
@@ -182,12 +185,16 @@ void display_set_sleep_cb(void (*cb)(bool)) { sleep_cb = cb; }
 void display_render_guard(bool run) { if (run) { guard_starts++; ev("GUARD+"); } else { guard_stops++; ev("GUARD-"); } }
 void habitat_render_notify(void) { notifies++; }
 static void screen(bool on_);
-void touch_sleep_arm(void) {
+bool touch_sleep_armed(void) { return touch_armed; }
+bool touch_sleep_arm(void) {
+    if (arm_fails) { ev("TARM-FAIL"); return false; }
+    touch_armed = true;
     touch_arms++; ev("TARM");
     if (arm_wakes_screen) { arm_wakes_screen = false; screen(true); }   // a finger lands while the wake is being armed
     if (arm_plugs_usb) { arm_plugs_usb = false; usb_host = true; power_sleep_poll(); }   // the ptt task runs here and sends the policy to S0
+    return true;
 }
-void touch_sleep_disarm(void) { touch_disarms++; ev("TDIS"); }
+void touch_sleep_disarm(void) { touch_armed = false; touch_disarms++; ev("TDIS"); }
 
 // ---- helpers ----
 static void clear_events(void) { g_events[0] = 0; }
@@ -214,7 +221,7 @@ static void reset_world(void) {
     configure_calls = configure_battery = configure_usb = 0; pads_kept = 0; pmic_reads = 0;
     cache_chg = -1; usb_host = asleep = voice = session = false; audio_stopped = false; audio_idle_ok = true;
     guard_stops = guard_starts = audio_idles = audio_resumes = touch_arms = touch_disarms = 0; pmic_state = 0; retention_result = ESP_OK;
-    arm_wakes_screen = false; arm_plugs_usb = false;
+    arm_wakes_screen = false; arm_plugs_usb = false; arm_fails = false; touch_armed = false;
     clear_events();
 }
 
@@ -352,6 +359,43 @@ static void scenario_policy_leaves_during_entry(void) {
     assert(guard_stops == guard_starts && !audio_stopped && !strcmp(power_sleep_state_name(), "S0"));
 }
 
+static void scenario_arm_fails(void) {
+    reset_world();
+    power_sleep_init();
+    unplug(); tick(4000);
+    arm_fails = true;
+    screen(false); tick(8000);
+    // the wake could not be armed (no pin lock, controller not ready): S2 is applied but the chip is NOT let go, the pollers stay awake
+    assert(!strcmp(power_sleep_state_name(), "S2") && the_lock.count == 1 && !power_sleep_relaxed() && !strstr(g_events, "LOCK-"));
+    assert(power_sleep_wait_ms(PP_POLLER_TOUCH, 20) == 20);
+    arm_fails = false;
+    tick(6000);                                             // the next render pass tries again
+    assert(the_lock.count == 0 && power_sleep_relaxed() && touch_arms == 1);
+    screen(true); tick(300);
+    assert(the_lock.count == 1 && !power_sleep_relaxed() && touch_disarms == 1);
+    // and a wake while it was never armed is a clean exit
+    reset_world();
+    power_sleep_init();
+}
+
+static void scenario_driver_lost(void) {
+    reset_world();
+    power_sleep_init();
+    unplug(); tick(4000);
+    screen(false); tick(4000);
+    assert(the_lock.count == 0 && power_sleep_relaxed() && touch_armed);
+    touch_armed = false; arm_fails = true;                  // the touch driver was deleted (8 read errors): no wake source, and arming fails meanwhile
+    tick(5200);                                             // the next render pass notices
+    assert(the_lock.count == 1 && !power_sleep_relaxed());  // the lock is kept until the wake is armed again
+    tick(10000);
+    assert(the_lock.count == 1 && !power_sleep_relaxed());  // ... however long that takes
+    touch_armed = true; arm_fails = false;                  // the driver was reopened and re-armed
+    tick(5200);
+    assert(the_lock.count == 0 && power_sleep_relaxed());
+    screen(true); tick(300);
+    assert(the_lock.count == 1 && !power_sleep_relaxed() && touch_disarms == 1);
+}
+
 static void scenario_other_boards(void) {
     // ---------- other boards never leave S0 ----------
     reset_world();
@@ -429,6 +473,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "noret")) scenario_no_retention();
     else if (!strcmp(argv[1], "race")) scenario_wake_during_entry();
     else if (!strcmp(argv[1], "policy")) scenario_policy_leaves_during_entry();
+    else if (!strcmp(argv[1], "noarm")) scenario_arm_fails();
+    else if (!strcmp(argv[1], "lost")) scenario_driver_lost();
     else if (!strcmp(argv[1], "boards")) scenario_other_boards();
     else if (!strcmp(argv[1], "host")) scenario_usb_host();
     else if (!strcmp(argv[1], "holds")) scenario_holds();
@@ -455,7 +501,7 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
                     '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
                     '-I', str(main), str(folder / 'harness.c'), str(folder / 'power_sleep.c'), str(folder / 'power_policy.c'),
                     '-o', str(folder / 'glue')], check=True)
-    scenarios = ('boot', 'cycles', 'noret', 'race', 'policy', 'boards', 'host', 'holds', 'audio', 'stats')
+    scenarios = ('boot', 'cycles', 'noret', 'race', 'policy', 'noarm', 'lost', 'boards', 'host', 'holds', 'audio', 'stats')
     for name in scenarios:
         subprocess.run([str(folder / 'glue'), name], check=True)
     print('power sleep glue: ' + ', '.join(scenarios) + ' PASS (boot order, unplug, S2 entry and wake order, plug-in, 200 cycles balanced, '

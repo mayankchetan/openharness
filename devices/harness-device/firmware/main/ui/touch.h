@@ -28,9 +28,12 @@ void touch_stats(touch_stats_t *out);
 #ifdef DEVICE_BATTERY_SLEEP
 // Battery sleep (power_sleep.c, render task): arm GPIO11 as the LOW-level light-sleep wake source, and put the pin back as the
 // touch driver wants it (falling-edge interrupt) when the screen is awake again. Both are safe to repeat and do nothing on a dial
-// without the CST9217. The wake runs the driver's own interrupt handler; no second one is installed.
-void touch_sleep_arm(void);
+// without the CST9217. touch_sleep_arm() returns false (and arms nothing) if it cannot: another chip, no pin lock, controller not up. The wake runs the driver's own interrupt handler; no second one is installed.
+bool touch_sleep_arm(void);
 void touch_sleep_disarm(void);
+// True while the wake is armed AND the controller is up. False after the driver was deleted (read errors) until it is reopened:
+// touch_habitat.c re-arms the pin on reopen, so this turns true again by itself.
+bool touch_sleep_armed(void);
 // The esp_timer time of the first level interrupt since the last call (0: none, e.g. a PWR-key wake). The render task takes it when the
 // full repaint after a wake is on the glass and logs the interrupt-to-frame time (gate G6 of the plan: 99 percent at most 60 ms).
 int64_t touch_sleep_take_isr_us(void);

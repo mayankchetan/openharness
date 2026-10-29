@@ -64,10 +64,13 @@ static void touch_pin_arm(void)
     esp_sleep_enable_gpio_wakeup();
     gpio_intr_enable(BSP_TOUCH_INT);
 }
-void touch_sleep_arm(void)
+// True: the wake is armed (now, or already). False, and nothing armed: another chip, no pin lock, or the controller is not up (its
+// driver was deleted after read errors and not reopened yet): the sleep policy then keeps the dial awake instead of letting the chip
+// sleep with no way to wake it by touch.
+bool touch_sleep_arm(void)
 {
-    if (board()->touch != TOUCH_CST9217 || !s_pin_lock)
-        return;
+    if (board()->touch != TOUCH_CST9217 || !s_pin_lock || !atomic_load(&controller_ready))
+        return false;
     xSemaphoreTake(s_pin_lock, portMAX_DELAY);
     if (!atomic_load(&s_level_wake)) {
         atomic_store(&s_irq_hit, false);
@@ -76,6 +79,31 @@ void touch_sleep_arm(void)
         atomic_store(&s_isr_us, 0);
         atomic_store(&s_level_wake, true);   // 1: from here the ISR switches the interrupt off on its first hit
         touch_pin_arm();                     // 2: level wake
+    }
+    xSemaphoreGive(s_pin_lock);
+    return true;
+}
+bool touch_sleep_armed(void)
+{
+    return atomic_load(&s_level_wake) && atomic_load(&controller_ready);
+}
+// The wake is parked: INT stayed low with nothing to read, so the wake and the interrupt are off and only the poll looks again.
+static bool touch_sleep_parked(void)
+{
+    return atomic_load_explicit(&s_parked, memory_order_relaxed);
+}
+// The touch driver was deleted and opened again (open_touch): gpio_config and the new handler put the pin back to a falling-edge
+// interrupt and the wake source may be gone. If the wake was armed, arm it again on the new driver.
+static void touch_sleep_reopened(void)
+{
+    if (!s_pin_lock)
+        return;
+    xSemaphoreTake(s_pin_lock, portMAX_DELAY);
+    if (atomic_load(&s_level_wake)) {
+        atomic_store(&s_irq_hit, false);
+        atomic_store(&s_parked, false);
+        atomic_store(&s_unconfirmed, 0);
+        touch_pin_arm();
     }
     xSemaphoreGive(s_pin_lock);
 }
@@ -125,6 +153,8 @@ static bool touch_sleep_unconfirmed(void)
 }
 #else
 static inline void touch_sleep_irq(void) {}
+static inline bool touch_sleep_parked(void) { return false; }
+static inline void touch_sleep_reopened(void) {}
 #endif
 // END battery sleep (touch)
 static void touch_irq(esp_lcd_touch_handle_t tp)
@@ -164,13 +194,19 @@ static bool open_touch(void)
         return false;
     }
     atomic_store(&controller_ready, true);
+    touch_sleep_reopened();   // (battery sleep only) a wake that was armed before the driver was deleted is armed again
     return true;
 }
 // How long the touch task waits for its next sample. A contact is read every 4 ms; an idle controller every 20 ms (the IRQ wakes the
 // task at once, this only catches a missed one). While the chip may sleep the idle wait is the relaxed poll (power_policy.h).
 static TickType_t touch_wait_ticks(bool down)
 {
-    return down ? pdMS_TO_TICKS(4) : pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_TOUCH, 20));
+    if (down)
+        return pdMS_TO_TICKS(4);
+    uint32_t ms = power_sleep_wait_ms(PP_POLLER_TOUCH, 20);
+    if (ms > 200 && touch_sleep_parked())
+        ms = 200;   // the wake is parked (INT stuck low): no interrupt will come, so look five times a second, not once
+    return pdMS_TO_TICKS(ms);
 }
 static void task(void *arg)
 {

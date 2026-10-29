@@ -28,7 +28,8 @@ checked = []
 # --- habitat_touch: 20 ms idle, 4 ms during a contact; the contact wait is not a poller ---
 touch = read('ui/habitat/touch_habitat.c')
 helper = re.search(r'static TickType_t touch_wait_ticks\(bool down\)\n\{\n(.*?)\n\}', touch, re.S)
-assert helper and re.fullmatch(r'    return down \? pdMS_TO_TICKS\(4\) : pdMS_TO_TICKS\(power_sleep_wait_ms\(PP_POLLER_TOUCH, 20\)\);', helper[1]), 'touch wait helper'
+assert helper and 'power_sleep_wait_ms(PP_POLLER_TOUCH, 20)' in helper[1] and 'return pdMS_TO_TICKS(4);' in helper[1], 'touch wait helper'
+assert 'if (ms > 200 && touch_sleep_parked())' in helper[1] and 'ms = 200;' in helper[1], 'a parked wake is polled every 200 ms'
 task = re.search(r'static void task\(void \*arg\)\n\{.*?^\}', touch, re.M | re.S)[0]
 assert 'ulTaskNotifyTake(pdTRUE, touch_wait_ticks(down));' in task and 'pdMS_TO_TICKS(20)' not in task
 checked.append('touch 20 ms')

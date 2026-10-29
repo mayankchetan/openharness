@@ -74,6 +74,8 @@ static pp_t        s_pp;               // the policy; the ptt task only
 static pp_state_t  s_applied;          // what the render task has applied
 static bool        s_pm_battery;       // power management is configured for battery (frequency scaling, maybe light sleep)
 static bool        s_audio_idle;       // the I2S channels are stopped (audio_capture_idle)
+static bool        s_s2_live;          // the S2 steps that let the chip sleep are done: touch wake armed, pollers relaxed, lock released
+static bool        s_touch_warned;     // "touch wake not armed" is logged once per boot, not once per retry
 
 static int resolve_gpio(int gpio)
 {
@@ -250,13 +252,17 @@ static void leave_battery(void)
     s_pm_battery = false;
 }
 
-static void enter_s2(void)
+// Let the chip sleep: arm the touch wake, relax the pollers, release the awake lock. Returns false, with the lock kept and the
+// pollers as they were, if the wake cannot be armed (no pin lock, the touch controller is not up): without a wake source the dial
+// could not be woken by a touch, so it behaves as in S1 until a later pass succeeds.
+static bool s2_go_live(void)
 {
-    atomic_store(&s_in_s2, true);                // from here the screen hook takes the lock back on a wake
-    s_audio_idle = audio_capture_idle(true);     // the I2S clocks stop; refused (and retried) while a beep plays
-    display_render_guard(false);                 // the 1 s stall-guard timer would cap every sleep at one second
-    atomic_store(&s_relaxed, true);              // the pollers go to their S2 rates (before the arm: a wake in between clears it, and stays cleared)
-    touch_sleep_arm();                           // INT (GPIO11) becomes the LOW-level wake source
+    if (!touch_sleep_arm()) {                    // INT (GPIO11) becomes the LOW-level wake source
+        if (!s_touch_warned) ESP_LOGW(TAG, "touch wake not armed (no pin lock or controller not ready): the awake lock is kept");
+        s_touch_warned = true;
+        return false;
+    }
+    atomic_store(&s_relaxed, true);              // the pollers go to their S2 rates (after the arm: a wake during it cleared the flag, and the check below clears it again)
     lock_release_once();                         // the chip may sleep from here
     // Look again after the release: the screen may have woken (its hook ran before the release took effect), or the ptt task may have
     // sent the policy back to S0 or S1 (a USB host, a plug-in, work started) while this ran. Either way take the lock back
@@ -265,12 +271,22 @@ static void enter_s2(void)
         lock_acquire_once();
         atomic_store(&s_relaxed, false);
     }
+    return true;
+}
+
+static void enter_s2(void)
+{
+    atomic_store(&s_in_s2, true);                // from here the screen hook takes the lock back on a wake
+    s_audio_idle = audio_capture_idle(true);     // the I2S clocks stop; refused (and retried) while a beep plays
+    display_render_guard(false);                 // the 1 s stall-guard timer would cap every sleep at one second
+    s_s2_live = s2_go_live();
 }
 
 static void exit_s2(void)
 {
     lock_acquire_once();                         // FIRST, and idempotent: the ptt task or the screen hook may have done it
     atomic_store(&s_relaxed, false);
+    s_s2_live = false;
     touch_sleep_disarm();                        // the pin goes back to the touch driver's falling-edge interrupt
     if (s_audio_idle) audio_capture_idle(false);
     s_audio_idle = false;
@@ -297,8 +313,17 @@ void power_sleep_render_service(void)
     if (have == PP_S1 && want == PP_S2 && display_is_asleep()) {
         enter_s2();
         have = PP_S2;
-    } else if (have == PP_S2 && !s_audio_idle) {
-        s_audio_idle = audio_capture_idle(true);   // a beep was playing when S2 began: try again
+    } else if (have == PP_S2) {
+        if (!s_audio_idle) s_audio_idle = audio_capture_idle(true);   // a beep was playing when S2 began: try again
+        if (!s_s2_live && want == PP_S2 && display_is_asleep()) {
+            s_s2_live = s2_go_live();                                 // the touch wake could not be armed: try again
+        } else if (s_s2_live && !touch_sleep_armed()) {
+            // The touch driver was deleted (read errors) and not yet reopened: no wake source. Keep the dial up until it is armed again.
+            ESP_LOGW(TAG, "touch wake lost: the awake lock is back until the controller is up again");
+            lock_acquire_once();
+            atomic_store(&s_relaxed, false);
+            s_s2_live = false;
+        }
     }
     if (have != s_applied) ESP_LOGI(TAG, "applied %s -> %s", pp_state_name(s_applied), pp_state_name(have));
     s_applied = have;

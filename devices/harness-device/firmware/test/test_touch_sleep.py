@@ -21,12 +21,16 @@ block = re.search(r'// BEGIN battery sleep \(touch\)\n(.*?)// END battery sleep 
 assert block, 'sleep block markers'
 body = '\n'.join(line for line in block[1].split('\n') if not line.startswith('#include'))
 irq = re.search(r'static void touch_irq\(esp_lcd_touch_handle_t tp\)\n\{.*?^\}', source, re.M | re.S)[0]
+wait = re.search(r'static TickType_t touch_wait_ticks\(bool down\)\n\{.*?^\}', source, re.M | re.S)[0]
+# a driver that is deleted and opened again re-arms the pin (open_touch), and the flag-off build has empty stand-ins
+assert re.search(r'atomic_store\(&controller_ready, true\);\n    touch_sleep_reopened\(\);', source)
+assert 'static inline bool touch_sleep_parked(void) { return false; }' in block[1] and 'static inline void touch_sleep_reopened(void) {}' in block[1]
 assert 'touch_sleep_irq();' in irq
 # the touch task calls the helper after every sample without a contact, and the pin lock is made in touch_init
 assert re.search(r'#ifdef DEVICE_BATTERY_SLEEP\n        if \(!down && touch_sleep_unconfirmed\(\)\)[^\n]*\n            continue;\n#endif', source)
 assert 's_pin_lock = xSemaphoreCreateMutex();' in re.search(r'void touch_init\(void\)\n\{.*?^\}', source, re.M | re.S)[0]
 # flag off: the block is an empty inline and the image has none of it
-assert re.search(r'#else\nstatic inline void touch_sleep_irq\(void\) \{\}\n#endif', block[1])
+assert re.search(r'#else\nstatic inline void touch_sleep_irq\(void\) \{\}\n(?:static inline [^\n]*\n)*#endif', block[1])
 assert 'gpio_wakeup_enable' not in source.split('// END battery sleep (touch)')[1]
 
 code = r'''
@@ -44,7 +48,11 @@ code = r'''
 #define pdMS_TO_TICKS(x) (x)
 #define pdFALSE 0
 #define portYIELD_FROM_ISR() (yields++)
-typedef int esp_err_t; typedef int gpio_num_t; typedef int BaseType_t;
+typedef int esp_err_t; typedef int gpio_num_t; typedef int BaseType_t; typedef unsigned TickType_t;
+static atomic_bool controller_ready = true;
+typedef enum { PP_POLLER_TOUCH } pp_poller_t;
+static bool relaxed_now;   /* the sleep policy's answer: the 1 s S2 poll when relaxed, 20 ms otherwise */
+static unsigned power_sleep_wait_ms(pp_poller_t who, unsigned awake_ms) { (void)who; return relaxed_now && awake_ms < 1000 ? 1000 : awake_ms; }
 typedef void *SemaphoreHandle_t; typedef void *esp_lcd_touch_handle_t; typedef void *TaskHandle_t;
 typedef enum { TOUCH_NONE, TOUCH_CST9217, TOUCH_CST816S } touch_chip_t;
 typedef struct { touch_chip_t touch; } board_t;
@@ -72,7 +80,7 @@ static esp_err_t gpio_wakeup_disable(gpio_num_t g) { assert(g == 11); e("WDIS");
 static int64_t fake_now_us = 777000;
 static int64_t esp_timer_get_time(void) { return fake_now_us; }
 
-''' + body + irq + r'''
+''' + body + irq + wait + r'''
 static esp_err_t gpio_wakeup_enable(gpio_num_t g, int t) {
     assert(g == 11 && t == GPIO_INTR_LOW_LEVEL); last_wake_type = t;
     e(atomic_load(&s_level_wake) ? "WEN(flag-set)" : "WEN(flag-CLEAR)"); return 0;
@@ -89,10 +97,11 @@ int main(void) {
     assert(!ev[0]);                                        // disarming what was never armed touches nothing
     // --- arm ---
     reset();
-    touch_sleep_arm();
+    assert(!touch_sleep_armed());
+    assert(touch_sleep_arm() && touch_sleep_armed());
     assert(!strcmp(ev, "WEN(flag-set) GPWAKE+ IEN "));     // the flag was already set when the pin became a level source
     assert(atomic_load(&s_level_wake) && !atomic_load(&s_irq_hit) && !atomic_load(&s_parked));
-    ev[0] = 0; touch_sleep_arm(); assert(!ev[0]);          // twice is once
+    ev[0] = 0; assert(touch_sleep_arm()); assert(!ev[0]);  // twice is once, and still "armed"
     // --- the first level hit switches the interrupt off, and stamps the time for the wake-to-frame log ---
     assert(touch_sleep_take_isr_us() == 0);
     touch_irq(NULL);
@@ -135,7 +144,32 @@ int main(void) {
     ev[0] = 0; touch_irq(NULL); assert(!ev[0]);
     // --- a dial without the CST9217 is left alone ---
     reset(); the_board.touch = TOUCH_CST816S;
-    touch_sleep_arm(); assert(!ev[0] && !atomic_load(&s_level_wake));
+    assert(!touch_sleep_arm() && !ev[0] && !atomic_load(&s_level_wake));
+    // --- the controller is not up (its driver was deleted): nothing is armed and the answer says so ---
+    reset(); atomic_store(&controller_ready, false);
+    assert(!touch_sleep_arm() && !ev[0] && !atomic_load(&s_level_wake) && !touch_sleep_armed());
+    atomic_store(&controller_ready, true);
+    { SemaphoreHandle_t keep = s_pin_lock; s_pin_lock = NULL; assert(!touch_sleep_arm() && !ev[0]); s_pin_lock = keep; }   // no pin lock: no wake
+    // --- armed, then the driver is deleted and reopened: armed() follows the controller, and the reopen arms the pin again ---
+    reset();
+    assert(touch_sleep_arm()); ev[0] = 0;
+    atomic_store(&controller_ready, false); assert(!touch_sleep_armed());
+    atomic_store(&controller_ready, true);
+    atomic_store(&s_irq_hit, true); atomic_store(&s_parked, true);
+    touch_sleep_reopened();
+    assert(!strcmp(ev, "WEN(flag-set) GPWAKE+ IEN ") && touch_sleep_armed() && !atomic_load(&s_irq_hit) && !atomic_load(&s_parked));
+    touch_sleep_disarm(); ev[0] = 0;
+    touch_sleep_reopened(); assert(!ev[0]);                  // a reopen while unarmed changes nothing
+    // --- the touch poll: 4 ms in a contact, 20 ms idle, the relaxed 1 s poll in S2, and 200 ms while the wake is parked ---
+    reset();
+    assert(touch_wait_ticks(true) == 4 && touch_wait_ticks(false) == 20);
+    relaxed_now = true;
+    assert(touch_wait_ticks(true) == 4 && touch_wait_ticks(false) == 1000);
+    assert(touch_sleep_arm() && touch_wait_ticks(false) == 1000);
+    atomic_store(&s_parked, true);
+    assert(touch_wait_ticks(false) == 200 && touch_wait_ticks(true) == 4);
+    atomic_store(&s_parked, false);
+    relaxed_now = false; assert(touch_wait_ticks(false) == 20); touch_sleep_disarm();
     puts("touch sleep: arm order, first-hit interrupt switch-off, 3 re-reads 5 ms apart, park and re-arm, disarm order, other chips PASS");
     return 0;
 }
