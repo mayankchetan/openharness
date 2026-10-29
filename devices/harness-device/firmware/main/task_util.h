@@ -30,7 +30,20 @@ BaseType_t task_create_psram(TaskFunction_t fn, const char *name, uint32_t stack
 // The three tasks that save to NVS or read config but never map flash: habitat_actions (config_save_*), cable_session
 // (send_hello, config_load_voicelang) and voice_send (config_load_voicelang). NVS writes from a PSRAM stack passed the
 // XiP probe (1,000 write+commit on each core, and against esp_ota_end; diet2-r1-results.md section 1). cable_link is NOT
-// in this group: its reader runs fw_update_* -> esp_ota_*, and esp_ota_begin asserts on a PSRAM stack.
+// in this group: with OTA on, its reader runs fw_update_* -> esp_ota_*, and esp_ota_begin asserts on a PSRAM stack.
 #ifndef TASK_STACK_PSRAM_FLASH_OPS
 #define TASK_STACK_PSRAM_FLASH_OPS 1
+#endif
+// The cable_link reader (6,144 B). Its only flash user was the OTA path, so once that is compiled out (DEVICE_NO_OTA, plan
+// C17) it is a task like the three above: it reads the USB port and parses frames; the one NVS call it reaches is a read
+// (config_load_voicelang via ui_settings_read). Never on with OTA: cable_link.c turns that into a compile error.
+#ifndef TASK_STACK_PSRAM_READER
+#ifdef DEVICE_NO_OTA
+#define TASK_STACK_PSRAM_READER 1
+#else
+#define TASK_STACK_PSRAM_READER 0
+#endif
+#endif
+#if TASK_STACK_PSRAM_READER && !defined(DEVICE_NO_OTA)
+#error "TASK_STACK_PSRAM_READER needs DEVICE_NO_OTA: the OTA path (esp_ota_*) asserts on a PSRAM stack"
 #endif

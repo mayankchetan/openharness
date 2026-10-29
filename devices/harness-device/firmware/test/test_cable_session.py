@@ -43,6 +43,7 @@ code = r'''
 #define ESP_LOGE(...) ((void)0)
 #define ESP_OK 0
 #define pdPASS 1
+typedef int BaseType_t;
 #define pdMS_TO_TICKS(ms) (ms)
 typedef int esp_err_t;
 typedef void (*cable_frame_cb)(uint8_t,uint8_t,const uint8_t *,size_t,void *);
@@ -129,8 +130,9 @@ static int xTaskCreate(void (*task)(void *),const char *name,int stack,void *arg
     owner = 1; s_cb(1,1,NULL,0,s_ctx); owner = 0; new_task_ready = true;
     return pdPASS;
 }
-// cable_session's stack is in PSRAM on the board (TASK_STACK_PSRAM_FLASH_OPS); the host stub counts the call and
-// takes the same path as xTaskCreate, so the failure schedule below is the same in both settings.
+// cable_session's stack is in PSRAM on the board (TASK_STACK_PSRAM_FLASH_OPS), and so is the reader's when the OTA path is
+// compiled out (TASK_STACK_PSRAM_READER); the host stub counts the call and takes the same path as xTaskCreate, so the
+// failure schedule below is the same in every setting.
 #define tskNO_AFFINITY (-1)
 static unsigned psram_creates;
 __attribute__((unused)) static int task_create_psram(void (*task)(void *),const char *name,int stack,void *arg,int priority,void *handle,int core) {
@@ -158,16 +160,12 @@ int main(void) {
     }
     attempts=fail_at=0;
     assert(psram_calls>=1); // s_agents comes from ram_psram_calloc, not from the internal-first calloc
-#if TASK_STACK_PSRAM_FLASH_OPS
-    assert(psram_creates==4);   // the handshake task: failure points 4-7 reach the create
-#else
-    assert(psram_creates==0);
-#endif
+    // the handshake task (TASK_STACK_PSRAM_FLASH_OPS): failure points 4-7 reach the create; the reader (TASK_STACK_PSRAM_READER): point 7
+    assert(psram_creates==4*TASK_STACK_PSRAM_FLASH_OPS+TASK_STACK_PSRAM_READER);
     now = 91; assert(cable_client_start());
     assert(new_task_ready && s_running && connected && s_session && notifications==1);
-#if TASK_STACK_PSRAM_FLASH_OPS
-    assert(psram_creates==5);   // and the clean start made its handshake task through task_create_psram too
-#endif
+    // and the clean start made its handshake task and its reader through task_create_psram too
+    assert(psram_creates==5*TASK_STACK_PSRAM_FLASH_OPS+2*TASK_STACK_PSRAM_READER);
     unsigned calls=attempts;assert(cable_client_start());assert(calls==attempts&&notifications==1);
     s_tick = counted_tick; owner = 1;
     if (!setjmp(loop_done)) reader_task(NULL);
@@ -188,8 +186,10 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix='harness-cable-session-') as folder:
     out = Path(folder)
     (out / 'session.c').write_text(code)
-    for psram_stack in (1, 0):   # TASK_STACK_PSRAM_FLASH_OPS on (the default) and off
+    # (TASK_STACK_PSRAM_FLASH_OPS, TASK_STACK_PSRAM_READER): the defaults of a product build (OTA off), the OTA build, and the reader alone
+    for psram_stack, psram_reader in ((1, 1), (1, 0), (0, 0), (0, 1)):
         subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g', f'-DTASK_STACK_PSRAM_FLASH_OPS={psram_stack}',
+                        f'-DTASK_STACK_PSRAM_READER={psram_reader}',
                         '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
                         str(out / 'session.c'), '-o', str(out / 'session')], check=True)
         subprocess.run([str(out / 'session')], check=True)

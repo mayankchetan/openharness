@@ -28,6 +28,10 @@ static const char *TAG = "fw";
 #define VERIFY_CHUNK 1024
 #define TRANSFER_IDLE_US INT64_C(15000000)
 
+// DEVICE_NO_OTA (plan C17, the product default): the dial is updated over USB. Of this file only fw_mark_valid() is built
+// (it confirms a freshly OTA-installed image so the bootloader does not roll it back; flash code, no RAM). The update state
+// machine below, its statics and the verify buffer drop out; cable_client.c answers `fw.offer` with `fw.error`.
+#ifndef DEVICE_NO_OTA
 static const esp_partition_t *s_target;
 static esp_ota_handle_t       s_handle;
 static bool                   s_active;
@@ -58,6 +62,7 @@ static void fail(const char *why)
 }
 
 bool fw_update_active(void) { return s_active; }
+#endif   // !DEVICE_NO_OTA
 
 void fw_mark_valid(void)
 {
@@ -75,6 +80,7 @@ void fw_mark_valid(void)
     ESP_LOGW(TAG, "image confirmed (%s) — rollback cancelled", me ? me->version : "?");
 }
 
+#ifndef DEVICE_NO_OTA
 void fw_update_abort(const char *why)
 {
     if (!s_active) return;
@@ -229,3 +235,4 @@ void fw_update_slice(const uint8_t *data, size_t len)
     vTaskDelay(pdMS_TO_TICKS(400));
     esp_restart();
 }
+#endif   // !DEVICE_NO_OTA

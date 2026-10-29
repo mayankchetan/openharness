@@ -177,11 +177,24 @@ endif()
 #   HT_RIGHT_SIZE          HT_RUNS 28 and HT_CELL_COLS_MAX 272 instead of 40 and 480; on by default in the Focus-only
 #                          build, off with DEVICE_ALL_SKINS (the skins draw more runs)   (ui/habitat/terminal.h)
 #   HT_DRAWBUF_PSRAM       1 = one of the two panel draw buffers in PSRAM, sent by DMA from there; 0 = both internal   (ui/habitat/display_habitat.c)
-foreach(psram_switch HT_RENDER_DATA_PSRAM TASK_STACK_PSRAM_FLASH_OPS HT_RIGHT_SIZE HT_DRAWBUF_PSRAM)
+#   TASK_STACK_PSRAM_READER   the cable_link reader stack in PSRAM; follows DEVICE_NO_OTA (below), an error without it   (task_util.h)
+foreach(psram_switch HT_RENDER_DATA_PSRAM TASK_STACK_PSRAM_FLASH_OPS HT_RIGHT_SIZE HT_DRAWBUF_PSRAM TASK_STACK_PSRAM_READER)
     if(DEFINED ${psram_switch})
         target_compile_definitions(${COMPONENT_LIB} PRIVATE ${psram_switch}=${${psram_switch}})
     endif()
 endforeach()
+
+# OTA off (RAM diet 2, plan C17; user decision 2026-10-28: dials are always updated over USB, and the daemon already runs with
+# CABLE_FW_DISABLE=true). ON unless -DDEVICE_NO_OTA=0. fw_update.c keeps only fw_mark_valid() (the rollback guard: flash code, no
+# RAM); the offer, slice, tick and abort code and its statics drop out, `fw.offer` is answered with `fw.error` "not supported",
+# and the cable_link reader, whose only flash user was the OTA path, moves to a PSRAM stack (TASK_STACK_PSRAM_READER). The decoder
+# `s_decoder` stays: it decodes every frame type. The partition table is unchanged (two app slots, otadata).
+if(NOT DEFINED DEVICE_NO_OTA)
+    set(DEVICE_NO_OTA ON)
+endif()
+if(DEVICE_NO_OTA)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_NO_OTA=1)
+endif()
 
 # Sleep/wake and boot profile (sleep_profile.c): -DDEVICE_SLEEP_PROFILE=1, default OFF. 500 sleep/wake cycles 20 s after boot
 # through the real sleep and touch-wake paths, with wake and sleep times, free internal memory and a summary every 50, and

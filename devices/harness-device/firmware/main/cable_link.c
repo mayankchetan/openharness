@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "last_words.h"
+#include "task_util.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -74,10 +75,13 @@ static const char *TAG = "cable";
 // eventually does — JSON parsing, LVGL updates, and during a firmware install esp_ota_write() plus a
 // SHA-256 over the image read back out of flash.
 //
-// 6 KiB. NOT a measured number yet: ram_telemetry_periodic() reports this task's high-water mark by name
-// ("cable_link"), and that is the figure to tune from. The failure this margin is against is real — the
-// OTA path on this board's own earlier firmware overflowed an 8 KiB stack and shipped devices that could
-// not update themselves.
+// 6 KiB. Measured: the lowest free stack seen in a 20-minute run was 3,224 B ("ram: HWM ... cable_link=", with the OTA
+// path built in, which has the deepest call chain). The failure this margin is against is real — the OTA path on this
+// board's own earlier firmware overflowed an 8 KiB stack and shipped devices that could not update themselves.
+//
+// With the OTA path compiled out (DEVICE_NO_OTA, the product default) the reader's stack is in PSRAM (TASK_STACK_PSRAM_READER,
+// task_util.h): the only flash call it reaches is an NVS read. With OTA built in it must stay internal, because esp_ota_begin
+// asserts on a PSRAM stack.
 #define READER_STACK 6144
 
 // One log line's worth of formatted text. Anything longer is truncated rather than split: a log line is
@@ -224,7 +228,12 @@ bool cable_link_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx)
     // The new task may receive a welcome before xTaskCreate returns. Make the
     // installed driver/send path visible before that callback can run.
     s_running = true;
-    if (xTaskCreate(reader_task, "cable_link", READER_STACK, NULL, 5, NULL) != pdPASS) {
+#if TASK_STACK_PSRAM_READER
+    const BaseType_t reader_ok = task_create_psram(reader_task, "cable_link", READER_STACK, NULL, 5, NULL, tskNO_AFFINITY);
+#else
+    const BaseType_t reader_ok = xTaskCreate(reader_task, "cable_link", READER_STACK, NULL, 5, NULL);
+#endif
+    if (reader_ok != pdPASS) {
         s_running = false;
         ESP_LOGE(TAG, "reader task create failed — no link to the daemon");
         usb_serial_jtag_driver_uninstall();

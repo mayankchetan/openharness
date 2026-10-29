@@ -1122,7 +1122,9 @@ static void session_down(const char *why)
     // Restore the plain console FIRST: whatever follows this point should be readable by a developer with
     // a serial monitor, which is exactly the situation a dropped session puts them in.
     cable_link_set_log_framing(false);
+#ifndef DEVICE_NO_OTA
     fw_update_abort("session down");   // no more slices are coming; the running image is untouched
+#endif
     pet_forget_transfer();             // likewise a half-received pet pack; the held packs stay
     ESP_LOGI(TAG, "session down (%s)", why);
     ui_set_connected(false);
@@ -1563,12 +1565,18 @@ static void handle_message(const cJSON *root)
     if (strcmp(t, "visit.state") == 0) { ui_visit_state(p); return; }
     if (strcmp(t, "toast") == 0) { ui_cable_toast(str_of(p, "text")); return; }
     if (strcmp(t, "fw.offer") == 0) {
+#ifdef DEVICE_NO_OTA
+        // OTA is compiled out (fw_update.c): this dial is updated over USB. A clean refusal, so a daemon that offers
+        // is not left waiting for an accept.
+        cable_client_fw_error("not supported");
+#else
         const cJSON *size = cJSON_GetObjectItemCaseSensitive(p, "size");
         // Declining is silence: fw_update_offer() answers with `fw.accept` only when it is willing, and
         // the daemon offers again on the next hello.
         fw_update_offer(str_of(p, "version"),
                         cJSON_IsNumber(size) && size->valuedouble == size->valueint ? size->valueint : 0,
                         str_of(p, "sha256"));
+#endif
         return;
     }
 
@@ -1596,12 +1604,17 @@ static void on_frame(uint8_t version, uint8_t type, const uint8_t *payload, size
     if (type != CABLE_TYPE_JSON) { s_unknown++; return; }   // no firmware slices, no pet packs in the gallery
 #endif
     if (type == CABLE_TYPE_FW) {
+#ifdef DEVICE_NO_OTA
+        s_unknown++;   // this build takes no firmware slices (an offer is refused above); counted like any kind it has no case for
+        return;
+#else
         s_last_rx_us = esp_timer_get_time();
         // Straight to flash, on this task. That is deliberate and it is what the credit window is sized
         // against: the write blocks the reader for ~16 ms per slice, and nothing drains the port
         // meanwhile — see docs/specs/cable-protocol.md §7.
         fw_update_slice(payload, payload_len);
         return;
+#endif
     }
     if (type == CABLE_TYPE_PET) {
         s_last_rx_us = esp_timer_get_time();
@@ -1635,7 +1648,9 @@ static void on_frame(uint8_t version, uint8_t type, const uint8_t *payload, size
 static void session_tick(void *ctx)
 {
     (void)ctx;
+#ifndef DEVICE_NO_OTA
     fw_update_tick();
+#endif
 #ifdef HARNESS_DEBUG_COMMANDS
     cable_debug_tick();
 #endif
