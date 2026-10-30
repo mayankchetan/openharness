@@ -18,9 +18,15 @@ int main(void)
     assert(!strcmp(vox_reply_gate(true, "voice.question"), "sent_reply"));
     assert(!strcmp(vox_reply_gate(true, ""), "sent_reply"));
     assert(!strcmp(vox_reply_gate(true, NULL), "sent_reply"));
+    /* stop gate, review build: after the capture delay and before audio_client_stop(). The review flag was set right after the start. */
+    assert(vox_stop_gate(true, true, true) == NULL);                    /* flag set, still recording: stop it as planned */
+    assert(!strcmp(vox_stop_gate(true, false, true), "review_not_set"));  /* the flag is gone: voice.end would send the words */
+    assert(!strcmp(vox_stop_gate(true, false, false), "review_not_set"));
+    assert(!strcmp(vox_stop_gate(true, true, false), "ended_early")); /* a tap or BOOT press ended the turn inside the 4 s */
     /* plain build: no gate */
     assert(vox_start_gate(false, false, false) == NULL);
     assert(vox_reply_gate(false, "voice.transcript") == NULL);
+    assert(vox_stop_gate(false, false, false) == NULL);
     printf("test_vox_gate: PASS\n");
     return 0;
 }

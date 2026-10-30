@@ -42,7 +42,7 @@ static const char *TAG = "vox";
 static SemaphoreHandle_t s_sent_sem, s_reply_sem;
 static volatile int64_t s_t_sent, s_t_reply;
 static volatile bool s_got_reply, s_reply_is_error;
-static char s_reply_type[16], s_reply_msg[72];
+static char s_reply_type[24], s_reply_msg[72];   // 24: "voice.transcript" is 16 characters
 static struct {
     uint32_t produced, delivered, ring_peak, read_max_us, send_max_us, rx_overruns, blocks, encode_us_max;
     unsigned hwm_capture, hwm_send;
@@ -154,16 +154,19 @@ static void vox_task(void *arg)
         xSemaphoreTake(s_reply_sem, 0);
         s_got_reply = false; s_t_reply = 0; s_t_sent = 0;
         memset(&s_sent, 0, sizeof s_sent);
+        // Review run: the flag goes up right after the start, not after the 4 s capture. A tap or BOOT press inside those 4 s ends the
+        // turn on its own, and a turn that ends without the flag sends its transcript to the agent.
         audio_client_start_cable(agent[0] ? agent : NULL, VOICE_CMD_NONE);
+        if (review) audio_client_request_review();
         vTaskDelay(pdMS_TO_TICKS(VOX_CAPTURE_MS));
-        if (review) {
-            audio_client_request_review();
-            if (!audio_client_review_requested()) {   // without the flag, voice.end would send the words
-                audio_client_abort();
-                ESP_LOGE(TAG, "VOX ABORT reason=review_not_set n=%d (utterance aborted, nothing sent)", n);
-                n_done = n;
-                break;
-            }
+        // The flag is still checked after the delay, and the turn must still be ours to stop. If either fails, abort the turn instead of ending it.
+        const char *stop_why = vox_stop_gate(VOX_REVIEW != 0, audio_client_review_requested(), audio_client_recording());
+        if (stop_why) {
+            audio_client_abort();
+            ESP_LOGE(TAG, "VOX ABORT reason=%s n=%d (utterance aborted)", stop_why, n);
+            n_done = n;
+            if (strcmp(stop_why, "ended_early")) break;   // review_not_set: the run stops. ended_early: a tap or a capture fault ended this one, go on
+            continue;
         }
         int64_t t_fin = esp_timer_get_time();
         audio_client_stop();
