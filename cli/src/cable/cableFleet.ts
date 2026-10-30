@@ -7,12 +7,16 @@ import type { DebugFailure, DebugTouch, DoneResult, ShotResult } from './dialDeb
 import { DialVerdicts } from './dialPortVerdicts.js'
 import { findDialPorts, portInUse, SerialLink, type DialPort } from './serial.js'
 import { isUsbConsoleUser } from './usbConsoleUser.js'
+import { NetSlot, type NetDialConnection } from './netDials.js'
 import type { CableSession, CableHost, CablePort, DialStatus, PortOpener } from './cableSession.js'
 import type { DialLog } from './dialLog.js'
 
 type Surface = Pick<CableSession, keyof CableSession>
 type SessionConstructor = new (host: CableHost, log: DialLog, open: PortOpener) => Surface
 type Entry = { port: DialPort; session: Surface; attached: boolean; status: DialStatus; faults: number[] }
+/** A dial that came in over Wi-Fi: keyed by its MAC, with the slot its session takes connections from. `rejected`: the link
+ *  just closed said it was another dial, so the session's attach for it is ignored. */
+type NetEntry = Entry & { slot: NetSlot; rejected?: boolean }
 type OpenPort = (path: string, onData: (chunk: Buffer) => void, onClosed: (why: string) => void) => Promise<CablePort>
 /** A known Harness Pro that has been silent since its port opened: being reset, reset and looked at again, or the person told. */
 type Unanswered = { port: DialPort; stage: 'resetting' | 'reset' | 'told' }
@@ -84,6 +88,10 @@ export function testDialDiscovery(path: string | undefined, read: (file: string)
 
 export class CableFleet {
   private entries = new Map<string, Entry>()
+  /** Dials over Wi-Fi (netDials.ts), by MAC. Apart from `entries` so that a dial's USB and Wi-Fi entries never share a key. */
+  private netEntries = new Map<string, NetEntry>()
+  /** Set by `stop`: a connection offered after it is closed, not adopted. Wi-Fi dials do not wait for `start` (CABLE_DISABLE only leaves the serial port alone). */
+  private netClosed = false
   private timer?: ReturnType<typeof setInterval>
   private scanTask?: Promise<void>
   private stopped = true
@@ -120,12 +128,16 @@ export class CableFleet {
     this.reset = options.reset ?? resetBoard
   }
 
-  get isConnected(): boolean { return [...this.entries.values()].some(e => e.session.isConnected) }
+  /** Every dial's entry, on USB and over Wi-Fi. */
+  private allEntries(): Entry[] { return [...this.entries.values(), ...this.netEntries.values()] }
+
+  get isConnected(): boolean { return this.allEntries().some(e => e.session.isConnected) }
 
   /** Is any connected dial asking for `turn.stats`? */
-  wantsStats(): boolean { return [...this.entries.values()].some(e => e.session.wantsStats) }
+  wantsStats(): boolean { return this.allEntries().some(e => e.session.wantsStats) }
 
   start(): void {
+    this.netClosed = false
     if (!this.stopped) return
     this.stopped = false
     this.timer = setInterval(() => void this.scan(), this.options.intervalMs ?? 2000)
@@ -134,11 +146,14 @@ export class CableFleet {
 
   async stop(): Promise<void> {
     this.stopped = true
+    this.netClosed = true
     clearInterval(this.timer)
     this.timer = undefined
     await this.scanTask
     await Promise.allSettled([...this.entries.values()].map(e => e.session.stop()))
     this.entries.clear()
+    await Promise.allSettled([...this.netEntries.values()].map(e => { e.slot.close('daemon stopping'); return e.session.stop() }))
+    this.netEntries.clear()
   }
 
   private scan(): Promise<void> {
@@ -231,9 +246,11 @@ export class CableFleet {
         this.verdicts.markDial(port, entry.status.board)
         this.unanswered.delete(id)
         if (entry.attached) return
-        const first = ![...this.entries.values()].some(e => e.attached)
+        const first = !this.allEntries().some(e => e.attached)
         entry.attached = true
         if (first) this.host.onDialAttached?.()
+        // On the cable, a dial that is also live over Wi-Fi leaves Wi-Fi: USB wins.
+        this.supersedeNet(entry.status.mac)
       }
       const gone = () => {
         if (!entry.attached) return
@@ -241,7 +258,7 @@ export class CableFleet {
         // The session's own {attached:false} carried the mac and the last settings; keep them so the
         // pane can show this device's rows read-only instead of dropping it off the desk.
         entry.status = { ...entry.status, id, attached: false, fw: undefined, updating: undefined }
-        if (![...this.entries.values()].some(e => e.attached)) this.host.onDialGone?.()
+        if (!this.allEntries().some(e => e.attached)) this.host.onDialGone?.()
         this.publish()
       }
       // Bind ordinary host methods to the shared desktop. Only connection life
@@ -341,6 +358,101 @@ export class CableFleet {
     })(), 0)
   }
 
+  // ── dials over Wi-Fi ───────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * A dial proved its key over Wi-Fi (netDials.ts). Its entry is made on first sight and kept: a reconnect goes to the
+   * same session, whose opener takes the connection (NetSlot). Keyed by MAC, apart from the USB entries.
+   */
+  adoptNet(connection: NetDialConnection): void {
+    if (this.netClosed) { connection.socket.destroy(); return }
+    const id = connection.id.toUpperCase()
+    const entry = this.netEntries.get(id) ?? this.openNet(id)
+    entry.rejected = false
+    entry.slot.offer(connection)
+  }
+
+  /** A dial's key was removed: its link closes, its session ends and its row leaves the desk. */
+  forgetNet(id: string): void {
+    const key = id.toUpperCase()
+    const entry = this.netEntries.get(key)
+    if (!entry) return
+    this.netEntries.delete(key)
+    entry.slot.close('its key was removed')
+    void entry.session.stop().finally(() => this.publish())
+  }
+
+  private openNet(id: string): NetEntry {
+    const slot = new NetSlot(id)
+    const port: DialPort = { path: `wifi:${id}`, vendorId: 0, productId: 0, serialNumber: id }
+    const entry: NetEntry = { port, slot, attached: false, status: { attached: false }, session: undefined!, faults: [] }
+    const attached = () => {
+      if (entry.attached || entry.rejected) return
+      const first = !this.allEntries().some(e => e.attached)
+      entry.attached = true
+      if (first) this.host.onDialAttached?.()
+    }
+    const gone = () => {
+      if (!entry.attached) return
+      entry.attached = false
+      entry.status = { ...entry.status, id, attached: false, fw: undefined, updating: undefined }
+      if (!this.allEntries().some(e => e.attached)) this.host.onDialGone?.()
+      this.publish()
+    }
+    // As the USB entries' host: lifecycle and status are aggregated, everything else is the shared desktop's. What differs
+    // is the fault: a link is dropped, never a port, and a foreign-port verdict (a USB board that is not a dial) has no meaning.
+    const host = new Proxy(this.host, {
+      get: (target, key) => {
+        if (key === 'onDialAttached') return attached
+        if (key === 'onDialGone') return gone
+        if (key === 'onForeignPort') return (path: string, why: string) => {
+          this.host.log(`cable: ${path} is not a Harness dial (${why}) — closing its Wi-Fi link [wifi ${id}]`)
+          setTimeout(() => slot.drop('not a dial'), 0)
+        }
+        if (key === 'onDialStatus') return (status: DialStatus) => {
+          // The key it proved is this MAC's. A dial that holds it and says it is another must not take that dial's row.
+          if (status.mac && status.mac.toUpperCase() !== id) {
+            this.host.log(`cable: the dial that proved the key of ${id} says it is ${status.mac}, not ${id} — closing its Wi-Fi link [wifi ${id}]`)
+            entry.rejected = true
+            setTimeout(() => slot.drop('identity mismatch'), 0)
+            return
+          }
+          entry.status = { ...status, id }
+          this.publish()
+        }
+        if (key === 'log') return (line: string) => this.host.log(`${line} [wifi ${id}]`)
+        if (key === 'onFault') return (error: unknown, hostile?: boolean) => this.netFaulted(id, entry, error, hostile === true)
+        const value = Reflect.get(target, key, target)
+        if (typeof value !== 'function') return value
+        if (this.options.faults?.has(`dial.${id}`)) return () => { throw new Error(`injected fault: dial.${id}`) }
+        return value.bind(target)
+      },
+    })
+    entry.session = new this.Session(host, new this.Log(join(this.logs, logFolder(id))), slot.opener)
+    this.netEntries.set(id, entry)
+    entry.session.start()
+    return entry
+  }
+
+  /** One Wi-Fi dial's session failed, or its far end floods the link: that link is dropped (the dial reconnects, and the entry stays), the others go on. */
+  private netFaulted(id: string, entry: NetEntry, error: unknown, hostile: boolean): void {
+    const now = Date.now()
+    entry.faults = [...entry.faults.filter(at => now - at < 60_000), now]
+    if (!hostile && entry.faults.length < FAULTS_TO_DROP) return
+    this.host.log(`cable: wifi:${id} dropped (${hostile ? 'flooding the link' : `${entry.faults.length} faults in a minute`}: ${String(error instanceof Error ? error.message : error)}) — this dial alone; it may connect again [wifi ${id}]`)
+    entry.faults = []
+    // Off this call stack: the session is in the middle of the call that failed.
+    setTimeout(() => entry.slot.drop(hostile ? 'flooding the link' : 'faults'), 0)
+  }
+
+  /** A dial attached on USB: if the same MAC is live over Wi-Fi, that link closes. USB wins, so the reboot window of a mode switch leaves one session. */
+  private supersedeNet(mac: string | undefined): void {
+    const net = mac ? this.netEntries.get(mac.toUpperCase()) : undefined
+    if (!net || !(net.attached || net.slot.port)) return
+    this.host.log(`cable: ${mac} is on USB — closing its Wi-Fi link (superseded by USB) [wifi ${net.port.serialNumber}]`)
+    net.slot.drop('superseded by USB')
+  }
+
   /**
    * One dial's session failed, or its far end is flooding the port. The dial alone is dropped — its
    * session stopped and its port let go — once it has failed five times in a minute, or at once for a
@@ -380,11 +492,20 @@ export class CableFleet {
     this.host.onDialStatus?.({ ...(primary ?? { attached: false }), devices })
   }
 
-  /** Every device this computer can see, newest reading. Ordered as they were discovered. */
+  /**
+   * Every device this computer can see, newest reading. Ordered as they were discovered. One row per device: a dial that is
+   * known on USB and over Wi-Fi shows once, the attached one if either is, the cable's if both or neither are.
+   */
   devices(): DialStatus[] {
     const told = [...this.unanswered].filter(([, held]) => held.stage === 'told')
       .map(([id]): DialStatus => ({ id, attached: false, board: 'pro', problem: UNANSWERED_NOTICE }))
-    return [...[...this.entries.values()].map(e => e.status).filter(s => s.attached || s.settings), ...told]
+    const rows = new Map<string, DialStatus>()
+    for (const status of this.allEntries().map(e => e.status).filter(s => s.attached || s.settings)) {
+      const key = (status.mac ?? status.id ?? '').toUpperCase()
+      const have = rows.get(key)
+      if (!have || (!have.attached && status.attached)) rows.set(key, status)
+    }
+    return [...rows.values(), ...told]
   }
 
   /**
@@ -393,7 +514,7 @@ export class CableFleet {
    * set on, and sending it to the whole desk would change a robot nobody was looking at.
    */
   async setSettings(id: string, patch: Parameters<Surface['setSettings']>[0]): Promise<{ ok: boolean; error?: string }> {
-    const entry = this.entries.get(id)
+    const entry = this.entries.get(id) ?? this.netEntries.get(id.toUpperCase())
     if (!entry) return { ok: false, error: 'That device is not plugged into this computer.' }
     if (!entry.status.attached) return { ok: false, error: 'That device is unplugged.' }
     try {
@@ -414,8 +535,8 @@ export class CableFleet {
     const none = (message: string): DebugFailure => ({ ok: false, kind: 'no_dial', message })
     const wanted = dial?.trim().toUpperCase()
     const entry = wanted
-      ? [...this.entries].find(([id, e]) => id.toUpperCase() === wanted || e.status.mac?.toUpperCase() === wanted)?.[1]
-      : [...this.entries.values()].find(e => e.attached && e.session.isConnected)
+      ? [...this.entries, ...this.netEntries].find(([id, e]) => id.toUpperCase() === wanted || e.status.mac?.toUpperCase() === wanted)?.[1]
+      : this.allEntries().find(e => e.attached && e.session.isConnected)
     if (!entry) return none(wanted ? `No dial "${dial!.trim().slice(0, 64)}" is on this computer.` : 'No dial is connected.')
     if (!entry.attached || !entry.session.isConnected) return none(`The dial "${dial}" is not connected.`)
     try {
@@ -427,7 +548,7 @@ export class CableFleet {
   }
 
   private async send<K extends keyof Surface>(name: K, ...args: Surface[K] extends (...args: infer A) => unknown ? A : never): Promise<void> {
-    await Promise.allSettled([...this.entries.values()].map(async entry => {
+    await Promise.allSettled(this.allEntries().map(async entry => {
       try {
         const method = entry.session[name] as (...args: unknown[]) => Promise<void>
         await method.apply(entry.session, args)
@@ -458,7 +579,7 @@ export class CableFleet {
    * order), the same choice `publish` makes for the flat status; a pull-down per dial is a later concern.
    */
   petDial(): ReturnType<Surface['petDial']> {
-    for (const entry of this.entries.values()) {
+    for (const entry of this.allEntries()) {
       if (entry.attached && entry.session.petDial) return entry.session.petDial()
     }
     return { supported: false, held: [], sending: null, errors: {} }
