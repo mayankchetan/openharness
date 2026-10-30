@@ -336,6 +336,8 @@ bool cable_client_voice_adpcm(const uint8_t *payload, size_t len);
 // True when the voice.begin just sent opened an ADPCM turn (the codec is chosen once per turn, in voice.begin, and the sender
 // asks afterwards so both always agree).
 bool cable_client_voice_is_adpcm(void);
+// The turn tag the voice.begin just sent (it counts up at every voice.begin and wraps at 256). The sender writes it into every block.
+uint8_t cable_client_voice_tag(void);
 // The codec rule right now (cable_voice_adpcm_chosen): the daemon's welcome has voice.adpcm and this transport may use it.
 bool cable_client_voice_adpcm_wanted(void);
 

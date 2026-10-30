@@ -7,10 +7,12 @@
 //
 // One payload is a 5-byte prefix and one WAV IMA ADPCM mono block, little-endian throughout:
 //
-//   seq:u16 | n:u16 | flags:u8 | pred:s16 | index:u8 | reserved:u8 | nibbles (low first, 8 samples per 4 bytes)
+//   seq:u16 | n:u16 | flags:u8 | pred:s16 | index:u8 | tag:u8 | nibbles (low first, 8 samples per 4 bytes)
 //
 // A full block is n = 505 samples in 261 bytes. Every block restarts from its own `pred` and `index`, so one lost frame
-// costs 505 samples and nothing after them. The codec knows nothing about which transport carried the frame: the dial
+// costs 505 samples and nothing after them. `tag` is the WAV block's reserved byte: the dial's counter for
+// the turn (`voice.begin.tag`), so a block that arrives late, in the next turn, is told apart and dropped. (ffmpeg 4.2.x reads that
+// byte as the high byte of the step index, so a tool that makes a WAV file from a block clears it.) The codec knows nothing about which transport carried the frame: the dial
 // chooses ADPCM, and the daemon decodes it on USB, Wi-Fi or a later phone link alike.
 
 export const ADPCM_BLOCK_SAMPLES = 505
@@ -18,6 +20,12 @@ export const ADPCM_BLOCK_PCM_BYTES = ADPCM_BLOCK_SAMPLES * 2
 export const ADPCM_PREFIX_BYTES = 5
 export const ADPCM_INDEX_MAX = 88
 export const ADPCM_FLAG_LAST = 1
+/**
+ * The most blocks one gap may stand for (32, about 1 s). A block further ahead than this is refused and does not move the
+ * expected sequence number. Frame fields come from a port, a LAN socket or a phone: a forged `seq` must not be able to ask
+ * for tens of megabytes of silence, nor make every real block after it look like a repeat.
+ */
+export const ADPCM_MAX_GAP_BLOCKS = 32
 
 // The standard IMA/DVI step table (89 entries) and index adjustment.
 const STEP = Uint16Array.from([
@@ -41,11 +49,15 @@ export function adpcmPayloadLength(n: number): number {
 }
 
 export type AdpcmReject = 'short' | 'count' | 'length' | 'index'
+/** Why the assembler refused a block: it did not decode, it is not this turn's (`tag`), or it is too far ahead (`gap`). */
+export type AdpcmPushReject = AdpcmReject | 'tag' | 'gap'
 
 export interface AdpcmBlock {
   seq: number
   n: number
   flags: number
+  /** The turn tag: the reserved byte of the WAV block. */
+  tag: number
   /** The step index at sample 0, as the header says. */
   indexStart: number
   /** The step index after the last real code (not after the zero pad nibbles). */
@@ -75,8 +87,8 @@ function advance(state: [number, number], code: number): void {
 /**
  * Decode one type-0x07 payload. Never throws and never reads outside `payload`: everything arriving on a port is
  * untrusted. A payload is refused when it is shorter than the prefix, when `n` is 0 or above 505, when its length is not
- * 5 + 4 + 4 * ceil((n - 1) / 8), or when the step index is above 88. The reserved byte and the high `flags` bits are not
- * checked.
+ * 5 + 4 + 4 * ceil((n - 1) / 8), or when the step index is above 88. The tag byte (any value) and the high `flags` bits are
+ * not checked here; the assembler holds a block to its turn's tag.
  */
 export function decodeAdpcmBlock(payload: Uint8Array): AdpcmDecode {
   if (payload.length < ADPCM_PREFIX_BYTES) return { ok: false, reason: 'short' }
@@ -94,23 +106,25 @@ export function decodeAdpcmBlock(payload: Uint8Array): AdpcmDecode {
   }
   return {
     ok: true,
-    block: { seq: payload[0] | (payload[1] << 8), n, flags: payload[4], indexStart: payload[7], indexEnd: state[1], samples },
+    block: { seq: payload[0] | (payload[1] << 8), n, flags: payload[4], tag: payload[8], indexStart: payload[7], indexEnd: state[1], samples },
   }
 }
 
 /**
  * Encode 1..505 samples starting from step index `indexIn`; `indexOut` is where the NEXT block starts from. The dial's
  * firmware does the real encoding — the daemon never sends voice — so this exists to build test turns and to show the vectors
- * are met from both sides. Throws RangeError on a bad argument rather than writing a block no receiver would accept.
+ * are met from both sides. `tag` is the turn tag, written to the reserved byte. Throws RangeError on a bad argument rather
+ * than writing a block no receiver would accept.
  */
 export function encodeAdpcmBlock(
-  pcm: ArrayLike<number>, indexIn: number, seq: number, flags: number,
+  pcm: ArrayLike<number>, indexIn: number, seq: number, flags: number, tag = 0,
 ): { payload: Uint8Array; indexOut: number } {
   const n = pcm.length
   if (!adpcmPayloadLength(n)) throw new RangeError(`ADPCM block of ${n} samples; 1..${ADPCM_BLOCK_SAMPLES} allowed`)
   if (!Number.isInteger(indexIn) || indexIn < 0 || indexIn > ADPCM_INDEX_MAX) throw new RangeError(`ADPCM step index ${indexIn}`)
   if (!Number.isInteger(seq) || seq < 0 || seq > 0xffff) throw new RangeError(`ADPCM seq ${seq}`)
   if (!Number.isInteger(flags) || flags < 0 || flags > 0xff) throw new RangeError(`ADPCM flags ${flags}`)
+  if (!Number.isInteger(tag) || tag < 0 || tag > 0xff) throw new RangeError(`ADPCM tag ${tag}`)
 
   const out = new Uint8Array(adpcmPayloadLength(n)) // zero-filled: the pad nibbles of a short block are zero
   out[0] = seq & 0xff
@@ -121,6 +135,7 @@ export function encodeAdpcmBlock(
   out[5] = pcm[0] & 0xff
   out[6] = (pcm[0] >> 8) & 0xff
   out[7] = indexIn
+  out[8] = tag
   const state: [number, number] = [pcm[0], indexIn]
   for (let i = 1; i < n; i++) {
     let step = STEP[state[1]]
@@ -142,22 +157,31 @@ export type AdpcmPush =
   /** `gap` blocks (each 505 samples of silence) were lost just before this one; `pcm` is this block's own samples. */
   | { kind: 'block'; gap: number; pcm: Buffer; block: AdpcmBlock }
   | { kind: 'duplicate' }
-  | { kind: 'bad'; reason: AdpcmReject }
+  | { kind: 'bad'; reason: AdpcmPushReject }
 
 /**
  * The receiving end of one voice turn: blocks in, PCM out, in order and at the right length. A missing sequence number is
  * reported as a gap and a block whose number is not newer than the last is dropped. Zero samples for a gap are NOT
- * made here — a corrupt `seq` could ask for 32 MB — so the caller checks its length cap against `gap` first and then
- * calls `silence(gap)`. Start a turn with a fresh instance or `reset()`.
+ * made here: the caller checks its length cap against `gap` first and then calls `silence(gap)`. Start a turn with a fresh
+ * instance or `reset()`.
+ *
+ * Two checks keep a forged or late block from costing the turn. A block whose gap from the expected number is more than
+ * ADPCM_MAX_GAP_BLOCKS is counted `bad` and dropped WITHOUT moving the expected number, so the real blocks that follow it
+ * are still taken. When the turn has a `tag`, a block with another tag (a late block of the turn before) is counted `bad`
+ * and dropped; that check comes first. No tag, no tag check.
  */
 export class AdpcmAssembler {
   private next = 0
+  private tag: number | undefined
   readonly stats = { blocks: 0, gapBlocks: 0, duplicates: 0, bad: 0 }
+
+  constructor(tag?: number) { this.tag = tag }
 
   get nextSeq(): number { return this.next }
 
-  reset(): void {
+  reset(tag?: number): void {
     this.next = 0
+    this.tag = tag
     this.stats.blocks = this.stats.gapBlocks = this.stats.duplicates = this.stats.bad = 0
   }
 
@@ -165,8 +189,10 @@ export class AdpcmAssembler {
     const r = decodeAdpcmBlock(payload)
     if (!r.ok) { this.stats.bad++; return { kind: 'bad', reason: r.reason } }
     const { block } = r
+    if (this.tag !== undefined && block.tag !== this.tag) { this.stats.bad++; return { kind: 'bad', reason: 'tag' } }
     if (block.seq < this.next) { this.stats.duplicates++; return { kind: 'duplicate' } }
     const gap = block.seq - this.next
+    if (gap > ADPCM_MAX_GAP_BLOCKS) { this.stats.bad++; return { kind: 'bad', reason: 'gap' } }
     this.next = block.seq + 1
     this.stats.blocks++
     this.stats.gapBlocks += gap
@@ -179,9 +205,9 @@ export class AdpcmAssembler {
   static silence(blocks: number): Buffer { return Buffer.alloc(blocks * ADPCM_BLOCK_PCM_BYTES) }
 }
 
-/** Every block that arrived, in arrival order, as the PCM a transcriber should get. For tests and tools. */
-export function assembleAdpcm(payloads: Iterable<Uint8Array>): Buffer {
-  const assembler = new AdpcmAssembler()
+/** Every block that arrived, in arrival order, as the PCM a transcriber should get. `tag` is the turn's tag, if it named one. For tests and tools. */
+export function assembleAdpcm(payloads: Iterable<Uint8Array>, tag?: number): Buffer {
+  const assembler = new AdpcmAssembler(tag)
   const parts: Buffer[] = []
   for (const payload of payloads) {
     const r = assembler.push(payload)

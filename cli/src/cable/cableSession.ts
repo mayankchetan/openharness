@@ -1685,7 +1685,10 @@ export class CableSession {
           // Anything but the exact word is PCM, as it always was. A dial ahead of this daemon that names a codec this
           // side does not know sends frames of a type it does not carry into the turn: they are logged as unknown and
           // the turn ends as "Didn't catch that", never as garbage heard as speech.
-          ...(str('codec') === 'adpcm' ? { adpcm: new AdpcmAssembler() } : {}),
+          // `tag` is the turn's counter, which every block must carry. Absent, or not a byte: no tag check (an older dial).
+          ...(str('codec') === 'adpcm'
+            ? { adpcm: new AdpcmAssembler(Number.isInteger(msg.tag) && (msg.tag as number) >= 0 && (msg.tag as number) <= 0xff ? (msg.tag as number) : undefined) }
+            : {}),
           form,
           carry,
           question,
@@ -2098,8 +2101,9 @@ export class CableSession {
 
   /**
    * One ADPCM block of the open turn. Decoded here, before the transcriber sees anything, so the host gets the same PCM
-   * it always got. A lost block (a gap in `seq`) becomes silence of the same length so the timing and the length cap stay
-   * true; a repeated or late one is dropped; a malformed one is counted and does not end the turn.
+   * it always got. A lost block (a gap in `seq`, up to ADPCM_MAX_GAP_BLOCKS) becomes silence of the same length so the timing
+   * and the length cap stay true; a repeated or late one is dropped; a malformed one, one of another turn (its `tag`) and one
+   * too far ahead are counted and dropped, and none of them ends the turn.
    */
   private onAdpcm(payload: Uint8Array): void {
     const turn = this.voice
@@ -2110,8 +2114,8 @@ export class CableSession {
     if (r.kind === 'duplicate') { counts.repeated++; return }
     counts.blocks++
     counts.lost += r.gap
-    // Decoded bytes, silence included, count against the cap — and the cap is checked BEFORE the silence is built, so a
-    // corrupt `seq` cannot ask this process for tens of megabytes of zeros.
+    // Decoded bytes, silence included, count against the cap — and the cap is checked BEFORE the silence is built. A gap is at
+    // most ADPCM_MAX_GAP_BLOCKS (the assembler refuses more), so a forged `seq` cannot ask for more than about 32 KB of zeros.
     turn.bytes += r.gap * ADPCM_BLOCK_PCM_BYTES + r.pcm.length
     if (turn.bytes > VOICE_MAX_BYTES) {
       this.dropVoiceOverCap()

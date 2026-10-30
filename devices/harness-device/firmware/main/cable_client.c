@@ -326,6 +326,7 @@ static void handle_companion_celebrate(const cJSON *p)
 // The only link today is the USB cable. The Wi-Fi mode (W11) turns this into a question to the transport.
 static bool voice_transport_is_usb(void) { return true; }
 static atomic_bool s_voice_adpcm;   // set by cable_client_voice_begin for the turn it opened
+static atomic_uchar s_voice_tag;    // the turn tag: counts up by one at every voice.begin and wraps; the sender reads it back
 #endif
 
 static void send_hello(void)
@@ -650,7 +651,12 @@ bool cable_client_voice_begin(const char *agent_id, const char *cmd, const char 
 #if CABLE_VOICE_ADPCM_BUILT
     // PCM is the absence of the field. The sender reads the answer back with cable_client_voice_is_adpcm().
     const bool adpcm = cable_client_voice_adpcm_wanted();
-    if (adpcm) msg_string(&root, "codec", "adpcm");
+    const uint8_t tag = (uint8_t)(atomic_fetch_add(&s_voice_tag, 1) + 1);
+    // The tag rides with the codec: every block of this turn carries it, and the daemon drops a block that does not.
+    if (adpcm) {
+        msg_string(&root, "codec", "adpcm");
+        msg_number(&root, "tag", tag);
+    }
     atomic_store(&s_voice_adpcm, adpcm);
 #endif
     char upload_id[24];
@@ -763,6 +769,7 @@ bool cable_client_voice_adpcm(const uint8_t *payload, size_t len)
     return cable_link_send(CABLE_TYPE_ADPCM, payload, len);
 }
 bool cable_client_voice_is_adpcm(void) { return atomic_load(&s_voice_adpcm); }
+uint8_t cable_client_voice_tag(void) { return (uint8_t)atomic_load(&s_voice_tag); }
 bool cable_client_voice_adpcm_wanted(void)
 {
     return cable_voice_adpcm_chosen(atomic_load(&s_features), voice_transport_is_usb(), DEVICE_VOICE_ADPCM_USB != 0);

@@ -100,12 +100,15 @@ static bool audio_stream_pcm(const uint8_t *bytes,size_t n) {
     sent_bytes+=(unsigned)n;return true;
 }
 __attribute__((unused)) static bool audio_stream_is_adpcm(void) {return CABLE_VOICE_ADPCM_BUILT;}
+#define TURN_TAG 0x5C
+__attribute__((unused)) static uint8_t audio_stream_voice_tag(void) {return TURN_TAG;}   // the tag voice.begin carried for this turn
 // The ADPCM sink: every block is decoded and checked against the capture pattern (byte g of the turn is (uint8_t)g).
 __attribute__((unused)) static bool audio_stream_adpcm(const uint8_t *bytes,size_t n) {
     assert(begins==1&&mode!=BEGIN_FAIL&&n&&n<=ADPCM_PAYLOAD_MAX);pcm_calls++;
     adpcm_info_t info;int16_t out[ADPCM_BLOCK_SAMPLES];
     int got=adpcm_decode_block(bytes,n,out,ADPCM_BLOCK_SAMPLES,&info);
     assert(got>0&&info.seq==adpcm_seq&&!adpcm_seen_last);
+    assert(info.tag==TURN_TAG&&bytes[8]==TURN_TAG);   // every block of the turn names the turn
     assert(adpcm_seq==0||info.index_start==adpcm_last_index_end);   // the step index is carried across blocks
     adpcm_last_index_end=info.index_end;
     unsigned first=adpcm_samples;   // sample 0 of a block is verbatim: the order and the cut points are exact

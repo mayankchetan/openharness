@@ -4132,10 +4132,10 @@ describe('swarm cards', () => {
 describe('ADPCM voice turns', () => {
   const gapVectors = readFileSync(new URL('./vectors/adpcm_ima.txt', import.meta.url), 'utf8').split('\n')
     .map((line) => line.replace(/\r$/, '').split('\t')).filter((f) => f[0] === 'gap')
-    .map((f) => ({ name: f[1], payloads: f[2].split(',').map((p) => Buffer.from(p, 'hex')), pcm: Buffer.from(f[3], 'hex') }))
+    .map((f) => ({ name: f[1], payloads: f[2].split(',').map((p) => Buffer.from(p, 'hex')), pcm: Buffer.from(f[3], 'hex'), tag: f[4] === '-' ? undefined : +f[4] }))
   const ADPCM_HELLO = { t: 'hello', product: 'harness', mac: 'aa:bb', fw: '0.1.0', proto: 4, voiceCodec: 'adpcm-v1' }
   const wave = Int16Array.from({ length: 505 }, (_, i) => Math.round(9000 * Math.sin(i / 6)))
-  const block = (seq: number, n = 505, flags = 0) => encodeAdpcmBlock(wave.subarray(0, n), 0, seq, flags).payload
+  const block = (seq: number, n = 505, flags = 0, tag = 0) => encodeAdpcmBlock(wave.subarray(0, n), 0, seq, flags, tag).payload
 
   async function adpcmTurn(over: Partial<CableHost> = {}, hello: Record<string, unknown> = ADPCM_HELLO) {
     const lines: string[] = []
@@ -4183,10 +4183,10 @@ describe('ADPCM voice turns', () => {
     } finally { await session.stop() }
   })
 
-  it.each(gapVectors)('turn $name: the transcriber gets the vector PCM', async ({ payloads, pcm }) => {
+  it.each(gapVectors)('turn $name: the transcriber gets the vector PCM', async ({ payloads, pcm, tag }) => {
     const { session, port, transcribe, host } = await adpcmTurn()
     try {
-      begin(port)
+      begin(port, tag === undefined ? { codec: 'adpcm' } : { codec: 'adpcm', tag })
       payloads.forEach((p) => port.adpcm(p))
       port.say({ t: 'voice.end', uploadId: 'u1' })
       await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalled())
@@ -4319,17 +4319,66 @@ describe('ADPCM voice turns', () => {
     } finally { await session.stop() }
   }, 30_000)
 
-  it('a corrupt sequence number cannot make the daemon build a huge run of silence', async () => {
-    const { session, port, transcribe, lines } = await adpcmTurn()
+  it('a forged sequence number cannot make the daemon build silence, and does not cost the real blocks', async () => {
+    const { session, port, transcribe, host, lines } = await adpcmTurn()
     try {
       begin(port)
       port.adpcm(block(0))
-      port.adpcm(block(60_000))   // 59,999 lost blocks would be 60 MB of zeros
+      port.adpcm(block(60_000))   // 59,999 lost blocks would be 60 MB of zeros, and every real block after it a "repeat"
+      port.adpcm(block(34))       // 33 lost blocks: one over the limit (32 is about 1 s)
+      port.adpcm(block(1))
+      port.adpcm(block(2 + 32))   // 32 lost blocks: the most a turn forgives
       port.say({ t: 'voice.end', uploadId: 'u1' })
-      await vi.waitFor(() => expect(port.sent.some((m) => m.t === 'voice.error')).toBe(true))
-      expect(lines).toContain('cable: voice over the length cap, dropped')
-      expect(transcribe).not.toHaveBeenCalled()
+      await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalled())
+      expect(transcribe.mock.calls[0]![0].length).toBe((2 + 32 + 1) * ADPCM_BLOCK_PCM_BYTES)
+      expect(lines).toContain('cable: voice 1.1s (35 KB) → stt · adpcm 3 blocks, 32 lost, 0 repeated, 2 bad')
+      expect(lines).not.toContain('cable: voice over the length cap, dropped')
     } finally { await session.stop() }
+  })
+
+  describe('turn tag', () => {
+    it('drops a late block of the turn before, counts it bad, and keeps the turn', async () => {
+      const { session, port, transcribe, host, lines } = await adpcmTurn()
+      try {
+        begin(port, { codec: 'adpcm', tag: 1 })
+        port.adpcm(block(0, 505, 0, 1))
+        port.say({ t: 'voice.end', uploadId: 'u1' })
+        await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalledTimes(1))
+        begin(port, { codec: 'adpcm', tag: 2 })
+        port.adpcm(block(0, 505, 0, 1))   // the previous turn's block 0, late
+        port.adpcm(block(0, 505, 0, 2))
+        port.adpcm(block(1, 505, 0, 1))
+        port.adpcm(block(1, 505, 0, 2))
+        port.say({ t: 'voice.end', uploadId: 'u1' })
+        await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalledTimes(2))
+        expect(transcribe.mock.calls[1]![0].length).toBe(2 * ADPCM_BLOCK_PCM_BYTES)
+        expect(lines).toContain('cable: voice 0.1s (2 KB) → stt · adpcm 2 blocks, 0 lost, 0 repeated, 2 bad')
+      } finally { await session.stop() }
+    })
+
+    it('a voice.begin without a tag turns the check off, and so does one with a tag that is not a byte', async () => {
+      for (const extra of [{ codec: 'adpcm' }, { codec: 'adpcm', tag: 300 }, { codec: 'adpcm', tag: 'x' }, { codec: 'adpcm', tag: 1.5 }, { codec: 'adpcm', tag: -1 }]) {
+        const { session, port, transcribe, host } = await adpcmTurn()
+        try {
+          begin(port, extra)
+          port.adpcm(block(0, 505, 0, 9)); port.adpcm(block(1, 505, 0, 200))
+          port.say({ t: 'voice.end', uploadId: 'u1' })
+          await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalled())
+          expect(transcribe.mock.calls[0]![0].length, JSON.stringify(extra)).toBe(2 * ADPCM_BLOCK_PCM_BYTES)
+        } finally { await session.stop() }
+      }
+    })
+
+    it('tag 0 is a tag when the begin names it', async () => {
+      const { session, port, transcribe, host } = await adpcmTurn()
+      try {
+        begin(port, { codec: 'adpcm', tag: 0 })
+        port.adpcm(block(0, 505, 0, 1)); port.adpcm(block(0, 505, 0, 0))
+        port.say({ t: 'voice.end', uploadId: 'u1' })
+        await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalled())
+        expect(transcribe.mock.calls[0]![0].length).toBe(ADPCM_BLOCK_PCM_BYTES)
+      } finally { await session.stop() }
+    })
   })
 
   it('totals the audio counters in the link line, only once ADPCM has been used', async () => {

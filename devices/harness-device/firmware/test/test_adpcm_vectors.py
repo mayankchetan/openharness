@@ -68,8 +68,8 @@ def test_every_line_parses_and_obeys_the_block_length_rule():
         assert kind in seen, f"unknown line kind {kind}"
         seen[kind] += 1
         if kind == "enc":
-            assert len(f) == 8, f[:2]
-            _, name, pcm, index_in, seq, flags, payload, index_out = f
+            assert len(f) == 9, f[:2]
+            _, name, pcm, index_in, seq, flags, payload, index_out, tag = f
             n = len(pcm_from_hex(pcm))
             assert 1 <= n <= 505, name
             assert len(bytes.fromhex(payload)) == expected_payload_len(n), name
@@ -79,7 +79,8 @@ def test_every_line_parses_and_obeys_the_block_length_rule():
             assert int.from_bytes(raw[0:2], "little") == int(seq), name
             assert int.from_bytes(raw[2:4], "little") == n, name
             assert raw[4] == int(flags), name
-            assert raw[7] == int(index_in) and raw[8] == 0, name
+            assert raw[7] == int(index_in) and raw[8] == int(tag), name   # the reserved byte is the turn tag
+            assert 0 <= int(tag) <= 255, name
         elif kind == "dec":
             assert len(f) == 4, f[:2]
             raw = bytes.fromhex(f[2])
@@ -88,7 +89,8 @@ def test_every_line_parses_and_obeys_the_block_length_rule():
             assert len(raw) == expected_payload_len(n), f[1]
             assert len(pcm_from_hex(f[3])) == n, f[1]
         elif kind == "gap":
-            assert len(f) == 4, f[:2]
+            assert len(f) == 5, f[:2]
+            assert f[4] == "-" or 0 <= int(f[4]) <= 255, f[1]   # the turn's tag, or "-" for a turn without one
             payloads = f[2].split(",")
             for p in payloads:
                 raw = bytes.fromhex(p)
@@ -110,7 +112,8 @@ def test_spec_case_list_is_covered():
     for required in ("silence", "dc_step", "square_fullscale", "sine_1khz", "chirp", "noise_xorshift",
                      "n1", "n2", "n3", "n9", "n504", "n505", "odd_n", "even_n", "index_pinned_0",
                      "index_pinned_88", "pred_plus_32767", "pred_minus_32767",
-                     "gap_1", "gap_2", "gap_50", "duplicate_seq",
+                     "gap_1", "gap_2", "gap_32_accepted", "gap_33_rejected", "gap_50_rejected", "gap_forged_first",
+                     "duplicate_seq", "tag_match_gap", "tag_late_block_dropped", "tag_zero_named", "tag_off_ignores_tags",
                      "bad_n0", "bad_n_506", "bad_index_89", "bad_length_long", "bad_length_short"):
         assert required in names, required
 
@@ -131,7 +134,7 @@ def test_generators_encoder_reproduces_every_enc_line_and_carries_the_index():
     for f in read_lines(FW_VECTORS):
         if f[0] != "enc":
             continue
-        payload, index_out = gen.encode_block(pcm_from_hex(f[2]), int(f[3]), int(f[4]), int(f[5]))
+        payload, index_out = gen.encode_block(pcm_from_hex(f[2]), int(f[3]), int(f[4]), int(f[5]), int(f[8]))
         assert payload.hex() == f[6], f[1]
         assert index_out == int(f[7]), f[1]
 
@@ -141,7 +144,25 @@ def test_generators_gap_assembler_reproduces_every_gap_line():
     for f in read_lines(FW_VECTORS):
         if f[0] == "gap":
             blocks = [bytes.fromhex(p) for p in f[2].split(",")]
-            assert gen.assemble(blocks) == pcm_from_hex(f[3]), f[1]
+            assert gen.assemble(blocks, None if f[4] == "-" else int(f[4])) == pcm_from_hex(f[3]), f[1]
+
+
+def test_gap_limit_and_turn_tag_vectors_say_what_the_spec_says():
+    """Section 2.4: a gap of 32 blocks is filled, 33 is refused without moving `next`; a tagged turn drops other tags."""
+    gen = load_generator()
+    assert gen.MAX_GAP_BLOCKS == 32
+    gaps = {f[1]: f for f in read_lines(FW_VECTORS) if f[0] == "gap"}
+    samples = {name: len(pcm_from_hex(f[3])) for name, f in gaps.items()}
+    assert samples["gap_32_accepted"] == 34 * 505          # block 0, 32 silent blocks, block 33
+    assert samples["gap_33_rejected"] == 3 * 505           # block 0, then the real 1 and 2: the forged 34 moved nothing
+    assert samples["gap_50_rejected"] == 505               # only block 0: 51 and 52 are both over the limit
+    assert samples["gap_forged_first"] == 2 * 505          # the forged first block is refused, 0 and 1 follow
+    assert samples["tag_late_block_dropped"] == 3 * 505
+    assert samples["tag_zero_named"] == 3 * 505            # block 0, one silent block (the tagged-out 1), block 2
+    assert gaps["tag_zero_named"][4] == "0" and gaps["tag_off_ignores_tags"][4] == "-"
+    # The tags in the payloads of the tagged turns are what the vector says they are.
+    late = [bytes.fromhex(p) for p in gaps["tag_late_block_dropped"][2].split(",")]
+    assert [b[8] for b in late] == [5, 4, 5, 5]
 
 
 def test_generators_decoder_rejects_every_bad_line():

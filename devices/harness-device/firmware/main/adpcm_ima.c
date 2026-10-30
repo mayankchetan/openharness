@@ -37,7 +37,7 @@ static void advance(int *pred, int *index, unsigned code)
     *index = i;
 }
 
-int adpcm_encode_block(const int16_t *pcm, unsigned n, uint8_t *index_io, uint16_t seq, uint8_t flags,
+int adpcm_encode_block(const int16_t *pcm, unsigned n, uint8_t *index_io, uint16_t seq, uint8_t flags, uint8_t tag,
                        uint8_t *out, size_t out_cap)
 {
     if (!pcm || !index_io || !out) return ADPCM_ERR_ARG;
@@ -54,7 +54,7 @@ int adpcm_encode_block(const int16_t *pcm, unsigned n, uint8_t *index_io, uint16
     out[5] = (uint8_t)((uint16_t)pcm[0] & 0xFF);
     out[6] = (uint8_t)((uint16_t)pcm[0] >> 8);
     out[7] = *index_io;
-    out[8] = 0;
+    out[8] = tag;
     for (size_t i = 9; i < len; i++) out[i] = 0;   // the zero pad nibbles of a short block come from here
 
     int pred = pcm[0], index = *index_io;
@@ -96,6 +96,7 @@ int adpcm_decode_block(const uint8_t *payload, size_t len, int16_t *pcm, size_t 
         info->seq = (uint16_t)((unsigned)payload[0] | (unsigned)payload[1] << 8);
         info->n = (uint16_t)n;
         info->flags = payload[4];
+        info->tag = payload[8];
         info->index_start = payload[7];
         info->index_end = (uint8_t)index;
     }

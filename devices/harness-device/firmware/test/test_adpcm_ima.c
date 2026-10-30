@@ -78,7 +78,8 @@ static void run_enc(char **f)
     uint8_t *expect = hex_bytes(f[6], fend(f[6]), &expect_len);
     uint8_t out[ADPCM_PAYLOAD_MAX + 1];            // one guard byte past the largest payload
     memset(out, 0xEE, sizeof out);
-    int got = adpcm_encode_block(pcm, (unsigned)count, &index, (uint16_t)atoi(f[4]), (uint8_t)atoi(f[5]), out, ADPCM_PAYLOAD_MAX);
+    const uint8_t tag = (uint8_t)atoi(f[8]);
+    int got = adpcm_encode_block(pcm, (unsigned)count, &index, (uint16_t)atoi(f[4]), (uint8_t)atoi(f[5]), tag, out, ADPCM_PAYLOAD_MAX);
     CHECK(got == (int)expect_len, "enc %s: length %d, want %zu", f[1], got, expect_len);
     if (got == (int)expect_len) {
         CHECK(memcmp(out, expect, expect_len) == 0, "enc %s: bytes differ", f[1]);
@@ -91,6 +92,7 @@ static void run_enc(char **f)
     int n = adpcm_decode_block(expect, expect_len, back, ADPCM_BLOCK_SAMPLES, &info);
     CHECK(n == (int)count && back[0] == pcm[0], "enc %s: decode of the vector gave %d samples", f[1], n);
     CHECK(info.index_end == (uint8_t)atoi(f[7]), "enc %s: decoder ends on index %d, want %s", f[1], info.index_end, f[7]);
+    CHECK(info.tag == tag && expect[8] == tag, "enc %s: tag %u, want %u (the reserved byte of the WAV block)", f[1], info.tag, tag);
     free(pcm);
     free(expect);
 }
@@ -128,6 +130,7 @@ static void run_gap(char **f)
         adpcm_info_t info;
         int n = adpcm_decode_block(payload, len, pcm, ADPCM_BLOCK_SAMPLES, &info);
         CHECK(n > 0 && info.seq == (uint16_t)(payload[0] | payload[1] << 8), "gap %s: block %u refused (%d)", f[1], blocks, n);
+        CHECK(n > 0 && info.tag == payload[8], "gap %s: block %u tag %u, want %u", f[1], blocks, info.tag, payload[8]);
         free(payload);
         blocks++;
         p = comma ? comma + 1 : end;
@@ -171,7 +174,8 @@ static void property_round_trip(void)
         }
         uint8_t index = (uint8_t)(random_word() % (ADPCM_INDEX_MAX + 1)), start = index;
         uint8_t out[ADPCM_PAYLOAD_MAX];
-        int len = adpcm_encode_block(pcm, n, &index, (uint16_t)block, 0, out, sizeof out);
+        const uint8_t tag = (uint8_t)(random_word() >> 24);
+        int len = adpcm_encode_block(pcm, n, &index, (uint16_t)block, 0, tag, out, sizeof out);
         CHECK(len == (int)adpcm_payload_len(n), "round trip: length %d for n=%u", len, n);
         if (len < 0) return;
         adpcm_info_t info;
@@ -179,6 +183,7 @@ static void property_round_trip(void)
         CHECK(got == (int)n && info.n == n && info.seq == (uint16_t)block, "round trip: %d samples, want %u", got, n);
         CHECK(info.index_start == start && info.index_end == index, "round trip: index %u..%u, want %u..%u", info.index_start, info.index_end, start, index);
         CHECK(back[0] == pcm[0], "round trip: the first sample is not lossless");
+        CHECK(info.tag == tag && out[8] == tag, "round trip: tag %u, want %u", info.tag, tag);
         int idx = start;
         for (unsigned i = 1; i < n && got == (int)n; i++) {
             int code = (out[9 + (i - 1) / 2] >> (((i - 1) & 1) * 4)) & 15;
@@ -228,18 +233,32 @@ static void rejects_and_bounds(void)
     uint8_t good[ADPCM_PAYLOAD_MAX];
     int16_t in[ADPCM_BLOCK_SAMPLES] = {0}, small[3] = {7, 7, 7};
     uint8_t index = 0;
-    int len = adpcm_encode_block(in, ADPCM_BLOCK_SAMPLES, &index, 0, 0, good, sizeof good);
+    int len = adpcm_encode_block(in, ADPCM_BLOCK_SAMPLES, &index, 0, 0, 0, good, sizeof good);
     CHECK(len == ADPCM_PAYLOAD_MAX, "full block is %d bytes", len);
     CHECK(adpcm_decode_block(good, (size_t)len, small, 3, NULL) == ADPCM_ERR_CAP && small[0] == 7 && small[2] == 7, "small output buffer");
     // Encoder argument checks: n = 0, n too large, a step index out of range, a buffer one byte short.
     index = 0;
-    CHECK(adpcm_encode_block(in, 0, &index, 0, 0, good, sizeof good) < 0, "encode n=0");
-    CHECK(adpcm_encode_block(in, 506, &index, 0, 0, good, sizeof good) < 0, "encode n=506");
+    CHECK(adpcm_encode_block(in, 0, &index, 0, 0, 0, good, sizeof good) < 0, "encode n=0");
+    CHECK(adpcm_encode_block(in, 506, &index, 0, 0, 0, good, sizeof good) < 0, "encode n=506");
     index = 89;
-    CHECK(adpcm_encode_block(in, 10, &index, 0, 0, good, sizeof good) < 0, "encode index 89");
+    CHECK(adpcm_encode_block(in, 10, &index, 0, 0, 0, good, sizeof good) < 0, "encode index 89");
     index = 0;
-    CHECK(adpcm_encode_block(in, 505, &index, 0, 0, good, ADPCM_PAYLOAD_MAX - 1) < 0, "encode into a short buffer");
-    CHECK(adpcm_encode_block(NULL, 5, &index, 0, 0, good, sizeof good) < 0, "encode NULL pcm");
+    CHECK(adpcm_encode_block(in, 505, &index, 0, 0, 0, good, ADPCM_PAYLOAD_MAX - 1) < 0, "encode into a short buffer");
+    CHECK(adpcm_encode_block(NULL, 5, &index, 0, 0, 0, good, sizeof good) < 0, "encode NULL pcm");
+    // The tag is the reserved byte and only that: the same samples with another tag differ in byte 8 alone, and decode alike.
+    int16_t tone[16] = {0, 900, 1700, 2300, 2600, 2300, 1700, 900, 0, -900, -1700, -2300, -2600, -2300, -1700, -900};
+    uint8_t zero_tag[ADPCM_PAYLOAD_MAX], other_tag[ADPCM_PAYLOAD_MAX];
+    uint8_t i0 = 3, i1 = 3;
+    int l0 = adpcm_encode_block(tone, 16, &i0, 7, 1, 0, zero_tag, sizeof zero_tag);
+    int l1 = adpcm_encode_block(tone, 16, &i1, 7, 1, 0xA5, other_tag, sizeof other_tag);
+    CHECK(l0 == l1 && l0 > 9 && zero_tag[8] == 0 && other_tag[8] == 0xA5 && i0 == i1, "tag: lengths %d %d", l0, l1);
+    other_tag[8] = 0;
+    CHECK(l0 == l1 && memcmp(zero_tag, other_tag, (size_t)l0) == 0, "tag: only byte 8 differs");
+    int16_t a[16], b[16];
+    adpcm_info_t ia, ib;
+    other_tag[8] = 0xA5;
+    CHECK(adpcm_decode_block(zero_tag, (size_t)l0, a, 16, &ia) == 16 && adpcm_decode_block(other_tag, (size_t)l1, b, 16, &ib) == 16 &&
+          memcmp(a, b, sizeof a) == 0 && ia.tag == 0 && ib.tag == 0xA5, "tag: the samples do not depend on it");
     CHECK(adpcm_payload_len(0) == 0 && adpcm_payload_len(506) == 0 && adpcm_payload_len(1) == 9 && adpcm_payload_len(505) == 261 &&
           adpcm_payload_len(2) == 13 && adpcm_payload_len(9) == 13 && adpcm_payload_len(10) == 17, "payload length table");
     CHECK(adpcm_step_size(0) == 7 && adpcm_step_size(88) == 32767 && adpcm_step_size(89) == 0, "step table ends");
@@ -265,11 +284,11 @@ int main(int argc, char **argv)
         size_t len = strlen(line);
         while (len && line[len - 1] == '\r') line[--len] = 0;      // a CRLF checkout reads the same
         if (!len || line[0] == '#') continue;
-        char *field[8];
-        int n = split(line, field, 8);
-        if (n == 8 && !strcmp(field[0], "enc")) { run_enc(field); enc++; }
+        char *field[10];
+        int n = split(line, field, 10);
+        if (n == 9 && !strcmp(field[0], "enc")) { run_enc(field); enc++; }
         else if (n == 4 && !strcmp(field[0], "dec")) { run_dec(field); dec++; }
-        else if (n == 4 && !strcmp(field[0], "gap")) { run_gap(field); gap++; }
+        else if (n == 5 && !strcmp(field[0], "gap")) { run_gap(field); gap++; }
         else if (n == 3 && !strcmp(field[0], "bad")) { run_bad(field); bad++; }
         else { fprintf(stderr, "unreadable vector line: %s (%d fields)\n", field[0], n); failures++; }
     }

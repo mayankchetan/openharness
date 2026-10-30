@@ -62,10 +62,16 @@ function wav(blocks: Buffer[]): Buffer {
   return Buffer.concat([riff, body])
 }
 
-/** payload[5:], zero-padded to the 256-byte block a WAV file requires. */
+/**
+ * payload[5:], zero-padded to the 256-byte block a WAV file requires, with the tag byte (byte 3 of the block) cleared.
+ * ffmpeg 4.2.x reads the block header's step index as 16 bits, so the reserved byte, which the wire carries as the turn tag,
+ * is the HIGH byte of the index to it: a tag other than 0 makes it refuse the block ("step_index[0] = 2307"). A tool that
+ * makes a WAV file from a payload clears the byte; the daemon's own decoder never reads it as part of the index.
+ */
 const wavBlock = (payload: Buffer): Buffer => {
   const out = Buffer.alloc(256)
   payload.subarray(5).copy(out)
+  out[3] = 0
   return out
 }
 

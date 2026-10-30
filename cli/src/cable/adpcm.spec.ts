@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
-  ADPCM_BLOCK_PCM_BYTES, ADPCM_BLOCK_SAMPLES, ADPCM_INDEX_MAX, ADPCM_PREFIX_BYTES, AdpcmAssembler, adpcmPayloadLength,
+  ADPCM_BLOCK_PCM_BYTES, ADPCM_BLOCK_SAMPLES, ADPCM_INDEX_MAX, ADPCM_MAX_GAP_BLOCKS, ADPCM_PREFIX_BYTES, AdpcmAssembler, adpcmPayloadLength,
   adpcmStepSize, assembleAdpcm, decodeAdpcmBlock, encodeAdpcmBlock,
 } from './adpcm.js'
 
@@ -20,9 +20,9 @@ const pcmOf = (text: string): Int16Array => {
 const pcmHex = (buf: Buffer): string => buf.toString('hex')
 
 interface Vectors {
-  enc: { name: string; pcm: Int16Array; indexIn: number; seq: number; flags: number; payload: string; indexOut: number }[]
+  enc: { name: string; pcm: Int16Array; indexIn: number; seq: number; flags: number; payload: string; indexOut: number; tag: number }[]
   dec: { name: string; payload: string; pcm: Int16Array }[]
-  gap: { name: string; payloads: Uint8Array[]; pcm: string }[]
+  gap: { name: string; payloads: Uint8Array[]; pcm: string; turnTag: number | undefined }[]
   bad: { name: string; payload: string }[]
 }
 function load(): Vectors {
@@ -31,9 +31,9 @@ function load(): Vectors {
     const text = line.replace(/\r$/, '')
     if (!text || text.startsWith('#')) continue
     const f = text.split('\t')
-    if (f[0] === 'enc') v.enc.push({ name: f[1], pcm: pcmOf(f[2]), indexIn: +f[3], seq: +f[4], flags: +f[5], payload: f[6], indexOut: +f[7] })
+    if (f[0] === 'enc') v.enc.push({ name: f[1], pcm: pcmOf(f[2]), indexIn: +f[3], seq: +f[4], flags: +f[5], payload: f[6], indexOut: +f[7], tag: +f[8] })
     else if (f[0] === 'dec') v.dec.push({ name: f[1], payload: f[2], pcm: pcmOf(f[3]) })
-    else if (f[0] === 'gap') v.gap.push({ name: f[1], payloads: f[2].split(',').map(hex), pcm: f[3] })
+    else if (f[0] === 'gap') v.gap.push({ name: f[1], payloads: f[2].split(',').map(hex), pcm: f[3], turnTag: f[4] === '-' ? undefined : +f[4] })
     else if (f[0] === 'bad') v.bad.push({ name: f[1], payload: f[2] })
     else throw new Error(`unreadable vector line: ${f[0]}`)
   }
@@ -51,7 +51,7 @@ describe('ADPCM vectors', () => {
 
   describe.each(vectors.enc)('enc $name', (v) => {
     it('encodes to the vector byte for byte and carries the index', () => {
-      const out = encodeAdpcmBlock(v.pcm, v.indexIn, v.seq, v.flags)
+      const out = encodeAdpcmBlock(v.pcm, v.indexIn, v.seq, v.flags, v.tag)
       expect(Buffer.from(out.payload).toString('hex')).toBe(v.payload)
       expect(out.indexOut).toBe(v.indexOut)
     })
@@ -62,7 +62,7 @@ describe('ADPCM vectors', () => {
       expect(r.block.n).toBe(v.pcm.length)
       expect(r.block.samples.length).toBe(v.pcm.length)
       expect(r.block.samples[0]).toBe(v.pcm[0])
-      expect(r.block).toMatchObject({ seq: v.seq, flags: v.flags, indexStart: v.indexIn, indexEnd: v.indexOut })
+      expect(r.block).toMatchObject({ seq: v.seq, flags: v.flags, indexStart: v.indexIn, indexEnd: v.indexOut, tag: v.tag })
     })
   })
 
@@ -76,7 +76,7 @@ describe('ADPCM vectors', () => {
 
   describe.each(vectors.gap)('gap $name', (v) => {
     it('assembles to the vector PCM', () => {
-      expect(pcmHex(assembleAdpcm(v.payloads))).toBe(v.pcm)
+      expect(pcmHex(assembleAdpcm(v.payloads, v.turnTag))).toBe(v.pcm)
     })
   })
 
@@ -216,7 +216,7 @@ describe('AdpcmAssembler', () => {
   })
 
   it('assembling inserts exactly gap x 505 zero samples', () => {
-    for (const gap of [1, 2, 50]) {
+    for (const gap of [1, 2, ADPCM_MAX_GAP_BLOCKS]) {
       const pcm = assembleAdpcm([block(0), block(1 + gap)])
       expect(pcm.length).toBe((1 + gap + 1) * ADPCM_BLOCK_PCM_BYTES)
       const zeros = pcm.subarray(ADPCM_BLOCK_PCM_BYTES, (1 + gap) * ADPCM_BLOCK_PCM_BYTES)
@@ -249,6 +249,81 @@ describe('AdpcmAssembler', () => {
     expect(a.nextSeq).toBe(0)
     expect(a.stats).toEqual({ blocks: 0, gapBlocks: 0, duplicates: 0, bad: 0 })
     expect(a.push(block(0))).toMatchObject({ kind: 'block', gap: 0 })
+  })
+
+  it('refuses a block whose gap is over the limit, counts it bad, and does not move its place', () => {
+    expect(ADPCM_MAX_GAP_BLOCKS).toBe(32)
+    const a = new AdpcmAssembler()
+    a.push(block(0))
+    // A forged sequence number: 32 blocks lost is the most a turn loses in one go (about 1 s); 33 is refused.
+    expect(a.push(block(1 + ADPCM_MAX_GAP_BLOCKS + 1))).toEqual({ kind: 'bad', reason: 'gap' })
+    expect(a.push(block(60_000))).toEqual({ kind: 'bad', reason: 'gap' })
+    expect(a.nextSeq).toBe(1)
+    expect(a.stats).toEqual({ blocks: 1, gapBlocks: 0, duplicates: 0, bad: 2 })
+    // The real blocks that follow are still taken: the forged one did not push `next` past them.
+    expect(a.push(block(1))).toMatchObject({ kind: 'block', gap: 0 })
+    expect(a.push(block(2))).toMatchObject({ kind: 'block', gap: 0 })
+    expect(a.push(block(2 + ADPCM_MAX_GAP_BLOCKS + 1))).toMatchObject({ kind: 'block', gap: ADPCM_MAX_GAP_BLOCKS })
+    expect(a.stats).toEqual({ blocks: 4, gapBlocks: 32, duplicates: 0, bad: 2 })
+  })
+
+  it('the first block of a turn is held to the same gap limit', () => {
+    const a = new AdpcmAssembler()
+    expect(a.push(block(ADPCM_MAX_GAP_BLOCKS + 1))).toEqual({ kind: 'bad', reason: 'gap' })
+    expect(a.push(block(ADPCM_MAX_GAP_BLOCKS))).toMatchObject({ kind: 'block', gap: ADPCM_MAX_GAP_BLOCKS })
+  })
+
+  describe('turn tag', () => {
+    const tagged = (seq: number, tag: number) => encodeAdpcmBlock(sine, 0, seq, 0, tag).payload
+
+    it("drops a block whose tag is not the turn's, counts it bad, and keeps its place", () => {
+      const a = new AdpcmAssembler(7)
+      expect(a.push(tagged(0, 7))).toMatchObject({ kind: 'block', gap: 0 })
+      expect(a.push(tagged(1, 6))).toEqual({ kind: 'bad', reason: 'tag' })   // a late block of the turn before
+      expect(a.push(tagged(1, 8))).toEqual({ kind: 'bad', reason: 'tag' })
+      expect(a.nextSeq).toBe(1)
+      expect(a.push(tagged(1, 7))).toMatchObject({ kind: 'block', gap: 0 })
+      expect(a.stats).toEqual({ blocks: 2, gapBlocks: 0, duplicates: 0, bad: 2 })
+    })
+
+    it('checks the tag before the sequence number: a late block of another turn is bad, not a repeat', () => {
+      const a = new AdpcmAssembler(2)
+      a.push(tagged(0, 2)); a.push(tagged(1, 2))
+      expect(a.push(tagged(0, 1))).toEqual({ kind: 'bad', reason: 'tag' })
+      expect(a.stats.duplicates).toBe(0)
+    })
+
+    it('a turn without a tag takes any tag (an older dial), and tag 0 is a tag when one is named', () => {
+      const off = new AdpcmAssembler()
+      expect(off.push(tagged(0, 200)).kind).toBe('block')
+      expect(off.push(tagged(1, 0)).kind).toBe('block')
+      const zero = new AdpcmAssembler(0)
+      expect(zero.push(tagged(0, 0)).kind).toBe('block')
+      expect(zero.push(tagged(1, 1))).toEqual({ kind: 'bad', reason: 'tag' })
+    })
+
+    it('reset starts a new turn with its own tag, or none', () => {
+      const a = new AdpcmAssembler(3)
+      a.push(tagged(0, 3))
+      a.reset(4)
+      expect(a.push(tagged(0, 3))).toEqual({ kind: 'bad', reason: 'tag' })
+      expect(a.push(tagged(0, 4)).kind).toBe('block')
+      a.reset()
+      expect(a.push(tagged(0, 99)).kind).toBe('block')
+    })
+
+    it("the tag rides in the WAV block's reserved byte and nowhere else", () => {
+      const plain = encodeAdpcmBlock(sine, 0, 5, 1, 0).payload
+      const withTag = encodeAdpcmBlock(sine, 0, 5, 1, 0xa5).payload
+      expect(withTag[8]).toBe(0xa5)
+      expect(Array.from(withTag.subarray(0, 8))).toEqual(Array.from(plain.subarray(0, 8)))
+      expect(Array.from(withTag.subarray(9))).toEqual(Array.from(plain.subarray(9)))
+      const r = decodeAdpcmBlock(withTag), q = decodeAdpcmBlock(plain)
+      expect(r.ok && r.block.tag).toBe(0xa5)
+      expect(r.ok && q.ok && Array.from(r.block.samples)).toEqual(q.ok && Array.from(q.block.samples))   // the samples do not depend on it
+      expect(() => encodeAdpcmBlock(sine, 0, 0, 0, 256)).toThrow(RangeError)
+      expect(() => encodeAdpcmBlock(sine, 0, 0, 0, -1)).toThrow(RangeError)
+    })
   })
 
   it('a short last block decodes to its own length', () => {

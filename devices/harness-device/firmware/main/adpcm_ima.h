@@ -4,7 +4,10 @@
 // scripts/gen_adpcm_vectors.py from docs/specs/cable-wifi-link.md, section 2) are what it is checked against.
 //
 // One payload = a 5-byte prefix (seq u16le, n u16le, flags u8) + one WAV IMA ADPCM mono block:
-//   pred s16le (sample 0, verbatim) | index u8 (0..88) | reserved u8 | nibbles, low first, 8 samples per 4 bytes.
+//   pred s16le (sample 0, verbatim) | index u8 (0..88) | tag u8 | nibbles, low first, 8 samples per 4 bytes.
+// The tag is the WAV block's reserved byte: the sender's per-turn counter (voice.begin.tag), so a block that arrives late, in the next
+// turn, can be told apart. The decoder here reports it and does not use it. ffmpeg 4.2.x reads the byte as the high byte of the
+// step index, so a tool that makes a WAV file from a block clears it.
 // A full block is n = 505 samples in 261 bytes. Every block restarts from its own pred and index, so a lost frame costs
 // 505 samples and nothing more.
 #include <stddef.h>
@@ -30,6 +33,7 @@ typedef struct {
     uint16_t seq;
     uint16_t n;
     uint8_t flags;
+    uint8_t tag;           // the turn tag, as written in the header (the reserved byte of the WAV block)
     uint8_t index_start;   // the step index at sample 0, as written in the header
     uint8_t index_end;     // the step index after the last real code (not after the zero pad nibbles)
 } adpcm_info_t;
@@ -38,9 +42,10 @@ typedef struct {
 size_t adpcm_payload_len(unsigned n);
 
 // Encode n samples (1..505). `*index_io` is the step index to start from and is replaced by the index the NEXT block
-// should start from, so the caller carries it across a turn; start a turn at 0. Writes payload_len(n) bytes and
-// returns that count, or a negative ADPCM_ERR_* (and leaves *index_io alone) on a bad argument.
-int adpcm_encode_block(const int16_t *pcm, unsigned n, uint8_t *index_io, uint16_t seq, uint8_t flags,
+// should start from, so the caller carries it across a turn; start a turn at 0. `tag` is the turn tag (voice.begin.tag), written
+// to the header's reserved byte. Writes payload_len(n) bytes and returns that count, or a negative ADPCM_ERR_* (and leaves
+// *index_io alone) on a bad argument.
+int adpcm_encode_block(const int16_t *pcm, unsigned n, uint8_t *index_io, uint16_t seq, uint8_t flags, uint8_t tag,
                        uint8_t *out, size_t out_cap);
 
 // Decode one payload into pcm (at most pcm_cap samples). Returns n, the number of samples written, or a negative

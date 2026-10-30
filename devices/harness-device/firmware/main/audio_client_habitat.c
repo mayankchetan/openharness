@@ -125,6 +125,7 @@ static void send_adpcm(uint32_t *delivered, uint32_t *send_max_us, uint32_t *enc
         uint8_t out[ADPCM_PAYLOAD_MAX];
     } blk;
     uint8_t index = 0;   // the step index of the next block; a turn starts at 0
+    const uint8_t tag = audio_stream_voice_tag();   // this turn's tag (voice.begin.tag), in every block: a late block cannot join the next turn
     uint16_t seq = 0;    // 0 at voice.begin; 33 minutes of blocks fit in 16 bits, the turn cap is 10
     size_t filled = 0;   // bytes of PCM in blk.pcm
     for (;;) {
@@ -158,7 +159,7 @@ static void send_adpcm(uint32_t *delivered, uint32_t *send_max_us, uint32_t *enc
                                   ? ADPCM_FLAG_LAST
                                   : 0;
         int64_t before = esp_timer_get_time();
-        int len = adpcm_encode_block(blk.pcm, samples, &index, seq, flags, blk.out, sizeof blk.out);
+        int len = adpcm_encode_block(blk.pcm, samples, &index, seq, flags, tag, blk.out, sizeof blk.out);
         uint32_t elapsed = (uint32_t)(esp_timer_get_time() - before);
         if (elapsed > *encode_us_max)
             *encode_us_max = elapsed;

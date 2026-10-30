@@ -52,6 +52,10 @@ bool audio_stream_is_adpcm(void)
 {
     return !atomic_load(&probing) && cable_client_voice_is_adpcm();
 }
+uint8_t audio_stream_voice_tag(void)
+{
+    return cable_client_voice_tag();
+}
 #endif
 void audio_stream_end(void)
 {
