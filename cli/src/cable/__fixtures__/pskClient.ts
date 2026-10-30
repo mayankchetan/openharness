@@ -11,6 +11,8 @@ export interface PskClientOptions {
   ciphers?: string
   minVersion?: tls.SecureVersion
   maxVersion?: tls.SecureVersion
+  /** Offer this session for resumption. */
+  session?: Buffer
   /** Leave the client without a PSK callback (offers no PSK suite). */
   noPsk?: boolean
 }
@@ -29,6 +31,7 @@ export function pskConnect(opts: PskClientOptions): Promise<tls.TLSSocket> {
     // An explicit `ciphers: undefined` keeps the Node default list (a TLS 1.3 client needs its own suites).
     if ('ciphers' in opts) options.ciphers = opts.ciphers
     else options.ciphers = 'ECDHE-PSK-AES128-CBC-SHA256'
+    if (opts.session) options.session = opts.session
     if (!opts.noPsk) options.pskCallback = () => ({ psk: opts.psk, identity: opts.identity })
     const socket = tls.connect(options)
     socket.once('secureConnect', () => {

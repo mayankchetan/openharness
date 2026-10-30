@@ -183,7 +183,7 @@ describe('tlsPsk link', () => {
 
   it('treats a throwing or short-key lookup as an unknown identity', async () => {
     const lookup: PskLookup = (identity) => {
-      if (identity === 'BB') throw new Error(`keystore exploded with ${KEY.toString('hex')}`)
+      if (identity === 'AA:AA:AA:AA:AA:01') throw new Error(`keystore exploded with ${KEY.toString('hex')}`)
       return Buffer.alloc(8, 1)
     }
     const server = createPskServer(lookup, () => {})
@@ -191,7 +191,7 @@ describe('tlsPsk link', () => {
     server.on('tlsClientError', () => {})
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as net.AddressInfo).port
-    for (const identity of ['BB', 'CC']) {
+    for (const identity of ['AA:AA:AA:AA:AA:01', 'AA:AA:AA:AA:AA:02']) {
       const res = await failsWithoutData(pskConnect({ port, identity, psk: Buffer.alloc(8, 1) }))
       expect(res).toEqual({ failed: true, data: 0 })
     }
@@ -242,6 +242,99 @@ describe('tlsPsk link', () => {
     }
     expect(r.clientErrors.length).toBeGreaterThan(0)
   })
+})
+
+describe('tlsPsk hardening', () => {
+  it('rejects an identity that is not a MAC string before the lookup', async () => {
+    const r = await rig()
+    for (const identity of ['', 'BB', 'b8:1f:3f:ca:e5', ID + ':00', 'B8-1F-3F-CA-E5-58', 'G8:1F:3F:CA:E5:58', 'ı8:1F:3F:CA:E5:58', 'b8:1f:3f:ca:e5:58\n']) {
+      const res = await failsWithoutData(pskConnect({ port: r.port, identity, psk: KEY }))
+      expect(res).toEqual({ failed: true, data: 0 })
+    }
+    expect(r.lookup).not.toHaveBeenCalled()
+    expect(r.secure).toHaveLength(0)
+    expect(normalizePskIdentity('b8:1f:3f:ca:e5:58')).toBe(ID)
+  })
+
+  it('records the identity only once the handshake has finished', async () => {
+    const seen: Array<string | undefined> = []
+    const lookup: PskLookup = (identity) => (identity === ID ? KEY : undefined)
+    const server = tls.createServer({ ...pskServerOptions(lookup) }, () => {})
+    servers.push(server)
+    server.on('tlsClientError', (_e, socket) => seen.push(pskIdentityOf(socket)))
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as net.AddressInfo).port
+    // right identity, wrong key: the callback found the identity, the handshake failed, so no identity is recorded
+    await failsWithoutData(pskConnect({ port, identity: ID, psk: randomBytes(PSK_LENGTH) }))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(seen).toEqual([undefined])
+  })
+
+  it('sends no session ticket and does not resume a session', async () => {
+    const r = await rig()
+    const first = track(await pskConnect({ port: r.port, identity: ID, psk: KEY }))
+    first.write('x')
+    await new Promise((resolve) => first.once('data', resolve))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(first.getTLSTicket()).toBeUndefined() // no NewSessionTicket reached the client
+    expect(first.isSessionReused()).toBe(false)
+    // a client that kept the session ID of the first connection finds no cache entry on the second
+    const kept = first.getSession()
+    const second = track(await pskConnect({ port: r.port, identity: ID, psk: KEY, session: kept }))
+    expect(second.isSessionReused()).toBe(false)
+    expect(r.lookup).toHaveBeenCalledTimes(2) // the PSK was checked again
+  })
+
+  it('refuses a client renegotiation', async () => {
+    const r = await rig()
+    const client = track(await pskConnect({ port: r.port, identity: ID, psk: KEY }))
+    const outcome = await new Promise<string>((resolve) => {
+      client.on('error', (e) => resolve(`error: ${e.message}`))
+      client.on('close', () => resolve('closed'))
+      try {
+        client.renegotiate({}, (err) => resolve(err ? `refused: ${err.message}` : 'accepted'))
+      } catch (e) {
+        resolve(`threw: ${(e as Error).message}`)
+      }
+      setTimeout(() => resolve('timeout'), 2000)
+    })
+    expect(outcome).not.toBe('accepted')
+  })
+
+  it('drops a peer that never sends a ClientHello (server, 5 s)', async () => {
+    const r = await rig()
+    const raw = net.connect(r.port, '127.0.0.1')
+    sockets.push(raw)
+    raw.on('error', () => {})
+    const t0 = Date.now()
+    await new Promise<void>((resolve) => raw.once('close', () => resolve()))
+    const ms = Date.now() - t0
+    expect(ms).toBeGreaterThan(4500)
+    expect(ms).toBeLessThan(7000)
+    expect(r.clientErrors.length).toBeGreaterThan(0)
+    expect(r.secure).toHaveLength(0)
+  }, 15000)
+
+  it('drops a wrapped socket that never sends a ClientHello (5 s)', async () => {
+    const wrapped: tls.TLSSocket[] = []
+    const tcp = net.createServer((raw) => {
+      sockets.push(raw)
+      const secure = wrapPskSocket(raw, () => KEY)
+      secure.on('error', () => {})
+      wrapped.push(secure)
+    })
+    servers.push(tcp)
+    await new Promise<void>((resolve) => tcp.listen(0, '127.0.0.1', resolve))
+    const raw = net.connect((tcp.address() as net.AddressInfo).port, '127.0.0.1')
+    sockets.push(raw)
+    raw.on('error', () => {})
+    const t0 = Date.now()
+    await new Promise<void>((resolve) => raw.once('close', () => resolve()))
+    const ms = Date.now() - t0
+    expect(ms).toBeGreaterThan(4500)
+    expect(ms).toBeLessThan(7000)
+    expect(wrapped[0].destroyed).toBe(true)
+  }, 15000)
 })
 
 describe('wrapPskSocket', () => {
