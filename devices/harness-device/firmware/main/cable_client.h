@@ -25,6 +25,7 @@
 
 #include "cJSON.h"
 #include "cable_features.h"
+#include "cable_xport.h"
 
 bool cable_client_supports(uint32_t features);
 
@@ -110,6 +111,9 @@ const char *cable_fw_version(void);
 //
 // Call AFTER ui_init(): the first thing this does is push a link state into the UI.
 bool cable_client_start(void);
+
+// The same over the transport of the caller's choosing: net_link_xport() in Wi-Fi mode (app_main.c). cable_client_start() is this with USB.
+bool cable_client_start_with(const cable_xport_t *xport);
 
 // Whether `welcome` has been seen and the session is still believed to be live.
 bool cable_client_is_connected(void);

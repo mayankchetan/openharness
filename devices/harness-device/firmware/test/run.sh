@@ -58,6 +58,19 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
 python3 "$here/test_cable_xport.py"
 # The TLS-PSK wrapper (B2): its source rules here (no key in logs, two ECDHE-PSK suites, TLS 1.2 pins); its behaviour in the IDF block below.
 python3 "$here/test_cable_xport_tls_source.py"
+# Wi-Fi mode (W11). The link state machine and its backoff ladders (pure logic); the log ring the hook queues into (four producer threads against one
+# consumer; the same file passes under -fsanitize=thread); the plain-TCP inner transport over a fake socket layer; the source rules (the hook reaches no
+# socket, the radio code is reachable only from net_link_start, the two stacks, the W0 radio configuration, no firmware over a radio link).
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" \
+   -o "$out/test_net_state" "$here/test_net_state.c" "$here/../main/net_state.c"
+"$out/test_net_state"
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -pthread -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" \
+   -o "$out/test_log_ring" "$here/test_log_ring.c" "$here/../main/log_ring.c"
+"$out/test_log_ring"
+cc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -DCABLE_XPORT_TCP_HOST \
+   -I "$here/../main" -I "$here/host_tcp" -I "$here/host_stubs" -o "$out/test_cable_xport_tcp" "$here/test_cable_xport_tcp.c" "$here/../main/cable_xport_tcp.c"
+"$out/test_cable_xport_tcp"
+python3 "$here/test_net_link_source.py"
 # The decoder buffer is in PSRAM (W6): only cable_link.c names it, and every consumer of a frame payload is CPU-side (no DMA).
 python3 "$here/test_decoder_psram.py"
 # IMA ADPCM voice blocks (frame type 0x07): encoder and decoder against the shared vectors, sanitizers on.
@@ -370,6 +383,8 @@ if [[ -n "${IDF_PATH:-}" ]]; then
     python3 "$here/test_cable_net_set.py"
     # cable_xport_tls.c against the IDF copy of mbedTLS built for the host: handshake, echo, refusals, concurrency, deadlines (about 20 s)
     python3 "$here/test_cable_xport_tls.py"
+    # which mbedTLS errors mean "the daemon refused us" (net_hs_class.h), against the IDF headers
+    python3 "$here/test_net_hs_class.py"
 fi
 
 python3 "$here/test_companions.py"

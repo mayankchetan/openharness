@@ -2,11 +2,11 @@
 //
 // This is the whole of the device's connection to the outside world, and everything the dial ever says goes
 // through the functions below. The decoder, the tx lock, log framing, the reader task and the counters live
-// here; they do not know which wire they run on. The wire is a cable_xport_t (cable_xport.h). Today that is
-// USB-Serial-JTAG only (cable_xport_usb.c), and plugging the cable in is the authorization. Wi-Fi mode and
-// the phone bridge (docs/specs/cable-wifi-link.md) add transports behind the same vtable; their security
-// (TLS-PSK) is a wrapper transport, not a change to this file. Until one of them ships, this firmware has
-// no network: nothing here opens a socket.
+// here; they do not know which wire they run on. The wire is a cable_xport_t (cable_xport.h). By default
+// that is USB-Serial-JTAG (cable_xport_usb.c), and plugging the cable in is the authorization. Wi-Fi mode
+// (net_link.c: cable_xport_tcp.c under the TLS-PSK wrapper) and the phone bridge (docs/specs/cable-wifi-link.md) are other transports
+// behind the same vtable; their security (TLS-PSK) is a wrapper transport, not a change to this file. Nothing in this file opens a
+// socket: it only reads, writes and, on a radio link, queues log lines for the transport's own task to send.
 //
 // ── ONE PORT, AND WHAT THAT COSTS ───────────────────────────────────────────────────────────────────
 // Measured on the board on 2026-08-24: it enumerates as exactly one device —
@@ -96,8 +96,13 @@ bool cable_link_host_present(void);
 // boot is the bootloader's parting words and is expected, while a steady trickle during a session means
 // the two sides disagree about the format or the cable is bad. Without a count those look identical.
 void cable_link_counters(uint32_t *corrupt_frames, uint32_t *discarded_bytes);
-// Logs skipped because the transport was busy or stalled; diagnostic only.
+// Logs skipped because the transport was busy or stalled, plus (Wi-Fi mode) lines the log ring dropped to make room; diagnostic only.
 uint32_t cable_link_dropped_logs(void);
+
+// Wi-Fi mode only. The log hook queues CABLE_TYPE_LOG lines in a PSRAM ring instead of writing them (a socket or TLS call from the hook can wait
+// on the task that is logging); the net task calls this to send up to `max_lines` of them. Returns how many it handled. A no-op on USB, or while
+// the stream is down.
+unsigned cable_link_drain_logs(unsigned max_lines);
 
 // Drop any half-received frame. For the layer above to call when it decides a session has ended and a
 // new one begun — leftover bytes belong to the old one, and carrying them across puts a stale half-frame

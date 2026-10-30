@@ -141,6 +141,9 @@ __attribute__((unused)) static bool cJSON_IsNumber(const cJSON *n) { return n &&
 __attribute__((unused)) static const cJSON *cJSON_GetObjectItemCaseSensitive(const cJSON *p, const char *key) { (void)key; return p; }
 __attribute__((unused)) static bool fw_update_offer(const char *v, int size, const char *sha) { (void)v; (void)size; (void)sha; offers++; return true; }
 __attribute__((unused)) static void cable_client_fw_error(const char *message) { errors++; snprintf(last_error, sizeof last_error, "%s", message); }
+typedef enum { CABLE_XPORT_USB, CABLE_XPORT_WIFI } kind_t;
+static kind_t wire = CABLE_XPORT_USB;
+static kind_t cable_link_transport(void) { return wire; }
 static void handle(const cJSON *p, const char *t) {
     (void)p;
 ''' + offer[0] + r'''
@@ -157,6 +160,12 @@ int main(void) {
     assert(offers == 1 && errors == 0);
     puts("fw.offer: handed to fw_update_offer");
 #endif
+    // Over a radio link an offer is refused whatever the build: nothing reaches fw_update_offer.
+    wire = CABLE_XPORT_WIFI;
+    const unsigned offers_before = offers, errors_before = errors;
+    handle(&p, "fw.offer");
+    assert(offers == offers_before && errors == errors_before + 1 && !strcmp(last_error, "not supported"));
+    puts("fw.offer over Wi-Fi: answered fw.error 'not supported', no offer taken");
     return 0;
 }
 '''

@@ -1783,6 +1783,10 @@ static void handle_message(const cJSON *root)
     if (strcmp(t, "visit.state") == 0) { ui_visit_state(p); return; }
     if (strcmp(t, "toast") == 0) { ui_cable_toast(str_of(p, "text")); return; }
     if (strcmp(t, "fw.offer") == 0) {
+        if (cable_link_transport() != CABLE_XPORT_USB) {   // no image is taken over a radio link (see the 0x03 frames in on_frame)
+            cable_client_fw_error("not supported");
+            return;
+        }
 #ifdef DEVICE_NO_OTA
         // OTA is compiled out (fw_update.c): this dial is updated over USB. A clean refusal, so a daemon that offers
         // is not left waiting for an accept.
@@ -1822,6 +1826,12 @@ static void on_frame(uint8_t version, uint8_t type, const uint8_t *payload, size
     if (type != CABLE_TYPE_JSON) { s_unknown++; return; }   // no firmware slices, no pet packs in the gallery
 #endif
     if (type == CABLE_TYPE_FW) {
+        // Firmware travels over the cable and nothing else: the OTA path has no image signature (cable-wifi-link.md section 2.2), so a slice that
+        // arrives over Wi-Fi is refused whatever the build, before any of the code below can see it.
+        if (cable_link_transport() != CABLE_XPORT_USB) {
+            s_unknown++;
+            return;
+        }
 #ifdef DEVICE_NO_OTA
         s_unknown++;   // this build takes no firmware slices (an offer is refused above); counted like any kind it has no case for
         return;
@@ -1899,6 +1909,11 @@ static void session_tick(void *ctx)
     if (s_session && esp_timer_get_time() - s_last_rx_us > (int64_t)SILENCE_MS * 1000) {
         session_down("silence");
     }
+    // A radio link can be gone while the daemon is merely quiet (the access point left, the TCP stream closed). USB has no such sign that
+    // is cheap, and keeps the silence rule alone; there, host_present is only the cable. Over a radio the transport says it plainly.
+    if (s_session && cable_link_transport() != CABLE_XPORT_USB && !cable_link_host_present()) {
+        session_down("link");
+    }
 }
 
 static void session_task(void *arg)
@@ -1923,6 +1938,11 @@ static void session_task(void *arg)
 
 bool cable_client_start(void)
 {
+    return cable_client_start_with(cable_xport_usb());
+}
+
+bool cable_client_start_with(const cable_xport_t *xport)
+{
     if (s_started) return true;
     TaskHandle_t hello_task = NULL;
     cable_machines_init(&s_machines);
@@ -1946,7 +1966,7 @@ bool cable_client_start(void)
         ESP_LOGE(TAG, "session task create failed — no handshake");
         goto failed;
     }
-    if (!cable_link_start(on_frame, session_tick, NULL)) {
+    if (!cable_link_start_with(xport, on_frame, session_tick, NULL)) {
         vTaskDelete(hello_task);
         goto failed;
     }

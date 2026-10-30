@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "last_words.h"
+#include "log_ring.h"
 #include "power_sleep.h"
 #include "task_util.h"
 #include "freertos/FreeRTOS.h"
@@ -85,6 +86,16 @@ static atomic_bool     s_running;
 // the far end can resync out of — both halves have valid magic and neither has a valid CRC.
 static SemaphoreHandle_t s_tx_lock;
 
+// Wi-Fi mode only (log_ring.h; finding F2 of cable-wifi-link.md). The log hook runs in every task, and a socket or TLS call from inside it can wait
+// on the very task that is logging, so over a radio link the hook formats the line and queues it here; net_link sends it
+// (cable_link_drain_logs). 8 KB of PSRAM BSS (EXT_RAM_BSS_ATTR): a CPU-only byte store that no peripheral reads, and no cost in internal RAM.
+// s_fmt_lock guards the formatting buffer in this mode, in place of s_tx_lock, which a TLS write can hold for seconds. USB mode creates neither.
+#define LOG_RING_BYTES 8192
+static EXT_RAM_BSS_ATTR uint8_t s_log_ring_buf[LOG_RING_BYTES];
+static log_ring_t s_log_ring;
+static atomic_bool s_async_logs;
+static SemaphoreHandle_t s_fmt_lock;
+
 // 8.2 KB of BSS rather than a stack array (it would not fit) or a malloc (a failed allocation mid-session
 // on a microcontroller is a worse outcome than a known, always-paid 8 KB).
 //
@@ -118,9 +129,13 @@ static int log_vprintf(const char *fmt, va_list args)
     if (xPortInIsrContext()) return 0;
     if (!atomic_load(&s_log_framing)) return atomic_load(&s_prev_vprintf)(fmt, args);
 
-    static char line[LOG_LINE_MAX];   // guarded by s_tx_lock, like s_tx_frame
-    if (!s_running || xSemaphoreGetMutexHolder(s_tx_lock) == xTaskGetCurrentTaskHandle() ||
-        xSemaphoreTake(s_tx_lock, pdMS_TO_TICKS(LOG_WRITE_WAIT_MS)) != pdTRUE) {
+    // USB formats and writes under the tx lock. A radio link formats under s_fmt_lock and only queues the line (s_log_ring): no socket, no lwIP,
+    // no mbedTLS is reachable from this function in that mode, whatever task it runs in.
+    const bool async = atomic_load(&s_async_logs);
+    const SemaphoreHandle_t lock = async ? s_fmt_lock : s_tx_lock;
+    static char line[LOG_LINE_MAX];   // guarded by `lock`, like s_tx_frame
+    if (!s_running || xSemaphoreGetMutexHolder(lock) == xTaskGetCurrentTaskHandle() ||
+        xSemaphoreTake(lock, pdMS_TO_TICKS(LOG_WRITE_WAIT_MS)) != pdTRUE) {
         // Recursion or congestion costs one diagnostic, never a raw console
         // write mixed into a protocol frame or an unbounded wait by the caller.
         atomic_fetch_add_explicit(&s_dropped_logs, 1, memory_order_relaxed);
@@ -133,10 +148,13 @@ static int log_vprintf(const char *fmt, va_list args)
         while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) len--;
         // Into the RTC ring first — that copy survives the reboot the next line may be the last before.
         if (len > 0) last_words_add(line, len);
-        if (len > 0 && !send_locked(CABLE_TYPE_LOG, (const uint8_t *)line, len, LOG_WRITE_WAIT_MS))
-            atomic_fetch_add_explicit(&s_dropped_logs, 1, memory_order_relaxed);
+        if (len > 0) {
+            const bool taken = async ? log_ring_push(&s_log_ring, (const uint8_t *)line, len)
+                                     : send_locked(CABLE_TYPE_LOG, (const uint8_t *)line, len, LOG_WRITE_WAIT_MS);
+            if (!taken) atomic_fetch_add_explicit(&s_dropped_logs, 1, memory_order_relaxed);
+        }
     }
-    xSemaphoreGive(s_tx_lock);
+    xSemaphoreGive(lock);
     return n;
 }
 
@@ -174,6 +192,9 @@ static void reader_task(void *arg)
         // read too: scheduling need not provide an intervening empty read.
         if (s_decoder.len && now - last_rx_us >= FRAME_IDLE_US)
             cable_decoder_buf_reset(&s_decoder);
+        // A closed stream takes its half-received frame with it: the next link (Wi-Fi mode reconnects) starts on a frame edge.
+        if (n < 0 && s_decoder.len)
+            cable_decoder_buf_reset(&s_decoder);
         // Never fails and never rejects: everything arriving here is untrusted, starts mid-stream after
         // every boot, and the only useful response to a byte that makes no sense is to step over it.
         if (n > 0) {
@@ -201,12 +222,27 @@ bool cable_link_start_with(const cable_xport_t *xport, cable_frame_cb cb, cable_
         return false;
     }
 
+    // Radio links queue their log lines instead of writing them from the hook (see s_log_ring). USB allocates and starts none of this.
+    if (xport->kind != CABLE_XPORT_USB) {
+        s_fmt_lock = xSemaphoreCreateMutex();
+        if (!s_fmt_lock) {
+            ESP_LOGE(TAG, "no memory for the log lock — link disabled");
+            vSemaphoreDelete(s_tx_lock);
+            s_tx_lock = NULL;
+            return false;
+        }
+        log_ring_init(&s_log_ring, s_log_ring_buf, sizeof s_log_ring_buf);
+        atomic_store(&s_async_logs, true);
+    }
+
     if (!xport->open(xport)) {
         // The transport has already said why (it knows its own driver). What it costs is the same on any wire:
         // the dial comes up, draws its screen, and simply never hears from the machine.
         ESP_LOGE(TAG, "%s transport did not open — no link to the daemon", xport->name);
         vSemaphoreDelete(s_tx_lock);
         s_tx_lock = NULL;
+        if (s_fmt_lock) { vSemaphoreDelete(s_fmt_lock); s_fmt_lock = NULL; }
+        atomic_store(&s_async_logs, false);
         return false;
     }
 
@@ -224,6 +260,8 @@ bool cable_link_start_with(const cable_xport_t *xport, cable_frame_cb cb, cable_
         xport->close(xport);
         vSemaphoreDelete(s_tx_lock);
         s_tx_lock = NULL;
+        if (s_fmt_lock) { vSemaphoreDelete(s_fmt_lock); s_fmt_lock = NULL; }
+        atomic_store(&s_async_logs, false);
         return false;
     }
 
@@ -273,7 +311,23 @@ void cable_link_counters(uint32_t *corrupt_frames, uint32_t *discarded_bytes)
     if (discarded_bytes) *discarded_bytes = s_decoder.discarded_bytes;
 }
 
-uint32_t cable_link_dropped_logs(void) { return atomic_load(&s_dropped_logs); }
+uint32_t cable_link_dropped_logs(void) { return atomic_load(&s_dropped_logs) + log_ring_overwritten(&s_log_ring); }
+
+// Wi-Fi mode: send the queued log lines, at most `max_lines`, from the net task. Nothing leaves the ring while the stream is down, so the
+// newest lines of an outage are the ones kept (the ring drops its oldest). A line the stream refuses is counted as dropped.
+unsigned cable_link_drain_logs(unsigned max_lines)
+{
+    if (!s_running || !atomic_load(&s_async_logs) || !s_xport->is_up(s_xport)) return 0;
+    static EXT_RAM_BSS_ATTR uint8_t line[LOG_RING_LINE_MAX];   // one caller, the net task; CPU-only, like s_tx_frame
+    unsigned sent = 0;
+    while (sent < max_lines) {
+        const size_t n = log_ring_pop(&s_log_ring, line, sizeof line);
+        if (!n) break;
+        if (!cable_link_send(CABLE_TYPE_LOG, line, n)) atomic_fetch_add_explicit(&s_dropped_logs, 1, memory_order_relaxed);
+        sent++;
+    }
+    return sent;
+}
 
 cable_xport_kind_t cable_link_transport(void)
 {

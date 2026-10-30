@@ -31,6 +31,8 @@ set(BOARD_SRCS
     "cable_xport_tls.c"
     "net_state.c"
     "log_ring.c"
+    "wifi_sta.c"
+    "net_link.c"
     "cable_client.c"
     "cable_machines.c"
     "cable_scroll.c"
@@ -94,6 +96,7 @@ set(BOARD_REQUIRES
     esp_wifi
     esp_netif
     esp_event
+    lwip
     esp_http_server
     esp_http_client
     esp_https_ota

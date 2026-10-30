@@ -4,9 +4,10 @@
 //
 //   BOOT ─▶ display ─▶ UI ─▶ USB cable link ─▶ the daemon's agent list ─▶ tileview
 //
-// There is ONE way in, and it is the cable. This firmware has no WiFi, no backend socket, no credential
-// and nothing to pair: plugging the dial into a computer running the harness daemon IS the authorization,
-// and everything the screen shows arrives over that wire.
+// The way in is the cable. Plugging the dial into a computer running the harness daemon IS the authorization,
+// and everything the screen shows arrives over that wire. One more way exists, off by default: Wi-Fi mode (wl_mode in NVS,
+// set over the cable), where the same frames travel inside TLS-PSK to the daemon's listener (net_link.c). Neither mode
+// holds a backend socket, an account or a pairing step.
 //
 // What that deleted, and why the boot is a dozen lines instead of a state machine: the SoftAP setup
 // portal, the saved-networks walk, the cool-standby retry loop, SNTP, the REST pairing calls, the E2EE
@@ -23,6 +24,7 @@
 #include "config_store.h"
 #include "fw_update.h"
 #include "last_words.h"
+#include "net_link.h"
 #include "board/board.h"
 #include "board/board_probe.h"
 #include "driver/gpio.h"
@@ -320,7 +322,11 @@ void app_main(void)
     ui_perf_run();  // synthetic, local-only, before the cable can affect a live harness
 #endif
 
-    if (!cable_client_start()) {
+    // Which way in: NVS says wl_mode = 1 with a whole set of Wi-Fi settings (net.set over the cable put them there), or it does not. If it does,
+    // net_link_start() brings the radio up and the link runs over Wi-Fi; if it does not, it returns false having started nothing, and the link
+    // is the USB cable exactly as it always was. No automatic switching between the two: a change of mode is a reboot.
+    const bool wifi_mode = net_link_start();
+    if (!cable_client_start_with(wifi_mode ? net_link_xport() : cable_xport_usb())) {
         // A dial with no link still runs, still lights up, and still says so on screen. A device stuck in a
         // boot loop is not diagnosable from across the room; one showing "Not connected" is.
         ESP_LOGE(TAG, "cable link did not start — the dial will show no machine");

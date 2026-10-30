@@ -28,6 +28,7 @@ static ht_gallery_t gallery;
 #include "audio_capture.h"
 #include "config_store.h"
 #include "cable_client.h"
+#include "net_link.h"
 #include "pet_store.h"
 #include "../../elapsed.h"
 #include "task_util.h"
@@ -1031,16 +1032,21 @@ static void center(ht_scene_t *f, int y, const char *t, uint16_t c)
     text_in(f, 40, y, HT_WIDTH - 80, UI_FONT, t, c, true);
 }
 // The wordmark shown while connecting, loading and updating. On Focus it is Inter 36, like every word on the face.
+// Wi-Fi mode adds one dim line under it while the link is not up (net_link_status_text: joining, no address, daemon not reachable, key
+// refused). USB mode has no such line: the text is NULL there.
 static void render_brand(ht_scene_t *f)
 {
+    const char *net = net_link_status_text();
     if (character.id == HT_CHARACTER_FOCUS) {
         // The wordmark in Inter Bold 48 on a 50 px line at y 208 (design 2026-10-06, focus-project.html "Connecting").
         const ht_font_t *font = &ht_lv_inter_bold_48.base;
         int w = ht_measure(font, "Harness"), base = 208 + 50 / 2 + 48 * 93 / 256;
         ht_text(f, (HT_WIDTH - w) / 2, base - ht_pfont(font)->ascent, w, font, FG, BG, "Harness");
+        if (net) center(f, 290, net, DIM);
         return;
     }
     center(f, (466 - UI_FONT->height) / 2, "Harness", FG);
+    if (net) center(f, 290, net, DIM);
 }
 static void control(ht_scene_t *f, int x, int y, int w, const char *label, action_kind_t a,
                     int value, bool enabled)
@@ -4036,6 +4042,14 @@ void ui_set_brightness(uint8_t level)
 
 // The cable task staged a pet change (pet_store.c); mark the scene dirty so the next take applies it.
 void ui_pets_changed(void)
+{
+    display_lock();
+    change();
+    display_unlock();
+}
+
+// The Wi-Fi link state changed (net_link.c); the caption under the wordmark reads it at the next scene.
+void ui_net_status_changed(void)
 {
     display_lock();
     change();

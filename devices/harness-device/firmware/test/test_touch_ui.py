@@ -126,6 +126,7 @@ static char voice_context[48];
 static bool scroll_reversed, congestion, recording;
 static uint32_t host_features = 31;
 static bool cable_client_supports(uint32_t features) { return (host_features & features) == features; }
+static const char *net_link_status_text(void) { return NULL; }   // USB mode: no caption under the wordmark
 typedef struct cJSON { const char *string,*valuestring; int type; struct cJSON *child,*next; } cJSON;
 enum { JSTRING=1,JTRUE=2 };
 static bool cJSON_IsString(const cJSON *v) { return v && v->type==JSTRING; }

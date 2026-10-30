@@ -18,8 +18,11 @@ MOVED = [  # (file, task name, macro, plain create that the #else branch keeps)
     ('ui/habitat/ui_habitat.c', 'habitat_actions', 'TASK_STACK_PSRAM_FLASH_OPS', 'xTaskCreate'),
     ('cable_client.c', 'cable_session', 'TASK_STACK_PSRAM_FLASH_OPS', 'xTaskCreate'),
     ('audio_client_habitat.c', 'voice_send', 'TASK_STACK_PSRAM_FLASH_OPS', 'xTaskCreatePinnedToCore'),
+    # Wi-Fi mode (W11): the connect / TLS / socket / backoff task. Its call graph holds no flash operation (test_net_link_source.py walks it);
+    # the Wi-Fi bring-up, which may write the PHY calibration to NVS, runs on net_init, which is internal and short-lived.
+    ('net_link.c', 'net_link', 'TASK_STACK_PSRAM_NET', 'xTaskCreate'),
 ]
-STAYS_INTERNAL = ['habitat_render', 'habitat_touch', 'voice_capture']
+STAYS_INTERNAL = ['habitat_render', 'habitat_touch', 'voice_capture', 'net_init', 'net_store']
 
 header = (main / 'task_util.h').read_text()
 # The cable_link reader is the one conditional task: in PSRAM only with the OTA path compiled out (DEVICE_NO_OTA), because
@@ -41,6 +44,11 @@ for path in main.rglob('*.c'):
     for number, line in enumerate(path.read_text(errors='replace').splitlines(), 1):
         if any(f'"{task}"' in line for task in STAYS_INTERNAL):
             assert 'task_create_psram' not in line and 'WithCaps' not in line, f'{path.name}:{number} moved too early'
+
+# net_init is the internal half of Wi-Fi mode: created with a plain xTaskCreate, never deleted-with-caps, and it is the one place nwifi_start() runs.
+net_c = (main / 'net_link.c').read_text()
+assert re.search(r'xTaskCreate\(net_init_task, "net_init", NET_INIT_STACK', net_c), 'net_init has an internal stack'
+assert 'net_init' not in ''.join(re.findall(r'task_create_psram\([^;]*;', net_c))
 
 print('PSRAM task sites: ' + ', '.join(task for _, task, _, _ in MOVED + [READER]) + ' use task_create_psram under their macros '
       '(cable_link only with OTA compiled out), the latency-bound tasks keep internal stacks PASS')

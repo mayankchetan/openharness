@@ -17,7 +17,7 @@ BaseType_t task_create_psram(TaskFunction_t fn, const char *name, uint32_t stack
 
 // Per-task switches (compile with -DTASK_STACK_PSRAM_<X>=0 to put that task's stack back in internal RAM).
 // Stack bytes moved out of internal RAM at the default: ptt 4,096, beep 4,096, proj_refresh 7,168; FLASH_OPS
-// (habitat_actions 6,144, cable_session 4,096, voice_send 5,120) 15,360.
+// (habitat_actions 6,144, cable_session 4,096, voice_send 5,120) 15,360; net_link 8,192 (Wi-Fi mode only).
 #ifndef TASK_STACK_PSRAM_PTT
 #define TASK_STACK_PSRAM_PTT 1
 #endif
@@ -33,6 +33,11 @@ BaseType_t task_create_psram(TaskFunction_t fn, const char *name, uint32_t stack
 // in this group: with OTA on, its reader runs fw_update_* -> esp_ota_*, and esp_ota_begin asserts on a PSRAM stack.
 #ifndef TASK_STACK_PSRAM_FLASH_OPS
 #define TASK_STACK_PSRAM_FLASH_OPS 1
+#endif
+// net_link (Wi-Fi mode, 8,192 B): connect, TLS handshake, sockets, backoff. Its call graph holds no flash operation (net_link.h states it and
+// test_net_link_source.py checks it); the NVS and PHY work of the Wi-Fi bring-up runs on the short-lived internal-stack net_init task.
+#ifndef TASK_STACK_PSRAM_NET
+#define TASK_STACK_PSRAM_NET 1
 #endif
 // The cable_link reader (6,144 B). Its only flash user was the OTA path, so once that is compiled out (DEVICE_NO_OTA, plan
 // C17) it is a task like the three above: it reads the USB port and parses frames; the one NVS call it reaches is a read

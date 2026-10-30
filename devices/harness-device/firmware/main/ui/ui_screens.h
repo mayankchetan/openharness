@@ -79,6 +79,8 @@ void ui_leave_remote_offline_loading(void);
 void ui_set_connected(bool connected);
 // The custom pets changed (pet.map, a finished pack, pet.drop): redraw so the dial applies them at the next scene.
 void ui_pets_changed(void);
+// Wi-Fi mode: the link state changed (net_link.c). Redraws the caption under the wordmark; any task but the render task.
+void ui_net_status_changed(void);
 // Node (paired machine) online↔offline from the `node_status` frame — distinct from ui_set_connected
 // Ensure a tile exists for project_id (creates one if new). Safe to call repeatedly.
 // Set/refresh the human name shown on a project's tile.

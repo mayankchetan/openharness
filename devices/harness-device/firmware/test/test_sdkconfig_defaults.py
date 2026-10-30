@@ -52,6 +52,17 @@ EXPECTED = {
     # RAM at run time for 4.5 percent of bulk throughput (1,295 to 1,239 kbit/s); voice needs about 64 kbit/s.
     'CONFIG_ESP_WIFI_IRAM_OPT': 'n',
     'CONFIG_ESP_WIFI_RX_IRAM_OPT': 'n',
+    # Wi-Fi mode (W11): the values the W0 and bench6 runs measured, so the radio code in the single image behaves as it did there. The lwIP
+    # windows above, the Wi-Fi buffers in PSRAM-first allocation, and the TLS record buffers (16,384 in, 4,096 out, in PSRAM; not dynamic).
+    'CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP': 'y',
+    'CONFIG_LWIP_TCP_RECVMBOX_SIZE': '16',
+    'CONFIG_LWIP_MAX_SOCKETS': '16',
+    'CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC': 'y',
+    'CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN': 'y',
+    'CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN': '16384',
+    'CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN': '4096',
+    # The PHY writes its calibration data to NVS on the first enable of a boot; the Wi-Fi bring-up therefore stays on an internal stack.
+    'CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE': 'y',
     # Main task stack (plan C15): measured peak 2,092 B (build-SLP, 2026-10-28), so max(3072, peak + 1536) rounded up to 512.
     # app_main ends in vTaskDelete(NULL), so this is a boot-time cost only.
     'CONFIG_ESP_MAIN_TASK_STACK_SIZE': '4096',
@@ -73,6 +84,10 @@ for symbol, value in PSK_EXPECTED.items():
     assert defaults.get(symbol) == value, f"{symbol}: defaults say {defaults.get(symbol)!r}, expected {value!r}"
 assert defaults.get('CONFIG_MBEDTLS_SSL_PROTO_TLS1_3', 'n') == 'n', 'TLS 1.3 stays off'
 assert 'CONFIG_ESP_TLS_PSK_VERIFICATION' not in defaults, 'the esp-tls PSK switch would select RSA-PSK; the wrapper does not use esp-tls'
+
+assert 'CONFIG_MBEDTLS_DYNAMIC_BUFFER' not in defaults or defaults['CONFIG_MBEDTLS_DYNAMIC_BUFFER'] == 'n', 'the measured TLS numbers are for static record buffers'
+assert 'CONFIG_ESP_WIFI_NVS_ENABLED' not in defaults, 'the driver keeps its NVS option as measured; wifi_sta.c switches it off at run time (nvs_enable = 0, WIFI_STORAGE_RAM)'
+# Wi-Fi mode never turns the radio on in USB mode: the radio code is linked in, but its only entry is net_link_start() (test_net_link_source.py).
 
 # The wifi_init.c compile-time checks (esp_wifi/src/wifi_init.c:51-57): the BA window may not exceed the
 # dynamic RX count (IDF default 32, not overridden here) or twice the static RX count.

@@ -56,6 +56,12 @@ static TaskHandle_t hello_handle;
 static unsigned attempts, fail_at, live, hellos, notifications;
 static atomic_bool s_session, s_running;
 static void *s_tx_lock, *s_agents_lock, *s_models_sem;
+/* Wi-Fi mode state of cable_link_start_with (log ring, formatting lock): created only for a radio transport, so inert with the USB fake. */
+static void *s_fmt_lock;
+static uint8_t s_log_ring_buf[16];
+static int s_log_ring;
+static atomic_bool s_async_logs;
+static void log_ring_init(int *ring, uint8_t *storage, uint32_t cap) { (void)ring; (void)storage; (void)cap; assert(!"USB mode starts no log ring"); }
 static int s_machines;
 static int64_t now, s_last_rx_us;
 static unsigned read_index, ticks, down_count, frames;
@@ -72,6 +78,9 @@ typedef int cable_agent_t;
 static cable_agent_t *s_agents;
 static int64_t esp_timer_get_time(void) { return now; }
 static void fw_update_tick(void) {}
+static cable_xport_kind_t cable_link_transport(void) { return s_xport ? s_xport->kind : CABLE_XPORT_USB; }
+static bool host_up = true;
+static bool cable_link_host_present(void) { return host_up; }
 static void ui_set_connected(bool value) { connected = value; }
 static void session_down(const char *why) {
     (void)why; assert(owner == 1); down_count++; s_session = false; connected = false;
@@ -156,7 +165,7 @@ static void xTaskNotifyGive(TaskHandle_t task) {
 '''
 code += function(link, 'reader_task')
 code += function(link, 'cable_link_start_with') + function(link, 'cable_link_start')
-code += function(client, 'cable_client_start')
+code += function(client, 'cable_client_start_with') + function(client, 'cable_client_start')
 code += r'''
 int main(void) {
     // Array, both metadata locks, handshake task, transmit lock, driver, reader.
@@ -189,6 +198,15 @@ int main(void) {
     free(s_agents);
     vSemaphoreDelete(s_agents_lock);vSemaphoreDelete(s_models_sem);vTaskDelete(hello_handle);
     assert(!live&&!hellos);
+    // Wi-Fi mode: a stream that closed ends the session at once, without waiting out the 15 s silence rule. USB (the cable) keeps the silence rule only.
+    {
+        static const cable_xport_t wifi = { "wifi", CABLE_XPORT_WIFI, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+        owner = 1; s_session = true; s_last_rx_us = now; down_count = 0; s_xport = &wifi; host_up = true;
+        session_tick(NULL); assert(down_count == 0 && s_session);
+        host_up = false; session_tick(NULL); assert(down_count == 1 && !s_session);
+        s_session = true; s_xport = &fake_xport; session_tick(NULL); assert(down_count == 1 && s_session);
+        host_up = true; owner = 0;
+    }
     puts("USB session: seven startup failures/retries, idempotence, early welcome, idle/error reads, timeout/reconnect and 64-bit wrap PASS");
 }
 '''
