@@ -81,7 +81,7 @@ const unavailable = (): DialNetReply => ({ status: 503, body: { error: 'The devi
 /** The only fields a reply carries, at any depth. None of them is a secret. */
 const ANSWER_FIELDS = new Set([
   'ok', 'dial', 'saved', 'ssid', 'host', 'port', 'mode', 'cleared', 'removed', 'rotated', 'keyed', 'createdAt', 'lastSeen', 'lastAddr',
-  'usb', 'usbProblem', 'kind', 'message', 'lan',
+  'usb', 'usbProblem', 'kind', 'message', 'lan', 'hostPinned',
 ])
 
 function scrub(value: unknown, depth = 0): unknown {

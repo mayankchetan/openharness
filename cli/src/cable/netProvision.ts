@@ -13,6 +13,10 @@
 // can still happen is a keystore that will not write AFTER the dial agreed: then the dial is put back as it was (cleared on
 // a first set, its old key sent again on a rotate), and the failure says so.
 //
+// When the dial's state is not known. A `net.set` or `net.key` that times out may have been taken, and a rollback that fails leaves the
+// dial holding a key this computer lacks (or the other way round). The answer then says so, in words the CLI prints as they are: set the dial
+// again. Nothing is claimed that was not seen.
+//
 // Credentials. The password, the key and the SSID come in as payload fields and go out as a net.set; none of them is
 // logged, put in an error, or sent back. An answer carries the SSID and the address only because they are not secrets.
 // Every field is checked again here (lib/dialNetRules.ts), whatever the route did.
@@ -48,10 +52,13 @@ type Answer = Record<string, unknown>
 
 const MAC = /^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$/
 
+/** Added to a failure after which the dial and the keystore may disagree. */
+export const STATE_UNKNOWN_NOTE = 'The dial may hold a key this computer lacks. Run `harness dial wifi set` again.'
+
 const bad = (field: NetField | undefined, message: string): Answer => ({ ok: false, kind: 'bad_request', ...(field ? { field } : {}), message })
 const badField = (field: NetField): Answer => bad(field, NET_FIELD_MESSAGES[field])
-const failure = (result: NetFailure): Answer => ({
-  ok: false, kind: result.kind, message: result.message, ...(result.err ? { err: result.err } : {}),
+const failure = (result: NetFailure, note = ''): Answer => ({
+  ok: false, kind: result.kind, message: note ? `${result.message} ${note}` : result.message, ...(result.err ? { err: result.err } : {}),
 })
 
 export class NetProvisioner {
@@ -86,44 +93,48 @@ export class NetProvisioner {
     const mode = payload.mode === 0 ? 0 : 1
     const key = randomBytes(PSK_LENGTH)
     const result = await this.deps.net(dial, { op: 'set', ssid, pass, host, port, key, mode })
-    if (!result.ok) return failure(result)
+    // A timeout may still have been a save: the dial's state is not known.
+    if (!result.ok) return failure(result, result.kind === 'timeout' ? STATE_UNKNOWN_NOTE : '')
     // The commit marker is the dial's word that it holds all of it.
     if (!result.saved) return failure({ ok: false, kind: 'device', message: 'the dial answered but did not save the settings' })
     const mac = result.dial
     if (!mac || !MAC.test(mac)) {
-      await this.putBack(dial)
-      return failure({ ok: false, kind: 'device', message: 'the dial did not say its MAC, so its key cannot be filed' })
+      const cleared = await this.putBack(dial)
+      return failure({ ok: false, kind: 'device', message: 'the dial did not say its MAC, so its key cannot be filed.' }, cleared ? '' : STATE_UNKNOWN_NOTE)
     }
     try {
-      this.deps.keys.set(mac, key)
+      // `--host` pins the address: it is not changed on attach. Without it the pin is gone (a new key starts the record again).
+      this.deps.keys.set(mac, key, { hostPinned: payload.host !== undefined })
     } catch (error) {
       this.deps.log(`cable: net: the keystore would not take the key of ${normalizePskIdentity(mac)}: ${error instanceof Error ? error.message : String(error)}`)
-      await this.putBack(mac)
-      return failure({ ok: false, kind: 'keystore', message: 'The dial took its settings but this computer could not store the key, so the dial was cleared again. See the daemon log.' })
+      const cleared = await this.putBack(mac)
+      return failure({ ok: false, kind: 'keystore', message: cleared
+        ? 'The dial took its settings but this computer could not store the key, so the dial was cleared again. See the daemon log.'
+        : 'The dial took its settings but this computer could not store the key, and the dial could not be cleared again. See the daemon log.' }, cleared ? '' : STATE_UNKNOWN_NOTE)
     }
     this.deps.log(`cable: net: ${normalizePskIdentity(mac)} was given Wi-Fi settings and a key (mode ${mode})`)
     return { ok: true, dial: normalizePskIdentity(mac), saved: true, ssid, host, port, mode }
   }
 
-  /** Undo a first set whose key could not be filed: the dial and this computer must agree. Best effort. */
-  private async putBack(dial: string | undefined): Promise<void> {
-    try { await this.deps.net(dial, { op: 'clear' }) } catch { /* the dial is told again on the next attach, or cleared by hand */ }
+  /** Undo a first set whose key could not be filed: the dial and this computer must agree. True when the dial said it is cleared. */
+  private async putBack(dial: string | undefined): Promise<boolean> {
+    return (await this.deps.net(dial, { op: 'clear' })).ok
   }
 
   private async rotate(dial: string | undefined): Promise<Answer> {
     const key = randomBytes(PSK_LENGTH)
     const result = await this.deps.net(dial, { op: 'key', key })
-    if (!result.ok) return failure(result)
+    if (!result.ok) return failure(result, result.kind === 'timeout' ? STATE_UNKNOWN_NOTE : '')
     const mac = result.dial
     if (!mac || !MAC.test(mac)) return failure({ ok: false, kind: 'device', message: 'the dial did not say its MAC, so its key cannot be filed' })
     const old = this.deps.keys.get(mac)
     try {
-      this.deps.keys.set(mac, key)
+      this.deps.keys.set(mac, key, { hostPinned: this.deps.keys.record(mac)?.hostPinned === true })
     } catch (error) {
       this.deps.log(`cable: net: the keystore would not take the new key of ${normalizePskIdentity(mac)}: ${error instanceof Error ? error.message : String(error)}`)
       // The dial holds the new key and this computer the old one: send the old one back. Without one there is nothing to restore.
-      if (old) { try { await this.deps.net(mac, { op: 'key', key: old }) } catch { /* the person sets it again */ } }
-      return failure({ ok: false, kind: 'keystore', message: 'This computer could not store the new key. See the daemon log.' })
+      const restored = old ? (await this.deps.net(mac, { op: 'key', key: old })).ok : false
+      return failure({ ok: false, kind: 'keystore', message: 'This computer could not store the new key. See the daemon log.' }, restored ? '' : STATE_UNKNOWN_NOTE)
     }
     this.deps.log(`cable: net: ${normalizePskIdentity(mac)} has a new key`)
     return { ok: true, dial: normalizePskIdentity(mac), rotated: true }
@@ -134,24 +145,31 @@ export class NetProvisioner {
     if (result.ok) {
       const mac = result.dial ? normalizePskIdentity(result.dial) : undefined
       const removed = mac ? this.removeKey(mac) : false
-      this.deps.log(`cable: net: ${mac ?? 'a dial'} forgot its Wi-Fi settings${removed ? ' and this computer forgot its key' : ''}`)
-      return { ok: true, ...(mac ? { dial: mac } : {}), cleared: true, removed }
+      if (removed === 'failed') {
+        return failure({ ok: false, kind: 'keystore', message: 'The dial forgot its Wi-Fi settings, but this computer could not remove its key. See the daemon log.' })
+      }
+      this.deps.log(`cable: net: ${mac ?? 'a dial'} forgot its Wi-Fi settings${removed === true ? ' and this computer forgot its key' : ''}`)
+      return { ok: true, ...(mac ? { dial: mac } : {}), cleared: true, removed: removed === true }
     }
-    // A dial that is away (the very state of a Wi-Fi dial) cannot be cleared, but its key can be taken from this computer:
-    // it then cannot connect any more. Only for a dial that was named: which key to drop is never guessed.
-    if (result.kind === 'no_dial' && dial && MAC.test(dial) && this.deps.keys.has(dial)) {
+    // A dial that is away (the very state of a Wi-Fi dial: it is on Wi-Fi, so only `transport` can be said of it) cannot be cleared, but its
+    // key can be taken from this computer: it then cannot connect any more. Only for a dial that was named: which key to drop is never guessed.
+    if ((result.kind === 'no_dial' || result.kind === 'transport') && dial && MAC.test(dial) && this.deps.keys.has(dial)) {
       const mac = normalizePskIdentity(dial)
       const removed = this.removeKey(mac)
+      if (removed !== true) {
+        return failure({ ok: false, kind: 'keystore', message: 'This computer could not remove the key of the dial. See the daemon log.' })
+      }
       this.deps.log(`cable: net: ${mac} is not on the cable; this computer forgot its key, the dial's own settings are untouched`)
-      return { ok: true, dial: mac, cleared: false, removed }
+      return { ok: true, dial: mac, cleared: false, removed: true }
     }
     return failure(result)
   }
 
-  private removeKey(mac: string): boolean {
+  /** True: the key was held and is gone. False: none was held. 'failed': it was held and the keystore would not let go of it. */
+  private removeKey(mac: string): boolean | 'failed' {
     try { return this.deps.keys.remove(mac) } catch (error) {
       this.deps.log(`cable: net: the keystore would not forget ${mac}: ${error instanceof Error ? error.message : String(error)}`)
-      return false
+      return 'failed'
     }
   }
 
@@ -198,6 +216,8 @@ export class NetProvisioner {
       this.deps.log(`cable: net: ${mac} holds Wi-Fi settings but this computer has no key for it. Run: harness dial wifi set`)
       return
     }
+    // An address the person gave by hand (`--host`) is theirs to change, not this computer's to follow.
+    if (this.deps.keys.record(mac)?.hostPinned) return
     const lan = await this.deps.lan()
     if (!lan || !isLanIPv4(lan)) return
     if (state.host === lan && state.port === this.deps.port) return

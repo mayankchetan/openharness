@@ -69,6 +69,8 @@ export interface DialKeyRecord {
   createdAt: number
   lastSeen?: number
   lastAddr?: string
+  /** The person gave this dial's daemon address by hand (`--host`): a changed address of this computer is not sent to it on attach. Optional; the file stays version 1. */
+  hostPinned?: boolean
 }
 
 export interface DialKeyChange {
@@ -152,12 +154,12 @@ export class DialKeys {
   }
 
   /** Give a dial a key, or replace its key (a new key starts the dial's record again). Throws when the write fails. */
-  set(id: string, key: Buffer): void {
+  set(id: string, key: Buffer, options: { hostPinned?: boolean } = {}): void {
     if (!MAC.test(id)) throw new Error('a dial identity is its MAC string, like B8:1F:3F:CA:E5:58')
     if (key.length !== PSK_LENGTH) throw new Error(`a dial key is ${PSK_LENGTH} bytes`)
     const mac = normalizePskIdentity(id)
     this.#write((next) => {
-      next.set(mac, { key: Buffer.from(key), createdAt: this.#now() })
+      next.set(mac, { key: Buffer.from(key), createdAt: this.#now(), ...(options.hostPinned ? { hostPinned: true } : {}) })
     })
     this.#tell({ id: mac, kind: 'set' })
   }
@@ -302,7 +304,7 @@ export class DialKeys {
   #persist(next: Map<string, Stored>): void {
     const dials: Record<string, { key: string } & DialKeyRecord> = {}
     for (const [id, dial] of next) {
-      dials[id] = { key: dial.key.toString('base64'), createdAt: dial.createdAt, ...(dial.lastSeen !== undefined ? { lastSeen: dial.lastSeen } : {}), ...(dial.lastAddr ? { lastAddr: dial.lastAddr } : {}) }
+      dials[id] = { key: dial.key.toString('base64'), createdAt: dial.createdAt, ...(dial.lastSeen !== undefined ? { lastSeen: dial.lastSeen } : {}), ...(dial.lastAddr ? { lastAddr: dial.lastAddr } : {}), ...(dial.hostPinned ? { hostPinned: true } : {}) }
     }
     const text = JSON.stringify({ version: 1, dials }, null, 2) + '\n'
     const fs = this.#fs
@@ -403,6 +405,7 @@ export class DialKeys {
         createdAt: typeof row.createdAt === 'number' ? row.createdAt : 0,
         ...(typeof row.lastSeen === 'number' ? { lastSeen: row.lastSeen } : {}),
         ...(typeof row.lastAddr === 'string' ? { lastAddr: row.lastAddr } : {}),
+        ...(row.hostPinned === true ? { hostPinned: true } : {}),
       })
     }
     this.#dials = loaded

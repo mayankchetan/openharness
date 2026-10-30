@@ -100,6 +100,7 @@ import { ensureManagedGrid, ensureManagedRuntime } from './lib/runtimeInstall.js
 ensureUtf8Locale()
 import { prepareLogFile } from './lib/log.js'
 import { privacyCommand } from './lib/privacyCommand.js'
+import { eraseLast, passwordKey } from './lib/passwordKeys.js'
 
 
 // Daemon stdout/stderr. Capped at LOG_MAX_BYTES — see prepareLogFile/trimLogFile in lib/log.ts.
@@ -1888,17 +1889,18 @@ function promptPassword(prompt: string, mask = '*'): Promise<string> {
       stdin.pause()
     }
     const onKeypress = (str: string | undefined, key: { name?: string; ctrl?: boolean; meta?: boolean }): void => {
-      if (key.ctrl && (key.name === 'c' || key.name === 'd')) { cleanup(); process.stdout.write('\n'); process.exit(130) }
-      if (key.name === 'return' || key.name === 'enter') { cleanup(); process.stdout.write('\n'); resolve(value); return }
-      if (key.name === 'backspace') {
-        if (value.length) { value = value.slice(0, -1); if (mask) process.stdout.write('\b \b') }
+      // What each key does is lib/passwordKeys.ts's: a character is a code point (an emoji is one), and anything that
+      // is not one printable character (arrows, tab, escape, function keys, other ctrl/meta combos) is ignored outright
+      // rather than risking its raw bytes landing in the password buffer.
+      const action = passwordKey(str, key)
+      if (action.kind === 'abort') { cleanup(); process.stdout.write('\n'); process.exit(130) }
+      if (action.kind === 'submit') { cleanup(); process.stdout.write('\n'); resolve(value); return }
+      if (action.kind === 'erase') {
+        if (value.length) { value = eraseLast(value); if (mask) process.stdout.write('\b \b') }
         return
       }
-      // Anything else that isn't a single printable character — arrows, tab, escape, function keys,
-      // other ctrl/meta combos — is ignored outright rather than risking its raw bytes landing in the
-      // password buffer.
-      if (str && !key.ctrl && !key.meta && str.length === 1 && str.charCodeAt(0) >= 0x20) {
-        value += str
+      if (action.kind === 'append') {
+        value += action.char
         if (mask) process.stdout.write(mask)
       }
     }

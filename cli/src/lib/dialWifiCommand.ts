@@ -80,7 +80,15 @@ const HINTS: Record<string, string> = {
   busy: 'Wait a moment and try again.',
 }
 
-export async function dialCommand(args: string[], deps: DialWifiDeps): Promise<number> {
+/**
+ * Everything the dial or the daemon reported (a network name, an address, an error) is printed through this. A name is chosen by whoever
+ * runs the access point, and the dial's firmware accepts any bytes above 0x1f: C1 controls (U+0080-U+009F) can move the cursor or retitle
+ * a terminal, and bidi overrides (U+202A-U+202E, U+2066-U+2069) can make one line read as another. Each becomes "?".
+ */
+export const printable = (text: string): string => text.replace(/[\u0080-\u009f‪-‮⁦-⁩]/g, '?')
+
+export async function dialCommand(args: string[], plain: DialWifiDeps): Promise<number> {
+  const deps: DialWifiDeps = { ...plain, out: (line) => plain.out(printable(line)), err: (line) => plain.err(printable(line)) }
   const usage = (): number => { for (const line of USAGE) deps.err(line); return 2 }
   if (args[0] !== 'wifi') return usage()
   const verb = args[1]
@@ -183,7 +191,7 @@ function print(verb: string, answer: Record<string, unknown>, deps: DialWifiDeps
       const keyed = Array.isArray(answer.keyed) ? answer.keyed as Array<Record<string, unknown>> : []
       if (!keyed.length) out('  No dial has a key on this computer yet. Run: harness dial wifi set')
       for (const row of keyed) {
-        out(`  Key held        ${String(row.dial)}   set ${stamp(row.createdAt)}${row.lastSeen === undefined ? '' : `   last seen ${stamp(row.lastSeen)} from ${String(row.lastAddr ?? '?')}`}`)
+        out(`  Key held        ${String(row.dial)}   set ${stamp(row.createdAt)}${row.lastSeen === undefined ? '' : `   last seen ${stamp(row.lastSeen)} from ${String(row.lastAddr ?? '?')}`}${row.hostPinned === true ? '   address fixed with --host' : ''}`)
       }
       out('')
       return
@@ -191,6 +199,7 @@ function print(verb: string, answer: Record<string, unknown>, deps: DialWifiDeps
     case 'forget':
       out('')
       if (answer.cleared === true) out(`  ✓ The dial ${dial} forgot its Wi-Fi network and key.${answer.removed === true ? ' So did this computer.' : ''}`)
+      else if (answer.removed !== true) out(`  This computer held no key for ${dial}. Nothing was changed.`)
       else out(`  ✓ This computer forgot the key of ${dial}. The dial was not on the USB cable, so it still holds its own settings: it cannot connect any more. Clear it with the cable plugged in.`)
       out('')
       return

@@ -294,7 +294,8 @@ function validHookBody(value: unknown): value is BoundHookBody {
   return true
 }
 
-function readBody(req: http.IncomingMessage, maximum = MAX_HOOK_BODY_BYTES): Promise<string> {
+/** The body, or '' when it is over `maximum` or the request failed; `oversized` tells the first from an empty body. */
+function readBodyChecked(req: http.IncomingMessage, maximum = MAX_HOOK_BODY_BYTES): Promise<{ text: string; oversized: boolean }> {
   return new Promise((resolve) => {
     let data = ''
     let bytes = 0
@@ -305,9 +306,13 @@ function readBody(req: http.IncomingMessage, maximum = MAX_HOOK_BODY_BYTES): Pro
       if (bytes > maximum) { oversized = true; data = ''; return }
       data += chunk
     })
-    req.on('end', () => resolve(oversized ? '' : data))
-    req.on('error', () => resolve(''))
+    req.on('end', () => resolve({ text: oversized ? '' : data, oversized }))
+    req.on('error', () => resolve({ text: '', oversized }))
   })
+}
+
+async function readBody(req: http.IncomingMessage, maximum = MAX_HOOK_BODY_BYTES): Promise<string> {
+  return (await readBodyChecked(req, maximum)).text
 }
 
 function normalizedRuntimeHints(body: RegisterInput): HookTerminalHint[] {
@@ -1275,7 +1280,10 @@ export function startHookServer(
       if (handlers.onDialNet && url.startsWith('/api/dial/net/')) {
         if (req.method !== 'POST') { json(405, { error: 'METHOD_NOT_ALLOWED' }); return }
         if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
-        const raw = (await readBody(req)).trim()
+        // A body over the limit is refused as such (413), not read as an empty one, and nothing runs.
+        const read = await readBodyChecked(req)
+        if (read.oversized) { json(413, { error: 'The body is too large.', kind: 'bad_request' }); return }
+        const raw = read.text.trim()
         let body: unknown
         try { body = raw ? JSON.parse(raw) : undefined } catch { json(400, { error: 'Invalid JSON body', kind: 'bad_request' }); return }
         let reply: DialNetReply
