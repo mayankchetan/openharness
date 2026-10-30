@@ -59,6 +59,20 @@ EXPECTED = {
 for symbol, value in EXPECTED.items():
     assert defaults.get(symbol) == value, f'{symbol}: defaults say {defaults.get(symbol)!r}, expected {value!r}'
 
+# The TLS-PSK link (cable_xport_tls.c, task B2): mbedTLS client-side ECDHE-PSK, set directly (esp-tls is not used, and its PSK switch would also
+# select RSA-PSK). Plain PSK, DHE-PSK and RSA-PSK are off; TLS 1.3 stays off (the wrapper pins TLS 1.2 in code as well).
+PSK_EXPECTED = {
+    'CONFIG_MBEDTLS_PSK_MODES': 'y',
+    'CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_PSK': 'y',
+    'CONFIG_MBEDTLS_KEY_EXCHANGE_PSK': 'n',
+    'CONFIG_MBEDTLS_KEY_EXCHANGE_DHE_PSK': 'n',
+    'CONFIG_MBEDTLS_KEY_EXCHANGE_RSA_PSK': 'n',
+}
+for symbol, value in PSK_EXPECTED.items():
+    assert defaults.get(symbol) == value, f"{symbol}: defaults say {defaults.get(symbol)!r}, expected {value!r}"
+assert defaults.get('CONFIG_MBEDTLS_SSL_PROTO_TLS1_3', 'n') == 'n', 'TLS 1.3 stays off'
+assert 'CONFIG_ESP_TLS_PSK_VERIFICATION' not in defaults, 'the esp-tls PSK switch would select RSA-PSK; the wrapper does not use esp-tls'
+
 # The wifi_init.c compile-time checks (esp_wifi/src/wifi_init.c:51-57): the BA window may not exceed the
 # dynamic RX count (IDF default 32, not overridden here) or twice the static RX count.
 assert 'CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM' not in defaults
@@ -75,6 +89,9 @@ if generated:
     for symbol, value in defaults.items():
         assert config.get(symbol, 'n') == value.strip('"') or config.get(symbol) == value, \
             f'{symbol}: defaults {value!r}, generated config {config.get(symbol)!r}'
+    for symbol, value in PSK_EXPECTED.items():
+        assert config.get(symbol, "n") == value, f"{symbol}: generated config {config.get(symbol)!r}, expected {value!r}"
+    assert config.get('CONFIG_MBEDTLS_SSL_PROTO_TLS1_3', 'n') != 'y', 'TLS 1.3 is off in the generated config'
     checked = f'generated config {Path(generated).name} agrees with {len(defaults)} default symbols'
 else:
     checked = 'no generated sdkconfig found (set SDKCONFIG=path to check one)'

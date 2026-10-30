@@ -1,0 +1,383 @@
+// TLS 1.2 PSK over any cable transport. The contract, the suites and the write rule are in cable_xport_tls.h.
+//
+// The inner transport is reached only through the two BIO callbacks below and only while `lock` is held, so the inner
+// transport sees one caller at a time and one mbedtls_ssl_context is never in two tasks at once.
+#include "cable_xport_tls.h"
+
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/net_sockets.h"
+#include "mbedtls/ssl.h"
+
+static const char *TAG = "tls";
+
+#define TLS_HANDSHAKE_MS 5000   // from the moment the inner transport is up
+#define TLS_INNER_UP_MS  5000   // how long open() waits for the inner transport to report up
+#define TLS_WRITE_CAP_MS 2000   // once a record is composed: finish it or close (finding F3)
+#define TLS_SLICE_MS     10     // longest a reader holds the mutex while it waits for data
+#define TLS_CLOSE_MS     100    // best effort close_notify
+
+// Only TLS-ECDHE-PSK-AES-CBC suites. mbedtls_ssl_conf_ciphersuites keeps the pointer, so the list is static.
+static const int s_suites[] = {
+    MBEDTLS_TLS_ECDHE_PSK_WITH_AES_128_CBC_SHA256,   // 0xC037, the suite W0 negotiated
+    MBEDTLS_TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA384,   // 0xC038
+    0,
+};
+
+typedef struct {
+    cable_xport_t        self;      // handed out; self.ctx points back at this struct
+    const cable_xport_t *inner;
+    SemaphoreHandle_t    lock;      // every ssl_read, ssl_write and handshake step, and every call into `inner`
+    atomic_int           writers_waiting;
+    atomic_bool          up;        // handshake finished and the link is intact
+    atomic_bool          closing;   // close() is waiting for the mutex: long loops give up
+    // Below: only under `lock`.
+    bool                 inner_closed;
+    bool                 write_pending;   // a record is inside mbedTLS and one write() call is still finishing it
+    unsigned             session;         // counts open() calls: a write that outlived its session must not continue in the next one
+    bool                 ssl_ready;
+    int64_t              deadline_us;   // 0 = none; the BIO times out once it has passed (handshake bound)
+    mbedtls_ssl_config   conf;
+    mbedtls_ssl_context  ssl;
+    mbedtls_entropy_context entropy;
+    mbedtls_ctr_drbg_context drbg;
+} tls_t;
+
+static int64_t now_us(void) { return esp_timer_get_time(); }
+
+// ── mbedTLS BIO over the inner transport (cable_xport.h, "WRAPPING") ───────────────────────────────
+
+static int bio_send(void *p, const unsigned char *buf, size_t len)
+{
+    tls_t *t = p;
+    int n = t->inner->write(t->inner, buf, len, 0);
+    if (n > 0) return n > (int)len ? (int)len : n;
+    return n == 0 ? MBEDTLS_ERR_SSL_WANT_WRITE : MBEDTLS_ERR_NET_SEND_FAILED;
+}
+
+static int bio_recv_timeout(void *p, unsigned char *buf, size_t len, uint32_t ms)
+{
+    tls_t *t = p;
+    if (t->deadline_us && now_us() >= t->deadline_us) return MBEDTLS_ERR_SSL_TIMEOUT;
+    int n = t->inner->read(t->inner, buf, len, (int)ms);
+    if (n > 0) return n > (int)len ? (int)len : n;
+    if (n == 0) return ms ? MBEDTLS_ERR_SSL_TIMEOUT : MBEDTLS_ERR_SSL_WANT_READ;
+    return MBEDTLS_ERR_NET_CONN_RESET;
+}
+
+static bool retryable(int r)
+{
+    return r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE || r == MBEDTLS_ERR_SSL_TIMEOUT;
+}
+
+// ── teardown ───────────────────────────────────────────────────────────────────────────────────────
+
+// Under `lock`. Frees the per-connection state; the config (and the key copy in it) stays for the next open().
+static void release_session(tls_t *t)
+{
+    if (t->ssl_ready) {
+        mbedtls_ssl_free(&t->ssl);
+        mbedtls_ctr_drbg_free(&t->drbg);
+        mbedtls_entropy_free(&t->entropy);
+        t->ssl_ready = false;
+    }
+}
+
+static void close_inner(tls_t *t)
+{
+    if (!t->inner_closed) {
+        t->inner_closed = true;
+        t->inner->close(t->inner);
+    }
+}
+
+// Under `lock`. The stream cannot resync, so a half-sent record or a dead peer ends the link: tell the inner transport.
+static void kill_link(tls_t *t)
+{
+    atomic_store(&t->up, false);
+    close_inner(t);
+}
+
+// ── open: inner open, then the handshake ───────────────────────────────────────────────────────────
+
+static bool tls_handshake(tls_t *t)
+{
+    int64_t end = now_us() + (int64_t)TLS_HANDSHAKE_MS * 1000;
+    t->deadline_us = end;
+    int r;
+    for (;;) {
+        mbedtls_ssl_conf_read_timeout(&t->conf, TLS_SLICE_MS);
+        r = mbedtls_ssl_handshake(&t->ssl);
+        if (r == 0) break;
+        if (!retryable(r)) break;
+        if (atomic_load(&t->closing) || now_us() >= end) {
+            r = MBEDTLS_ERR_SSL_TIMEOUT;
+            break;
+        }
+        if (r == MBEDTLS_ERR_SSL_WANT_WRITE) vTaskDelay(1);
+    }
+    t->deadline_us = 0;
+    if (r != 0) ESP_LOGW(TAG, "handshake failed: -0x%04X", (unsigned)-r);
+    return r == 0;
+}
+
+static bool tls_open(const cable_xport_t *x)
+{
+    tls_t *t = x->ctx;
+    xSemaphoreTake(t->lock, portMAX_DELAY);
+    bool ok = false;
+    atomic_store(&t->up, false);
+    t->inner_closed = false;
+    t->write_pending = false;
+    t->session++;
+    t->deadline_us = 0;
+
+    if (!t->inner->open(t->inner)) goto out;
+
+    // The handshake starts only once the inner transport is up.
+    int64_t up_end = now_us() + (int64_t)TLS_INNER_UP_MS * 1000;
+    while (!t->inner->is_up(t->inner)) {
+        if (now_us() >= up_end) {
+            ESP_LOGW(TAG, "inner %s transport did not come up", t->inner->name);
+            goto out;
+        }
+        vTaskDelay(1);
+    }
+
+    // Entropy is seeded per connection, right before the handshake: bring Wi-Fi or the BLE controller up first so the
+    // ESP RNG is a true random source.
+    mbedtls_entropy_init(&t->entropy);
+    mbedtls_ctr_drbg_init(&t->drbg);
+    mbedtls_ssl_init(&t->ssl);
+    t->ssl_ready = true;
+    int r = mbedtls_ctr_drbg_seed(&t->drbg, mbedtls_entropy_func, &t->entropy, NULL, 0);
+    if (r != 0) {
+        ESP_LOGW(TAG, "rng seed failed: -0x%04X", (unsigned)-r);
+        goto out;
+    }
+    mbedtls_ssl_conf_rng(&t->conf, mbedtls_ctr_drbg_random, &t->drbg);
+    r = mbedtls_ssl_setup(&t->ssl, &t->conf);
+    if (r != 0) {
+        ESP_LOGW(TAG, "ssl setup failed: -0x%04X", (unsigned)-r);
+        goto out;
+    }
+    mbedtls_ssl_set_bio(&t->ssl, t, bio_send, NULL, bio_recv_timeout);
+
+    if (!tls_handshake(t)) goto out;
+    atomic_store(&t->up, true);
+    ok = true;
+
+out:
+    if (!ok) {
+        release_session(t);
+        close_inner(t);
+    }
+    xSemaphoreGive(t->lock);
+    return ok;
+}
+
+// ── close ──────────────────────────────────────────────────────────────────────────────────────────
+
+static void tls_close(const cable_xport_t *x)
+{
+    tls_t *t = x->ctx;
+    atomic_store(&t->closing, true);   // a task inside a long wait notices and lets go of the mutex
+    xSemaphoreTake(t->lock, portMAX_DELAY);
+    if (t->ssl_ready && atomic_load(&t->up)) {
+        // Best effort, one try: tell the peer the stream ended on purpose.
+        t->deadline_us = now_us() + (int64_t)TLS_CLOSE_MS * 1000;
+        (void)mbedtls_ssl_close_notify(&t->ssl);
+        t->deadline_us = 0;
+    }
+    atomic_store(&t->up, false);
+    release_session(t);
+    close_inner(t);
+    atomic_store(&t->closing, false);
+    xSemaphoreGive(t->lock);
+}
+
+// ── read ───────────────────────────────────────────────────────────────────────────────────────────
+
+// A failed stream still waits out its time (cable_xport.h), or the reader task would spin.
+static int read_dead(int wait_ms)
+{
+    if (wait_ms > 0) vTaskDelay(pdMS_TO_TICKS(wait_ms));
+    return -1;
+}
+
+static int tls_read(const cable_xport_t *x, uint8_t *buf, size_t cap, int wait_ms)
+{
+    tls_t *t = x->ctx;
+    if (wait_ms < 0) wait_ms = 0;
+    const int64_t end = now_us() + (int64_t)wait_ms * 1000;
+    for (;;) {
+        if (!atomic_load(&t->up) || atomic_load(&t->closing)) return read_dead(wait_ms);
+        int64_t left_ms = (end - now_us()) / 1000;
+        if (left_ms < 0) left_ms = 0;
+        if (xSemaphoreTake(t->lock, pdMS_TO_TICKS(left_ms)) == pdTRUE) {
+            if (!atomic_load(&t->up) || !t->ssl_ready) {
+                xSemaphoreGive(t->lock);
+                return read_dead(wait_ms);
+            }
+            int64_t slice = (end - now_us()) / 1000;
+            if (slice < 0) slice = 0;
+            if (slice > TLS_SLICE_MS) slice = TLS_SLICE_MS;
+            mbedtls_ssl_conf_read_timeout(&t->conf, (uint32_t)slice);
+            int r = mbedtls_ssl_read(&t->ssl, buf, cap);
+            if (r > 0) {
+                xSemaphoreGive(t->lock);
+                return r;
+            }
+            if (r != 0 && !retryable(r)) {
+                // close_notify from the peer, a reset, a bad record: the stream is over.
+                if (r != MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) ESP_LOGW(TAG, "read failed: -0x%04X", (unsigned)-r);
+                kill_link(t);
+                xSemaphoreGive(t->lock);
+                return read_dead(wait_ms);
+            }
+            xSemaphoreGive(t->lock);
+        }
+        if (now_us() >= end) return 0;
+        // A writer is queued for the mutex: let it have it before this reader takes it again.
+        while (atomic_load(&t->writers_waiting) > 0 && now_us() < end) vTaskDelay(1);
+    }
+}
+
+// ── write ──────────────────────────────────────────────────────────────────────────────────────────
+
+static int tls_write(const cable_xport_t *x, const uint8_t *buf, size_t len, int wait_ms)
+{
+    tls_t *t = x->ctx;
+    if (len == 0) return 0;
+    if (!atomic_load(&t->up)) return -1;
+    if (wait_ms < 0) wait_ms = 0;
+
+    atomic_fetch_add(&t->writers_waiting, 1);
+    BaseType_t got = xSemaphoreTake(t->lock, pdMS_TO_TICKS(wait_ms));
+    atomic_fetch_sub(&t->writers_waiting, 1);
+    if (got != pdTRUE) return atomic_load(&t->up) ? 0 : -1;   // nothing taken; the link is fine
+    if (!atomic_load(&t->up) || !t->ssl_ready) {
+        xSemaphoreGive(t->lock);
+        return -1;
+    }
+    if (t->write_pending) {   // another write is mid-record; this one took nothing
+        xSemaphoreGive(t->lock);
+        return 0;
+    }
+
+    // From the first ssl_write call the record is inside mbedTLS and only the same arguments will finish it.
+    const int64_t cap_us = now_us() + (int64_t)TLS_WRITE_CAP_MS * 1000;
+    const unsigned session = t->session;
+    size_t done = 0;
+    int result = (int)len;
+    while (done < len) {
+        int r = mbedtls_ssl_write(&t->ssl, buf + done, len - done);
+        if (r > 0) {
+            done += (size_t)r;   // a frame over one record payload comes back in pieces
+            t->write_pending = false;
+            continue;
+        }
+        if (retryable(r) && !atomic_load(&t->closing) && now_us() < cap_us) {
+            // The record is inside mbedTLS and only this buffer finishes it. Give up the mutex while waiting for room, so a
+            // stalled send never stops the receive side (the peer may be waiting for us to read before it reads), and refuse
+            // other writers until it is out (write_pending).
+            t->write_pending = true;
+            xSemaphoreGive(t->lock);
+            vTaskDelay(1);
+            atomic_fetch_add(&t->writers_waiting, 1);
+            xSemaphoreTake(t->lock, portMAX_DELAY);
+            atomic_fetch_sub(&t->writers_waiting, 1);
+            if (!atomic_load(&t->up) || !t->ssl_ready || t->session != session) {   // the link ended while the mutex was free
+                t->write_pending = false;
+                xSemaphoreGive(t->lock);
+                return -1;
+            }
+            continue;   // same buffer, same length
+        }
+        ESP_LOGW(TAG, "write %s: -0x%04X", retryable(r) ? "stalled, link closed" : "failed", (unsigned)-r);
+        result = -1;
+        break;
+    }
+    t->write_pending = false;
+    if (result < 0) kill_link(t);
+    xSemaphoreGive(t->lock);
+    return result;
+}
+
+static bool tls_is_up(const cable_xport_t *x)
+{
+    tls_t *t = x->ctx;
+    return atomic_load(&t->up) && t->inner->is_up(t->inner);
+}
+
+// ── construction ───────────────────────────────────────────────────────────────────────────────────
+
+const cable_xport_t *cable_xport_tls_wrap(const cable_xport_t *inner, const char *identity,
+                                          const uint8_t *psk, size_t psk_len)
+{
+    if (!inner || !identity || !*identity || !psk || psk_len == 0 || psk_len > CABLE_XPORT_TLS_PSK_MAX) return NULL;
+    // Internal RAM: the atomics and the mutex word must not sit in PSRAM.
+    tls_t *t = heap_caps_calloc(1, sizeof(*t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!t) return NULL;
+    t->lock = xSemaphoreCreateMutex();
+    if (!t->lock) {
+        free(t);
+        return NULL;
+    }
+    t->inner = inner;
+    atomic_init(&t->writers_waiting, 0);
+    atomic_init(&t->up, false);
+    atomic_init(&t->closing, false);
+
+    mbedtls_ssl_config_init(&t->conf);
+    int r = mbedtls_ssl_config_defaults(&t->conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
+    if (r == 0) {
+        // TLS 1.2 only: both ends of the range are pinned, whatever the build enables.
+        mbedtls_ssl_conf_min_tls_version(&t->conf, MBEDTLS_SSL_VERSION_TLS1_2);
+        mbedtls_ssl_conf_max_tls_version(&t->conf, MBEDTLS_SSL_VERSION_TLS1_2);
+        mbedtls_ssl_conf_ciphersuites(&t->conf, s_suites);
+        // mbedTLS copies the key and the identity.
+        r = mbedtls_ssl_conf_psk(&t->conf, psk, psk_len, (const unsigned char *)identity, strlen(identity));
+    }
+    if (r != 0) {
+        ESP_LOGW(TAG, "config failed: -0x%04X", (unsigned)-r);
+        mbedtls_ssl_config_free(&t->conf);
+        vSemaphoreDelete(t->lock);
+        free(t);
+        return NULL;
+    }
+
+    t->self = (cable_xport_t){
+        .name = "tls",
+        .kind = inner->kind,
+        .open = tls_open,
+        .close = tls_close,
+        .read = tls_read,
+        .write = tls_write,
+        .is_up = tls_is_up,
+        .ctx = t,
+        .inner = inner,
+    };
+    return &t->self;
+}
+
+void cable_xport_tls_free(const cable_xport_t *x)
+{
+    if (!x) return;
+    tls_t *t = x->ctx;
+    tls_close(x);
+    mbedtls_ssl_config_free(&t->conf);   // zeroizes the key copy
+    vSemaphoreDelete(t->lock);
+    free(t);
+}

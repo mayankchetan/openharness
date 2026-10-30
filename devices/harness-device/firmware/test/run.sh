@@ -56,6 +56,8 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
    -o "$out/test_cable_xport" "$here/test_cable_xport.c" "$here/../main/cable_frame.c"
 "$out/test_cable_xport"
 python3 "$here/test_cable_xport.py"
+# The TLS-PSK wrapper (B2): its source rules here (no key in logs, two ECDHE-PSK suites, TLS 1.2 pins); its behaviour in the IDF block below.
+python3 "$here/test_cable_xport_tls_source.py"
 # The decoder buffer is in PSRAM (W6): only cable_link.c names it, and every consumer of a frame payload is CPU-side (no DMA).
 python3 "$here/test_decoder_psram.py"
 # IMA ADPCM voice blocks (frame type 0x07): encoder and decoder against the shared vectors, sanitizers on.
@@ -358,6 +360,8 @@ if [[ -n "${IDF_PATH:-}" ]]; then
     python3 "$here/test_cable_supertab.py"
     python3 "$here/test_cable_models.py"
     python3 "$here/test_cable_outbound.py"
+    # cable_xport_tls.c against the IDF copy of mbedTLS built for the host: handshake, echo, refusals, concurrency, deadlines (about 20 s)
+    python3 "$here/test_cable_xport_tls.py"
 fi
 
 python3 "$here/test_companions.py"
