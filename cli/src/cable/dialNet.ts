@@ -25,7 +25,7 @@
 // that is no longer waited for and is dropped, so it can never be taken for the answer to the next one.
 //
 // Nothing here logs a value. The lines carry the op, the id and the outcome, and that is all.
-import { NET_KEY_BYTES, NET_SSID_MAX, validHost, validPort } from '../lib/dialNetRules.js'
+import { NET_KEY_BYTES, NET_SSID_MAX, validHost, validKeyBytes, validPort } from '../lib/dialNetRules.js'
 
 /** How long the dial has to answer. A write to its flash takes tens of milliseconds; this is for a dead link. */
 export const NET_TIMEOUT_MS = 5_000
@@ -150,7 +150,7 @@ export class DialNet {
   /** The flat message for a request, or why it cannot be one. The key travels as base64; nothing else is encoded. */
   private wire(request: NetRequest): { message: { t: string; [key: string]: unknown } } | { error: string } {
     const key = 'key' in request ? request.key : undefined
-    if (key && key.length !== NET_KEY_BYTES) return { error: `a dial key is ${NET_KEY_BYTES} bytes` }
+    if (key && !validKeyBytes(key)) return { error: `a dial key is ${NET_KEY_BYTES} bytes and not all zero` }
     switch (request.op) {
       case 'set': return { message: { t: 'net.set', ssid: request.ssid, pass: request.pass, host: request.host, port: request.port, key: request.key.toString('base64'), mode: request.mode } }
       case 'get': return { message: { t: 'net.get' } }

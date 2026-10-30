@@ -35,8 +35,22 @@ export const validSsid = (value: unknown): value is string => text(value, 1, NET
 export const validPass = (value: unknown): value is string =>
   typeof value === 'string' && (value === '' || text(value, NET_PASS_MIN, NET_PASS_MAX))
 
-export const validHost = (value: unknown): value is string =>
-  typeof value === 'string' && IPV4.test(value) && value.split('.').every((octet) => Number(octet) <= 255)
+/**
+ * A dotted IPv4 the daemon could be at. Not 0.0.0.0, 255.255.255.255, loopback (127/8) or multicast (224/4): none of them is a computer a
+ * dial can connect to. The firmware applies the same rule (config_store.c host_unusable).
+ */
+export const validHost = (value: unknown): value is string => {
+  if (typeof value !== 'string' || !IPV4.test(value)) return false
+  const octets = value.split('.').map(Number)
+  if (octets.some((octet) => octet > 255)) return false
+  const [a, b, c, d] = octets
+  if (a === 0 && b === 0 && c === 0 && d === 0) return false
+  if (a === 255 && b === 255 && c === 255 && d === 255) return false
+  return a !== 127 && !(a >= 224 && a <= 239)
+}
+
+/** A key of the right size that is not all zero: an uninitialised buffer, not a key. The firmware refuses the same (config_net_check_key). */
+export const validKeyBytes = (value: Uint8Array): boolean => value.length === NET_KEY_BYTES && value.some((byte) => byte !== 0)
 
 /** RFC 1918 only. Loopback would send the dial to itself; link-local and carrier-grade NAT are not a home network. */
 export function isLanIPv4(value: string): boolean {
