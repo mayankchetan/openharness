@@ -20,6 +20,7 @@ import {
   NET_FAIL_LIMIT,
   NET_HANDSHAKE_DEADLINE_MS,
   NET_PENDING_MAX,
+  NET_PENDING_PER_ADDR,
   NetDials,
   NetSlot,
   isPrivatePeer,
@@ -127,6 +128,14 @@ describe('isPrivatePeer', () => {
     ['192.169.0.1', false],
     ['::ffff:8.8.8.8', false],
     ['2001:db8::1', false],
+    ['fd::1', false],
+    ['fe8::1', false],
+    ['fec0::1', false],
+    ['fd12:3456::1', true],
+    ['fc00::1', true],
+    ['fe80::1', true],
+    ['febf::1', true],
+    ['::', false],
     ['', false],
     ['not an address', false],
   ])('%s -> %s', (addr, expected) => {
@@ -350,23 +359,6 @@ describe('NetDials: who gets in', () => {
 })
 
 describe('NetDials: limits on unauthenticated peers (spec 4.2)', () => {
-  it('keeps at most 16 pending sockets and evicts the oldest to admit a new one', async () => {
-    const r = await listening(rig({}, [[A, randomBytes(32)]]))
-    const clients: Array<ReturnType<typeof rawClient>> = []
-    for (let i = 0; i < NET_PENDING_MAX; i++) {
-      clients.push(rawClient(r, '127.0.0.2'))
-      await until(() => r.dials.pending === i + 1 || r.dials.stats.evicted > 0)
-    }
-    expect(r.dials.pending).toBe(NET_PENDING_MAX)
-    expect(clients[0].closed()).toBe(false)
-    const newest = rawClient(r, '127.0.0.2')
-    await until(() => clients[0].closed(), 'the oldest evicted')
-    expect(r.dials.pending).toBe(NET_PENDING_MAX)
-    expect(clients[1].closed()).toBe(false)
-    expect(newest.closed()).toBe(false)
-    expect(r.dials.stats.evicted).toBe(1)
-  })
-
   it('100 idle sockets from one noise host never keep a dial out', async () => {
     const key = randomBytes(32)
     const r = await listening(rig({}, [[A, key]]))
@@ -584,5 +576,274 @@ describe('NetSlot: one dial, one session', () => {
     const waiting = slot.opener(() => {}, () => {})
     slot.close('stopping')
     expect(await waiting).toBeNull()
+  })
+})
+
+describe('NetDials: the pending pool under a flood', () => {
+  /** A dial that has connected and not yet started TLS: it sits in the pool until `finish` runs the handshake. */
+  async function slowDial(r: Rig, id: string, key: Buffer, localAddress = '127.0.0.1') {
+    const raw = net.connect({ port: r.port(), host: '127.0.0.1', localAddress })
+    raw.on('error', () => {})
+    cleanup.push(() => raw.destroy())
+    let closed = false
+    raw.once('close', () => {
+      closed = true
+    })
+    await new Promise<void>((resolve) => raw.once('connect', () => resolve()))
+    return { raw, closed: () => closed, finish: () => pskConnect({ port: r.port(), identity: id, psk: key, socket: raw }) }
+  }
+  const addrs = (n: number, from = 2) => Array.from({ length: n }, (_, i) => `127.0.0.${from + i}`)
+  const holdOneSecond = () => new Promise((resolve) => setTimeout(resolve, 1000))
+
+  it('a slow dial finishes its handshake while 100 connects arrive from one noise address', async () => {
+    const key = randomBytes(32)
+    const r = await listening(rig({}, [[A, key]]))
+    const slow = await slowDial(r, A, key)
+    await until(() => r.dials.pending === 1, 'slow dial pending')
+    const noise = Array.from({ length: 100 }, () => rawClient(r, '127.0.0.2'))
+    await until(() => r.dials.stats.accepted >= 101, 'all connects seen')
+    await holdOneSecond()
+    expect(slow.closed()).toBe(false)
+    const tlsSocket = await slow.finish()
+    tlsSocket.on('error', () => {})
+    cleanup.push(() => tlsSocket.destroy())
+    await until(() => r.conns.length === 1, 'the slow dial authenticated')
+    expect(r.conns[0].peer).toBe('127.0.0.1')
+    // 4 of the flood were let into the pool; the 5th on counted against the flooder and ended the same moment
+    expect(r.dials.stats.capped).toBe(NET_FAIL_LIMIT)
+    expect(r.dials.stats.capped + r.dials.stats.throttled).toBe(100 - NET_PENDING_PER_ADDR)
+    expect(noise.length).toBe(100)
+  })
+
+  it('the flooder address is banned by the existing 20 failures in 60 s rule, and the dial\'s address is not', async () => {
+    const r = await listening(rig({}, [[A, randomBytes(32)]]))
+    const noise = Array.from({ length: 60 }, () => rawClient(r, '127.0.0.2'))
+    await until(() => r.dials.stats.accepted >= 60)
+    expect(r.dials.stats.throttled).toBeGreaterThan(0)
+    expect(r.logs.some((l) => /127\.0\.0\.2/.test(l) && /refusing it for 30 s/.test(l))).toBe(true)
+    // banned: a connect from it is destroyed at accept, though its own pool share has long since freed up
+    const later = rawClient(r, '127.0.0.2')
+    await until(later.closed, 'banned address closed at accept')
+    // while another address is served as before
+    const other = rawClient(r, '127.0.0.3')
+    await until(() => r.dials.pending >= 5)
+    expect(other.closed()).toBe(false)
+    expect(noise.length).toBe(60)
+  })
+
+  it('a slow dial finishes while 8 noise addresses with 4 sockets each fill the pool and more', async () => {
+    const key = randomBytes(32)
+    const r = await listening(rig({}, [[A, key]]))
+    const slow = await slowDial(r, A, key)
+    await until(() => r.dials.pending === 1)
+    const noise = addrs(8).flatMap((a) => Array.from({ length: NET_PENDING_PER_ADDR }, () => rawClient(r, a)))
+    await until(() => r.dials.stats.accepted >= 1 + 32, 'all 32 connects seen')
+    await holdOneSecond()
+    expect(r.dials.stats.evicted).toBeGreaterThan(0)
+    expect(slow.closed()).toBe(false)
+    const tlsSocket = await slow.finish()
+    tlsSocket.on('error', () => {})
+    cleanup.push(() => tlsSocket.destroy())
+    await until(() => r.conns.length === 1, 'the slow dial authenticated')
+    expect(noise.length).toBe(32)
+    expect(r.dials.stats.evictionFailures).toBeGreaterThan(0)
+  })
+
+  it('a pending socket of a known address survives a flood from unknown addresses', async () => {
+    const key = randomBytes(32)
+    const r = await listening(rig({}, [[A, key]]))
+    r.keys.touch(A, '127.0.0.3')
+    const slow = await slowDial(r, A, key, '127.0.0.3')
+    // the known address holds the most of anyone (a known address has no per-address cap), so only its exemption saves it
+    const alsoKnown = Array.from({ length: 5 }, () => rawClient(r, '127.0.0.3'))
+    await until(() => r.dials.pending === 6)
+    const noise = addrs(8, 4).flatMap((a) => Array.from({ length: NET_PENDING_PER_ADDR }, () => rawClient(r, a)))
+    await until(() => r.dials.stats.accepted >= 1 + 32)
+    await holdOneSecond()
+    expect(r.dials.stats.evicted).toBeGreaterThan(0)
+    expect(slow.closed()).toBe(false)
+    expect(alsoKnown.some((k) => k.closed())).toBe(false)
+    const tlsSocket = await slow.finish()
+    tlsSocket.on('error', () => {})
+    cleanup.push(() => tlsSocket.destroy())
+    await until(() => r.conns.length === 1)
+    expect(noise.length).toBe(32)
+  })
+
+  it('an unknown newcomer is turned away when only known addresses wait; a known newcomer evicts the oldest', async () => {
+    const r = await listening(rig({}, [[A, randomBytes(32)]]))
+    r.keys.touch(A, '127.0.0.3')
+    const known = Array.from({ length: NET_PENDING_MAX }, () => rawClient(r, '127.0.0.3'))
+    await until(() => r.dials.pending === NET_PENDING_MAX, 'pool full of known')
+    const stranger = rawClient(r, '127.0.0.2')
+    await until(stranger.closed, 'the unknown newcomer is the one refused')
+    expect(known.some((k) => k.closed())).toBe(false)
+    const one = rawClient(r, '127.0.0.3')
+    await until(() => known[0].closed(), 'a known newcomer evicts the oldest')
+    expect(known[1].closed()).toBe(false)
+    expect(one.closed()).toBe(false)
+  })
+
+  it('a full pool gives way at the address holding the most, oldest socket first, and counts it against that address', async () => {
+    const r = await listening(rig({}, [[A, randomBytes(32)]]))
+    // 127.0.0.2 holds 4, 127.0.0.3 holds 4, 127.0.0.4 holds 4, 127.0.0.5 holds 3, 127.0.0.6 holds 1
+    const counts: Array<[string, number]> = [['127.0.0.2', 4], ['127.0.0.3', 4], ['127.0.0.4', 4], ['127.0.0.5', 3], ['127.0.0.6', 1]]
+    const held: Record<string, Array<ReturnType<typeof rawClient>>> = {}
+    for (const [a, n] of counts) {
+      held[a] = []
+      for (let i = 0; i < n; i++) {
+        held[a].push(rawClient(r, a))
+        await until(() => r.dials.pending === Object.values(held).reduce((t, l) => t + l.length, 0))
+      }
+    }
+    expect(r.dials.pending).toBe(NET_PENDING_MAX)
+    const newcomer = rawClient(r, '127.0.0.7')
+    await until(() => held['127.0.0.2'][0].closed(), 'the oldest socket of the first biggest holder goes')
+    expect(held['127.0.0.2'].slice(1).some((c) => c.closed())).toBe(false)
+    expect(held['127.0.0.3'].some((c) => c.closed())).toBe(false)
+    expect(held['127.0.0.6'][0].closed()).toBe(false)
+    expect(newcomer.closed()).toBe(false)
+    expect(r.dials.stats.evictionFailures).toBe(1)
+    // an address with a single pending socket is not blamed when it loses it
+    const before = r.dials.stats.evictionFailures
+    for (const a of ['127.0.0.2', '127.0.0.3', '127.0.0.4']) for (const c of held[a]) c.socket.destroy()
+    await until(() => r.dials.pending <= 5)
+    expect(r.dials.stats.evictionFailures).toBe(before)
+  })
+})
+
+describe('NetDials: a key that changes while a handshake runs', () => {
+  const quiet = (p: Promise<Awaited<ReturnType<typeof connect>>>) =>
+    p.then(
+      (s) => {
+        s.on('error', () => {})
+        cleanup.push(() => s.destroy())
+        return s
+      },
+      () => null,
+    )
+
+  it('refuses a dial whose key was removed during its handshake, and a handshake in flight is dropped', async () => {
+    const key = randomBytes(32)
+    const r = await listening(rig({}, [[A, key], [B, randomBytes(32)]]))
+    const real = r.keys.get.bind(r.keys)
+    vi.spyOn(r.keys, 'get').mockImplementation((id) => {
+      const k = real(id)
+      if (id === A) r.keys.remove(A)
+      return k
+    })
+    await quiet(connect(r, A, key))
+    await until(() => r.dials.stats.revoked >= 1, 'revoked')
+    expect(r.conns).toHaveLength(0)
+    expect(r.dials.authenticated).toBe(0)
+    expect(r.dials.pending).toBe(0)
+  })
+
+  it('refuses a dial whose key was replaced during its handshake', async () => {
+    const key = randomBytes(32)
+    const r = await listening(rig({}, [[A, key]]))
+    const real = r.keys.get.bind(r.keys)
+    let once = true
+    vi.spyOn(r.keys, 'get').mockImplementation((id) => {
+      const k = real(id)
+      if (id === A && once) {
+        once = false
+        r.keys.set(A, randomBytes(32))
+      }
+      return k
+    })
+    await quiet(connect(r, A, key))
+    await until(() => r.dials.stats.revoked >= 1)
+    expect(r.conns).toHaveLength(0)
+  })
+
+  it('drops a handshake in flight the moment its key changes, even when the key it holds still looks right', async () => {
+    const key = randomBytes(32)
+    const r = await listening(rig({}, [[A, key]]))
+    const real = r.keys.get.bind(r.keys)
+    let first: Buffer | undefined
+    // the lookup hands out the key and the store then changes under it; every later read still answers with that first key
+    vi.spyOn(r.keys, 'get').mockImplementation((id) => {
+      if (id !== A) return real(id)
+      if (first) return Buffer.from(first)
+      first = real(id)
+      r.keys.set(A, randomBytes(32))
+      return Buffer.from(first!)
+    })
+    await quiet(connect(r, A, key))
+    await until(() => r.dials.stats.revoked >= 1)
+    expect(r.conns).toHaveLength(0)
+    expect(r.logs.some((l) => /during the handshake/.test(l))).toBe(false)
+  })
+
+  it('refuses a handshake whose key no longer matches when it finishes, even if nobody was told', async () => {
+    const key = randomBytes(32)
+    const r = await listening(rig({}, [[A, key]]))
+    const real = r.keys.get.bind(r.keys)
+    let calls = 0
+    // the lookup sees the key; every later read sees a different one, with no change notification
+    vi.spyOn(r.keys, 'get').mockImplementation((id) => (id === A && ++calls > 1 ? randomBytes(32) : real(id)))
+    await quiet(connect(r, A, key))
+    await until(() => r.dials.stats.revoked >= 1)
+    expect(r.conns).toHaveLength(0)
+    expect(r.logs.some((l) => /key was removed or replaced during the handshake/.test(l))).toBe(true)
+    // and one whose key is gone entirely
+    calls = 0
+    vi.spyOn(r.keys, 'get').mockImplementation((id) => (id === A && ++calls > 1 ? undefined : real(id)))
+    await quiet(connect(r, A, key))
+    await until(() => r.dials.stats.revoked >= 2)
+    expect(r.conns).toHaveLength(0)
+  })
+})
+
+describe('NetDials: a link nobody takes, and a port that cannot open', () => {
+  it('destroys the socket when onDial throws, and says so once', async () => {
+    const key = randomBytes(32)
+    const r = await listening(
+      rig(
+        {
+          onDial: () => {
+            throw new Error('the fleet is gone')
+          },
+        },
+        [[A, key]],
+      ),
+    )
+    const s = await connect(r, A, key).catch(() => null)
+    s?.on('error', () => {})
+    await until(() => r.logs.some((l) => /nobody could take the link \(the fleet is gone\)/.test(l)))
+    await until(() => s?.destroyed ?? true)
+    expect(r.dials.authenticated).toBe(0)
+  })
+
+  it('destroys the socket when onDial returns false', async () => {
+    const key = randomBytes(32)
+    const taken: NetDialConnection[] = []
+    const r = await listening(
+      rig(
+        {
+          onDial: (c) => {
+            taken.push(c)
+            return false
+          },
+        },
+        [[A, key]],
+      ),
+    )
+    const s = await connect(r, A, key).catch(() => null)
+    s?.on('error', () => {})
+    await until(() => taken.length === 1)
+    await until(() => taken[0].socket.destroyed, 'destroyed')
+    expect(r.dials.authenticated).toBe(0)
+  })
+
+  it.each([70000, -1, 1.5])('logs once and stays off when listen throws for port %s', async (port) => {
+    const r = rig({ port }, [[A, randomBytes(32)]])
+    await r.dials.settled()
+    expect(r.dials.listening).toBe(false)
+    r.keys.set(B, randomBytes(32))
+    await r.dials.settled()
+    expect(r.logs.filter((l) => /cannot listen on port/.test(l))).toHaveLength(1)
+    expect(r.logs.some((l) => /listening/.test(l))).toBe(false)
   })
 })

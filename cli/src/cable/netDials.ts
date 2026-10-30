@@ -14,13 +14,18 @@
 //
 // Limits on unauthenticated peers (spec 4.2). They exist so that LAN noise can never lock out the dial that is provisioned:
 //   - a socket that has not finished the handshake 3 s after accept is destroyed;
-//   - at most 16 sockets wait in the pool; when it is full the OLDEST is destroyed to admit the new one, so noise can
-//     churn the pool but a dial's reconnect always gets a slot;
+//   - at most 16 sockets wait in the pool, and at most 4 of them from one unknown address (a 5th connect from it is
+//     destroyed at accept and counts as a failure for that address);
+//   - when the pool is full a newcomer takes the place of the OLDEST socket of the unknown address that holds the MOST
+//     pending sockets, so one address cannot push a slow dial out of the pool with a flood of its own. A pending socket of a
+//     known address (below) is never evicted for a newcomer from an unknown one; when every waiting socket is a known
+//     address's, a known newcomer evicts the oldest, and an unknown newcomer is the one refused. An eviction counts as a
+//     failure for the evicted socket's address when that address held more than one pending socket, so a flooder earns
+//     the ban below by its own churn;
 //   - an address that authenticated in the last 7 days (the keystore's lastAddr / lastSeen) is never throttled;
 //   - any other address that fails 20 handshakes within 60 s is destroyed at accept for 30 s (never more than 60 s);
 //   - one authenticated socket per identity: a new one, which has proved the key, replaces the old.
-// A socket the pool evicts is not counted as a failure: the one pushed out may be an honest dial, and its address must
-// not be blamed for what noise did.
+// An address that holds a single pending socket is never blamed for losing it: that may be an honest dial.
 import * as net from 'node:net'
 import type * as tls from 'node:tls'
 
@@ -32,6 +37,8 @@ import { pskIdentityOf, wrapPskSocket } from './tlsPsk.js'
 export const NET_HANDSHAKE_DEADLINE_MS = 3_000
 /** Sockets that have not yet proved a key. */
 export const NET_PENDING_MAX = 16
+/** Of those, from one unknown address. */
+export const NET_PENDING_PER_ADDR = 4
 /** Failed handshakes from one unknown address, within NET_FAIL_WINDOW_MS, that start a ban. */
 export const NET_FAIL_LIMIT = 20
 export const NET_FAIL_WINDOW_MS = 60_000
@@ -53,11 +60,16 @@ export function isPrivatePeer(address: string): boolean {
   const addr = address.startsWith('::ffff:') ? address.slice(7) : address
   if (net.isIPv4(addr)) {
     const [a, b] = addr.split('.').map(Number)
+    // Carrier-grade NAT (100.64.0.0/10) is deliberately refused: it is another subscriber's network, not this home's.
     return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)
   }
   if (net.isIPv6(addr)) {
-    const lower = addr.toLowerCase()
-    return lower === '::1' || /^fe[89ab]/.test(lower) || /^f[cd]/.test(lower)
+    if (addr === '::1') return true
+    // The first hextet as a number, so "fd::1" (0x00fd, a public-range address) is not read as the unique-local fd00::/8.
+    const first = addr.split(':')[0]
+    if (first === '') return false
+    const h = parseInt(first, 16)
+    return (h & 0xfe00) === 0xfc00 || (h & 0xffc0) === 0xfe80
   }
   return false
 }
@@ -123,8 +135,11 @@ export interface NetDialsOptions {
   /** False never opens the socket (`CABLE_NET_ENABLE=false`). */
   enabled?: boolean
   log: (line: string) => void
-  /** A dial finished the handshake. The socket is paused: it delivers nothing until the receiver reads it. */
-  onDial: (connection: NetDialConnection) => void
+  /**
+   * A dial finished the handshake. The socket is paused: it delivers nothing until the receiver reads it. A throw, or
+   * `false`, means nobody took it: the socket is destroyed.
+   */
+  onDial: (connection: NetDialConnection) => void | boolean
   /** Replace the private-peer filter (tests: loopback is private, so a "public" host has to be named). */
   isPrivatePeer?: (address: string) => boolean
   /** Milliseconds clock for the 60 s / 30 s / 7 day rules. */
@@ -139,10 +154,14 @@ interface Pending {
   timer: ReturnType<typeof setTimeout> | undefined
   /** The handshake has ended one way or the other; nothing more is counted for this socket. */
   settled: boolean
+  /** The identity the peer named in its handshake, once the key lookup has run (upper case). */
+  claimed?: string
+  /** The key that lookup handed the handshake: a dial whose key changed since is refused when it finishes. */
+  keyUsed?: Buffer
 }
 
 export class NetDials {
-  readonly stats = { accepted: 0, refusedPeer: 0, throttled: 0, failed: 0, evicted: 0, authenticated: 0, replaced: 0, overLimit: 0 }
+  readonly stats = { accepted: 0, refusedPeer: 0, throttled: 0, failed: 0, evicted: 0, evictionFailures: 0, capped: 0, revoked: 0, authenticated: 0, replaced: 0, overLimit: 0 }
   readonly #opts: NetDialsOptions
   readonly #throttle: AddressThrottle
   readonly #pending = new Set<Pending>()
@@ -190,6 +209,12 @@ export class NetDials {
     this.#off = this.#opts.keys.onChange((change) => {
       const live = this.#auth.get(change.id)
       if (live) this.#drop(live, change.kind === 'remove' ? 'its key was removed' : 'its key was replaced')
+      // A handshake in flight with the old key must not finish into a session.
+      for (const waiting of [...this.#pending]) {
+        if (waiting.claimed !== change.id) continue
+        this.stats.revoked++
+        this.#drop(waiting, 'its key changed')
+      }
       this.#reconcile()
     })
     this.#reconcile()
@@ -222,14 +247,19 @@ export class NetDials {
     const { port, bind } = this.#opts
     const server = net.createServer((raw) => this.#accept(raw))
     return new Promise<void>((resolve) => {
+      // Said once: the listener is not tried again until the daemon restarts.
+      let done = false
       const failed = (error: NodeJS.ErrnoException) => {
+        if (done) return
+        done = true
         this.#clashed = true
         const code = error.code ?? 'error'
         this.#log(code === 'EADDRINUSE' ? `cable: Wi-Fi dials are off — port ${port} is in use (${code}); USB dials are unaffected` : `cable: Wi-Fi dials are off — cannot listen on port ${port} (${code}); USB dials are unaffected`)
         resolve()
       }
       server.once('error', failed)
-      server.listen(port, bind ?? '0.0.0.0', () => {
+      const opened = () => {
+        done = true
         server.off('error', failed)
         // A fault after it opened ends the listener the same way, and says so once.
         server.on('error', (error: NodeJS.ErrnoException) => {
@@ -240,7 +270,13 @@ export class NetDials {
         const at = this.address()
         this.#log(`cable: Wi-Fi dials listening on ${at?.address ?? bind}:${at?.port ?? port} for ${this.#opts.keys.size} provisioned dial(s)`)
         resolve()
-      })
+      }
+      // A bad port or address is a synchronous throw from listen, not an 'error' event.
+      try {
+        server.listen(port, bind ?? '0.0.0.0', opened)
+      } catch (error) {
+        failed(error as NodeJS.ErrnoException)
+      }
     })
   }
 
@@ -271,15 +307,35 @@ export class NetDials {
       raw.destroy()
       return
     }
-    raw.setNoDelay(true)
-    // Full pool: the oldest waiting socket goes, never the new one. Sets keep insertion order.
-    while (this.#pending.size >= NET_PENDING_MAX) {
-      const oldest = this.#pending.values().next().value as Pending
-      this.stats.evicted++
-      this.#drop(oldest, 'pool full')
+    const known = this.#opts.keys.isKnownAddr(peer)
+    // One unknown address cannot hold more than its share of the pool.
+    if (!known && this.#pendingFrom(peer) >= NET_PENDING_PER_ADDR) {
+      this.stats.capped++
+      this.#noteFailure(peer)
+      raw.destroy()
+      return
     }
-    const secure = wrapPskSocket(raw, (identity) => this.#opts.keys.get(identity))
-    const entry: Pending = { raw, tls: secure, peer, port: raw.remotePort ?? 0, timer: undefined, settled: false }
+    if (this.#pending.size >= NET_PENDING_MAX) {
+      const victim = this.#victim(known)
+      if (!victim) {
+        // Only known dials wait, and the newcomer is not one: it is the one turned away.
+        this.stats.capped++
+        this.#noteFailure(peer)
+        raw.destroy()
+        return
+      }
+      this.#evict(victim)
+    }
+    raw.setNoDelay(true)
+    let entry!: Pending
+    // The lookup runs during the handshake: it records which identity the peer named and the key it was given.
+    const secure = wrapPskSocket(raw, (identity) => {
+      entry.claimed = identity.toUpperCase()
+      const key = this.#opts.keys.get(identity)
+      entry.keyUsed = key ? Buffer.from(key) : undefined
+      return key
+    })
+    entry = { raw, tls: secure, peer, port: raw.remotePort ?? 0, timer: undefined, settled: false }
     this.#pending.add(entry)
     secure.on('error', (error) => this.#failed(entry, error.message))
     secure.once('secure', () => this.#secured(entry))
@@ -293,11 +349,50 @@ export class NetDials {
     this.#settle(entry)
     this.stats.failed++
     this.#logSome(`fail:${entry.peer}`, `cable: Wi-Fi handshake from ${entry.peer} failed (${reason.split('\n')[0].slice(0, 120)})`)
-    if (this.#throttle.failed(entry.peer)) {
-      this.#log(`cable: Wi-Fi peer ${entry.peer} failed ${NET_FAIL_LIMIT} handshakes in ${NET_FAIL_WINDOW_MS / 1000} s — refusing it for ${NET_BAN_MS / 1000} s${this.#opts.keys.isKnownAddr(entry.peer) ? ' (a known dial address is not refused)' : ''}`)
-    }
+    this.#noteFailure(entry.peer)
     entry.tls.destroy()
     entry.raw.destroy()
+  }
+
+  /** One failure against an address; the one that starts a ban says so. */
+  #noteFailure(peer: string): void {
+    if (this.#throttle.failed(peer)) {
+      this.#log(`cable: Wi-Fi peer ${peer} failed ${NET_FAIL_LIMIT} handshakes in ${NET_FAIL_WINDOW_MS / 1000} s — refusing it for ${NET_BAN_MS / 1000} s${this.#opts.keys.isKnownAddr(peer) ? ' (a known dial address is not refused)' : ''}`)
+    }
+  }
+
+  #pendingFrom(peer: string): number {
+    let count = 0
+    for (const entry of this.#pending) if (entry.peer === peer) count++
+    return count
+  }
+
+  /**
+   * Whose socket makes room for a newcomer: the oldest of the unknown address holding the most (ties: the address whose
+   * socket is oldest). Known addresses' sockets are not offered, except to a known newcomer when nothing else waits.
+   */
+  #victim(newcomerKnown: boolean): Pending | undefined {
+    const byAddr = new Map<string, Pending[]>()
+    for (const entry of this.#pending) {
+      if (this.#opts.keys.isKnownAddr(entry.peer)) continue
+      const list = byAddr.get(entry.peer) ?? []
+      list.push(entry)
+      byAddr.set(entry.peer, list)
+    }
+    let best: Pending[] | undefined
+    for (const list of byAddr.values()) if (!best || list.length > best.length) best = list
+    if (best) return best[0]
+    return newcomerKnown ? (this.#pending.values().next().value as Pending) : undefined
+  }
+
+  #evict(victim: Pending): void {
+    const crowded = this.#pendingFrom(victim.peer) > 1
+    this.stats.evicted++
+    this.#drop(victim, 'pool full')
+    if (crowded) {
+      this.stats.evictionFailures++
+      this.#noteFailure(victim.peer)
+    }
   }
 
   #closed(entry: Pending): void {
@@ -321,6 +416,20 @@ export class NetDials {
       entry.tls.destroy()
       return
     }
+    // The key may have been removed or replaced while the handshake ran: a revoked dial does not get in on it.
+    const current = this.#opts.keys.get(id)
+    const used = entry.keyUsed
+    entry.keyUsed = undefined
+    const revoked = !current || !used || !current.equals(used)
+    current?.fill(0)
+    used?.fill(0)
+    if (revoked) {
+      this.stats.revoked++
+      this.#log(`cable: Wi-Fi dial ${id} from ${entry.peer} refused — its key was removed or replaced during the handshake`)
+      entry.tls.destroy()
+      entry.raw.destroy()
+      return
+    }
     if (!this.#auth.has(id) && this.#auth.size >= NET_AUTH_MAX) {
       this.stats.overLimit++
       this.#log(`cable: Wi-Fi dial ${id} from ${entry.peer} refused — ${NET_AUTH_MAX} dials are connected`)
@@ -340,7 +449,14 @@ export class NetDials {
       this.#log(`cable: Wi-Fi dial ${id}: cannot record its address (${(error as NodeJS.ErrnoException).code ?? 'write failed'})`)
     }
     this.#log(`cable: Wi-Fi dial ${id} authenticated from ${entry.peer}`)
-    this.#opts.onDial({ id, peer: entry.peer, port: entry.port, socket: entry.tls })
+    let taken: void | boolean
+    try {
+      taken = this.#opts.onDial({ id, peer: entry.peer, port: entry.port, socket: entry.tls })
+    } catch (error) {
+      taken = false
+      this.#log(`cable: Wi-Fi dial ${id}: nobody could take the link (${error instanceof Error ? error.message.slice(0, 120) : 'error'})`)
+    }
+    if (taken === false) this.#drop(entry, 'not taken')
   }
 
   #settle(entry: Pending): void {

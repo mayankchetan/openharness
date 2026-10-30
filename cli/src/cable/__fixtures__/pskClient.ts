@@ -1,5 +1,6 @@
 // Test client for the TLS-PSK link (tlsPsk.ts). Node `tls.connect` with a client `pskCallback`, the way the dial's
 // mbedTLS client behaves: it sends `identity` and proves it holds `psk`. Test code only; the daemon never dials out.
+import type * as net from 'node:net'
 import * as tls from 'node:tls'
 
 export interface PskClientOptions {
@@ -13,6 +14,8 @@ export interface PskClientOptions {
   ciphers?: string
   minVersion?: tls.SecureVersion
   maxVersion?: tls.SecureVersion
+  /** Run the handshake over this already connected socket (a dial that is slow to start TLS). */
+  socket?: net.Socket
   /** Offer this session for resumption. */
   session?: Buffer
   /** Leave the client without a PSK callback (offers no PSK suite). */
@@ -34,6 +37,7 @@ export function pskConnect(opts: PskClientOptions): Promise<tls.TLSSocket> {
     // An explicit `ciphers: undefined` keeps the Node default list (a TLS 1.3 client needs its own suites).
     if ('ciphers' in opts) options.ciphers = opts.ciphers
     else options.ciphers = 'ECDHE-PSK-AES128-CBC-SHA256'
+    if (opts.socket) options.socket = opts.socket
     if (opts.session) options.session = opts.session
     if (!opts.noPsk) options.pskCallback = () => ({ psk: opts.psk, identity: opts.identity })
     const socket = tls.connect(options)
