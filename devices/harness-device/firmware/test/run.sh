@@ -18,6 +18,8 @@ python3 "$here/../scripts/gen_cable_vectors.py" --check
 python3 "$here/../scripts/gen_tux_moods.py" --check
 python3 "$here/../scripts/gen_pets.py" --check
 python3 "$here/../scripts/gen_arc_geometry.py" --check
+python3 "$here/../scripts/gen_adpcm_vectors.py" --check
+python3 "$here/test_adpcm_vectors.py"
 
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -I "$here/../main" -o "$out/test_character" "$here/test_character.c" "$here/../main/pet_store.c" "$here/../main/elapsed.c" \

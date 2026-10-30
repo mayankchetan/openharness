@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the shared framing vectors for the USB cable link.
 
-    devices/harness-device/firmware/scripts/gen_cable_vectors.py        # writes test/vectors/cable_frame.txt
+    devices/harness-device/firmware/scripts/gen_cable_vectors.py        # writes test/vectors/cable_frame.txt and cli/src/cable/vectors/cable_frame.txt
     devices/harness-device/firmware/scripts/gen_cable_vectors.py --check # fails if the file on disk differs
 
 A THIRD implementation, written from the format description in main/cable_frame.h and from nothing
@@ -32,6 +32,10 @@ MAX_PAYLOAD = 8192
 HEADER_BYTES = 6
 
 TYPE_JSON, TYPE_PCM, TYPE_FW, TYPE_LOG = 1, 2, 3, 4
+# Type 0x07: one ADPCM voice block (a 5-byte prefix and one WAV IMA mono block). The envelope neither knows nor
+# checks that; the payload here is opaque filler of the nominal size. The block itself is vectored in
+# gen_adpcm_vectors.py.
+TYPE_ADPCM = 7
 
 
 def crc16(data: bytes) -> int:
@@ -72,6 +76,7 @@ def encode_cases():
         ("pcm_chunk_1024", TYPE_PCM, ramp(1024)),
         ("fw_slice_max", TYPE_FW, ramp(MAX_PAYLOAD)),
         ("log_line", TYPE_LOG, b"I (1234) cable: link up"),
+        ("adpcm_block", TYPE_ADPCM, ramp(261)),
         # Not a type this build knows. Kept as a vector because the rule is that an unknown type is
         # handed up with its raw byte rather than dropped — a newer peer must read as a mismatch.
         ("unknown_type_0x7f", 0x7F, b"whatever"),
@@ -163,20 +168,29 @@ def main() -> int:
                     help="exit non-zero if the file on disk differs from what this run would write")
     args = ap.parse_args()
 
-    path = pathlib.Path(__file__).resolve().parent.parent / "test" / "vectors" / "cable_frame.txt"
+    firmware = pathlib.Path(__file__).resolve().parent.parent
+    # Both halves read their own copy; the script writes both so neither is hand-copied (cli/scripts/sync-cable-vectors.sh
+    # remains for a CLI checkout that has no firmware tree beside it).
+    paths = [firmware / "test" / "vectors" / "cable_frame.txt",
+             firmware.parents[2] / "cli" / "src" / "cable" / "vectors" / "cable_frame.txt"]
     text = render()
     if args.check:
-        if not path.exists():
-            print(f"missing: {path}", file=sys.stderr)
-            return 1
-        if path.read_text() != text:
-            print(f"stale: {path} — re-run {pathlib.Path(__file__).name}", file=sys.stderr)
-            return 1
-        print(f"up to date: {path}")
-        return 0
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
-    print(f"wrote {path} ({len(text.splitlines())} lines)")
+        stale = False
+        for path in paths:
+            if not path.exists():
+                print(f"missing: {path}", file=sys.stderr)
+                stale = True
+            # utf-8 and folded newlines: the file holds an em dash, and a CRLF checkout is the same file.
+            elif path.read_bytes().decode("utf-8").replace("\r\n", "\n") != text:
+                print(f"stale: {path} — re-run {pathlib.Path(__file__).name}", file=sys.stderr)
+                stale = True
+        if not stale:
+            print("up to date: " + ", ".join(str(p) for p in paths))
+        return 1 if stale else 0
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(text.encode("utf-8"))
+        print(f"wrote {path} ({len(text.splitlines())} lines)")
     return 0
 
 
