@@ -4381,6 +4381,89 @@ describe('ADPCM voice turns', () => {
     })
   })
 
+  describe('codec negotiation', () => {
+    it('treats voice.begin.codec adpcm as PCM when the dial did not ask for adpcm-v1, and says so once', async () => {
+      const { session, port, transcribe, host, lines } = await adpcmTurn({}, { ...ADPCM_HELLO, voiceCodec: undefined })
+      try {
+        const raw = Buffer.alloc(3200, 5)
+        begin(port)            // codec: 'adpcm' that nobody offered
+        port.adpcm(block(0))   // not an ADPCM turn: ignored
+        port.pcm(raw)
+        port.say({ t: 'voice.end', uploadId: 'u1' })
+        await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalledTimes(1))
+        expect(transcribe.mock.calls[0]![0].equals(raw)).toBe(true)
+        begin(port)
+        port.pcm(raw)
+        port.say({ t: 'voice.end', uploadId: 'u1' })
+        await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalledTimes(2))
+        expect(lines.filter((l) => /voice\.begin asked for adpcm/.test(l))).toHaveLength(1)
+      } finally { await session.stop() }
+    })
+
+    it('treats it as PCM before any hello', async () => {
+      const lines: string[] = []
+      const host = makeHost({ log: (line) => lines.push(line) })
+      const { session, port } = await connect(host)
+      try {
+        begin(port)
+        port.pcm(Buffer.alloc(3200, 3))
+        port.say({ t: 'voice.end', uploadId: 'u1' })
+        await vi.waitFor(() => expect(lines.some((l) => /voice\.begin asked for adpcm/.test(l))).toBe(true))
+      } finally { await session.stop() }
+    })
+  })
+
+  describe('wrong-type frames', () => {
+    it('counts PCM frames in an ADPCM turn, logs the first once, and still serves the turn', async () => {
+      const { session, port, transcribe, host, lines } = await adpcmTurn()
+      try {
+        begin(port)
+        port.pcm(Buffer.alloc(3200, 9)); port.pcm(Buffer.alloc(3200, 9)); port.pcm(Buffer.alloc(3200, 9))
+        port.adpcm(block(0))
+        port.say({ t: 'voice.end', uploadId: 'u1' })
+        await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalled())
+        expect(transcribe.mock.calls[0]![0].length).toBe(ADPCM_BLOCK_PCM_BYTES)
+        expect(lines.filter((l) => /ignoring PCM audio in an ADPCM turn/.test(l))).toHaveLength(1)
+        expect(lines).toContain('cable: voice 0.0s (1 KB) → stt · adpcm 1 blocks, 0 lost, 0 repeated, 0 bad · 3 wrong-type frames')
+      } finally { await session.stop() }
+    })
+
+    it('counts ADPCM frames in a PCM turn, logs the first once per turn, and logs again in the next turn', async () => {
+      const { session, port, transcribe, host, lines } = await adpcmTurn()
+      try {
+        const raw = Buffer.alloc(3200, 7)
+        for (let turn = 1; turn <= 2; turn++) {
+          begin(port, {})
+          port.adpcm(block(0)); port.adpcm(block(1))
+          port.pcm(raw)
+          port.say({ t: 'voice.end', uploadId: 'u1' })
+          await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalledTimes(turn))
+          expect(transcribe.mock.calls[turn - 1]![0].equals(raw)).toBe(true)
+          expect(lines.filter((l) => /ignoring ADPCM audio in a PCM turn/.test(l))).toHaveLength(turn)
+        }
+        expect(lines.filter((l) => l === 'cable: voice 0.1s (3 KB) → stt · 2 wrong-type frames')).toHaveLength(2)
+      } finally { await session.stop() }
+    })
+
+    it('totals them in the link line', async () => {
+      const log = tmpLog()
+      const { session, port } = await connect(makeHost(), log)
+      try {
+        port.say(ADPCM_HELLO)
+        await vi.waitFor(() => expect(port.types()).toContain('welcome'))
+        port.say({ t: 'voice.begin', uploadId: 'u1', agentId: 'a2', codec: 'adpcm' })
+        port.pcm(Buffer.alloc(320)); port.pcm(Buffer.alloc(320))
+        port.adpcm(block(0))
+        port.say({ t: 'voice.end', uploadId: 'u1' })
+        await vi.waitFor(() => expect(port.types()).toContain('voice.transcript'))
+        await port.close('unplugged')
+        await log.flush()
+      } finally { await session.stop() }
+      const [line] = readFileSync(log.currentPath, 'utf8').split('\n').filter((l) => l.includes('[daemon] link at close'))
+      expect(line).toContain('adpcm 1 blocks, 0 lost, 0 repeated, 0 bad, 2 wrong-type')
+    })
+  })
+
   it('totals the audio counters in the link line, only once ADPCM has been used', async () => {
     const log = tmpLog()
     const { session, port } = await connect(makeHost(), log)

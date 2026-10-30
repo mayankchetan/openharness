@@ -131,17 +131,21 @@ only where it would use it), so a daemon never offers it `voice.adpcm`. Firmware
 
 Daemon behavior for one turn:
 
-- `voice.begin.codec` equal to `"adpcm"` makes the turn an ADPCM turn. Any other value, or none, is a PCM turn, as before.
+- `voice.begin.codec` equal to `"adpcm"` makes the turn an ADPCM turn only when this session negotiated it: the dial's
+  `hello.voiceCodec` was `"adpcm-v1"`, so the welcome offered `voice.adpcm`. Without that, the turn is a PCM turn and the
+  log says so once per port. Any other value, or none, is a PCM turn, as before.
 - `voice.begin.tag`, an integer 0 to 255, is the turn's tag. Absent, or any other value: no tag check (older dials).
-- An ADPCM turn takes type-0x07 frames only; a type-0x02 frame in it is ignored. A PCM turn takes type-0x02 frames only.
-  A type-0x07 frame while no turn is open is ignored, like PCM.
+- An ADPCM turn takes type-0x07 frames only; a type-0x02 frame in it is ignored. A PCM turn takes type-0x02 frames only,
+  and a type-0x07 frame in it is ignored. Each ignored frame is counted as `wrong-type`; the first one of a turn is logged.
+  A frame of either type while no turn is open is ignored, uncounted.
 - A malformed block, a block with another turn's tag and a block more than 32 blocks ahead are counted `bad` and dropped;
   the turn goes on.
 - The turn's length cap counts decoded bytes, silence included, and is checked before the silence for a gap is built.
   A gap is at most 32 blocks (section 2.4), so the silence a damaged `seq` can ask for is bounded. Over the cap the turn is
   dropped.
 - The dial log gets `cable: voice <s>s (<KB> KB) -> stt - adpcm <blocks> blocks, <lost> lost, <repeated> repeated, <bad> bad`
-  for each turn, and the same four counts in the periodic `link` line once ADPCM has been used on the port.
+  for each turn, with ` - <n> wrong-type frames` after it when there were any, and the same counts in the periodic `link`
+  line (`..., <bad> bad, <n> wrong-type`) once ADPCM has been used on the port.
 
 ### 2.6 Golden vectors and the ffmpeg check
 

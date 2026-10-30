@@ -628,8 +628,8 @@ export class CableSession {
   private decoder = new CableDecoder()
   /** This port's traffic since it opened, logged once a minute and when it closes (see logLink). */
   private traffic = { at: 0, tx: 0, txFrames: 0, rx: 0, rxFrames: 0, corrupt: 0, discarded: 0, run: '', noise: '',
-    /** ADPCM voice blocks since the port opened: arrived, lost (a gap in `seq`), repeated or late, refused. */
-    adpcm: { blocks: 0, lost: 0, repeated: 0, bad: 0 } }
+    /** ADPCM voice blocks since the port opened: arrived, lost (a gap in `seq`), repeated or late, refused; and audio frames of the wrong type for their turn. */
+    adpcm: { blocks: 0, lost: 0, repeated: 0, bad: 0, wrongType: 0 } }
   private timer: NodeJS.Timeout | null = null
   private greetedMac: string | null = null
   /** This session has spoken with a real dial at least once. Never reset: a port that has been a dial
@@ -687,6 +687,7 @@ export class CableSession {
   private resetCapabilities(): void {
     this.swarmMembers = this.longRecap = this.stepsActivity = this.statsTurn = this.playerCapable = this.superTabWaits = false
     this.swarmCard = false
+    this.adpcmVoice = this.adpcmUnofferedLogged = false
     this.dropCards()
     this.seqOn = false
     this.seq = 0
@@ -799,13 +800,17 @@ export class CableSession {
   /** Devices already logged as having no image channel this session (the hello repeats every ~15 s). */
   private noChannelLogged = new Set<string>()
 
-  /** `hello.voiceCodec` was "adpcm-v1": the dial can send ADPCM blocks, so the welcome offers `voice.adpcm`. Set on every hello. */
+  /** `hello.voiceCodec` was "adpcm-v1": the dial can send ADPCM blocks, so the welcome offers `voice.adpcm`. Set on every hello, cleared with the port. A turn is ADPCM only when this holds. */
   private adpcmVoice = false
+  /** `voice.begin.codec` asked for ADPCM that this session never offered: said once per port, then counted as PCM quietly. */
+  private adpcmUnofferedLogged = false
 
   /** Voice capture in flight: PCM chunks as they arrive, plus what `voice.begin` said about them. */
   private voice: { agentId?: string; cmd?: string; lang: string; rate: number; chunks: Buffer[]; bytes: number;
     /** Present when `voice.begin.codec` was "adpcm": this turn is made of type-0x07 blocks, never of type-0x02 chunks. */
     adpcm?: AdpcmAssembler;
+    /** Audio frames of the other type than this turn's, ignored: how many, and whether the first has been logged. */
+    wrongType: number; wrongTypeLogged: boolean;
     selectionId?: string; selection?: Promise<SelectionResult>;
     carry?: CarryRead;
     question?: { pin?: QuestionSpeech };
@@ -1033,7 +1038,7 @@ export class CableSession {
     this.traffic = {
       at: Date.now(), tx: 0, txFrames: 0, rx: 0, rxFrames: 0,
       corrupt: this.decoder.corruptFrames, discarded: this.decoder.discardedBytes, run: '', noise: '',
-      adpcm: { blocks: 0, lost: 0, repeated: 0, bad: 0 },
+      adpcm: { blocks: 0, lost: 0, repeated: 0, bad: 0, wrongType: 0 },
     }
     this.link = opened
     // Leftover bytes belong to a session that has ended; carrying them across would put a stale
@@ -1137,7 +1142,8 @@ export class CableSession {
     this.keepRun()
     const a = t.adpcm
     // Only once ADPCM has been used on this port: a USB dial on PCM keeps the line it has always had.
-    const adpcm = a.blocks + a.repeated + a.bad ? ` · adpcm ${a.blocks} blocks, ${a.lost} lost, ${a.repeated} repeated, ${a.bad} bad` : ''
+    const adpcm = a.blocks + a.repeated + a.bad + a.wrongType
+      ? ` · adpcm ${a.blocks} blocks, ${a.lost} lost, ${a.repeated} repeated, ${a.bad} bad${a.wrongType ? `, ${a.wrongType} wrong-type` : ''}` : ''
     this.log(`cable: ${label} · tx ${t.tx} B in ${t.txFrames} frames · rx ${t.rx} B in ${t.rxFrames} frames · corrupt ${this.decoder.corruptFrames - t.corrupt} · discarded ${this.decoder.discardedBytes - t.discarded} B${adpcm}${t.noise ? ` · non-frame text: ${t.noise}` : ''}`)
     t.at = Date.now()
     t.noise = ''
@@ -1684,11 +1690,14 @@ export class CableSession {
           bytes: 0,
           // Anything but the exact word is PCM, as it always was. A dial ahead of this daemon that names a codec this
           // side does not know sends frames of a type it does not carry into the turn: they are logged as unknown and
-          // the turn ends as "Didn't catch that", never as garbage heard as speech.
+          // the turn ends as "Didn't catch that", never as garbage heard as speech. ADPCM is also PCM unless this session
+          // negotiated it (hello.voiceCodec, answered by voice.adpcm): the begin alone cannot switch it on.
           // `tag` is the turn's counter, which every block must carry. Absent, or not a byte: no tag check (an older dial).
-          ...(str('codec') === 'adpcm'
+          ...(this.adpcmTurn(str('codec'))
             ? { adpcm: new AdpcmAssembler(Number.isInteger(msg.tag) && (msg.tag as number) >= 0 && (msg.tag as number) <= 0xff ? (msg.tag as number) : undefined) }
             : {}),
+          wrongType: 0,
+          wrongTypeLogged: false,
           form,
           carry,
           question,
@@ -2088,9 +2097,35 @@ export class CableSession {
     this.petStall.unref?.()
   }
 
+  /**
+   * Is a `voice.begin` with this `codec` an ADPCM turn? Only when this session negotiated ADPCM. A begin that names it without
+   * the offer is a dial out of step with the welcome, or something else on the link: the turn is PCM, and the log says so once.
+   */
+  private adpcmTurn(codec: string | undefined): boolean {
+    if (codec !== 'adpcm') return false
+    if (this.adpcmVoice) return true
+    if (!this.adpcmUnofferedLogged) {
+      this.adpcmUnofferedLogged = true
+      this.log('cable: voice.begin asked for adpcm but this session did not negotiate it (no hello.voiceCodec) — treating the turn as PCM')
+    }
+    return false
+  }
+
+  /** Audio of the other type than the open turn's: counted for the link line and the turn line, logged once per turn. */
+  private wrongTypeFrame(turn: { wrongType: number; wrongTypeLogged: boolean }, what: string): void {
+    turn.wrongType++
+    this.traffic.adpcm.wrongType++
+    if (turn.wrongTypeLogged) return
+    turn.wrongTypeLogged = true
+    this.log(`cable: ignoring ${what} (further frames are counted, not logged)`)
+  }
+
   private onPcm(chunk: Buffer): void {
     if (!this.voice) return // audio outside a turn is a dial that restarted mid-capture
-    if (this.voice.adpcm) return // an ADPCM turn is made of ADPCM blocks only; PCM here would break its timing
+    if (this.voice.adpcm) { // an ADPCM turn is made of ADPCM blocks only; PCM here would break its timing
+      this.wrongTypeFrame(this.voice, 'PCM audio in an ADPCM turn')
+      return
+    }
     this.voice.bytes += chunk.length
     if (this.voice.bytes > VOICE_MAX_BYTES) {
       this.dropVoiceOverCap()
@@ -2107,7 +2142,11 @@ export class CableSession {
    */
   private onAdpcm(payload: Uint8Array): void {
     const turn = this.voice
-    if (!turn?.adpcm) return // outside a turn (a dial that restarted mid-capture), or in a PCM turn
+    if (!turn) return // outside a turn (a dial that restarted mid-capture)
+    if (!turn.adpcm) { // a PCM turn is made of PCM chunks only
+      this.wrongTypeFrame(turn, 'ADPCM audio in a PCM turn')
+      return
+    }
     const r = turn.adpcm.push(payload)
     const counts = this.traffic.adpcm
     if (r.kind === 'bad') { counts.bad++; return }
@@ -2184,7 +2223,8 @@ export class CableSession {
     const seconds = turn.bytes / (turn.rate * 2)
     const a = turn.adpcm?.stats
     this.log(`cable: voice ${seconds.toFixed(1)}s (${Math.round(turn.bytes / 1024)} KB) → stt${a
-      ? ` · adpcm ${a.blocks} blocks, ${a.gapBlocks} lost, ${a.duplicates} repeated, ${a.bad} bad` : ''}`)
+      ? ` · adpcm ${a.blocks} blocks, ${a.gapBlocks} lost, ${a.duplicates} repeated, ${a.bad} bad` : ''}${
+      turn.wrongType ? ` · ${turn.wrongType} wrong-type frames` : ''}`)
 
     let transcript: string
     try {
