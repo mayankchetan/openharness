@@ -50,6 +50,12 @@ cc -std=c11 -Wall -Wextra -Werror -O1 \
    -o "$out/test_cable_frame" "$here/test_cable_frame.c" "$here/../main/cable_frame.c"
 "$out/test_cable_frame" "$here/vectors/cable_frame.txt"
 python3 "$here/test_cable_transport.py"
+# The decoder over a caller buffer and the transport vtable (W5): cap 1,024 reject and resync, a wrapper transport over a loopback
+# one, then cable_link.c itself over a fake transport (split reads, partial write, closed stream).
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" \
+   -o "$out/test_cable_xport" "$here/test_cable_xport.c" "$here/../main/cable_frame.c"
+"$out/test_cable_xport"
+python3 "$here/test_cable_xport.py"
 # IMA ADPCM voice blocks (frame type 0x07): encoder and decoder against the shared vectors, sanitizers on.
 python3 "$here/test_adpcm_ima.py"
 # The ADPCM sender (W4): wiring of the flags and fields, and the VOX probe's review gates. The sender loop itself runs in test_audio_stream.py.

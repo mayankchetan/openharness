@@ -63,8 +63,26 @@ void cable_decoder_reset(cable_decoder_t *d)
     d->len = 0;
 }
 
+bool cable_decoder_init_with(cable_decoder_buf_t *d, uint8_t *buf, size_t cap)
+{
+    // The smallest legal frame is a header and a CRC around an empty payload; a buffer under that could
+    // never complete one.
+    if (!d || !buf || cap < CABLE_HEADER_BYTES + CABLE_CRC_BYTES) return false;
+    d->buf = buf;
+    d->cap = cap;
+    d->len = 0;
+    d->corrupt_frames = 0;
+    d->discarded_bytes = 0;
+    return true;
+}
+
+void cable_decoder_buf_reset(cable_decoder_buf_t *d)
+{
+    d->len = 0;   // counters survive, as for the fixed decoder above
+}
+
 // Take `count` bytes off the front, keeping the rest. Says nothing about why.
-static void consume(cable_decoder_t *d, size_t count)
+static void consume(cable_decoder_buf_t *d, size_t count)
 {
     if (count == 0) return;
     if (count >= d->len) {
@@ -80,7 +98,7 @@ static void consume(cable_decoder_t *d, size_t count)
 // Split from consume() rather than counting inside it: the bytes of a frame that decoded fine are also
 // consumed, and counting those as discarded would make the health number read as "this link is full of
 // noise" on a link that is working perfectly.
-static void discard(cable_decoder_t *d, size_t count)
+static void discard(cable_decoder_buf_t *d, size_t count)
 {
     const size_t dropped = count < d->len ? count : d->len;
     consume(d, count);
@@ -91,7 +109,7 @@ static void discard(cable_decoder_t *d, size_t count)
 //
 // Stops one short of the end on purpose: a final lone byte cannot be judged yet, and the caller keeps it
 // in case the next read completes the pair.
-static int index_of_magic(const cable_decoder_t *d)
+static int index_of_magic(const cable_decoder_buf_t *d)
 {
     for (size_t i = 0; i + 1 < d->len; i++) {
         if (d->buf[i] == CABLE_MAGIC_0 && d->buf[i + 1] == CABLE_MAGIC_1) return (int)i;
@@ -104,7 +122,7 @@ static int index_of_magic(const cable_decoder_t *d)
 // Returns true when a frame was emitted (so the caller should try again), false when more bytes are
 // needed. Noise is consumed internally rather than reported, so the caller never has to tell "wait" from
 // "that was rubbish".
-static bool take_front(cable_decoder_t *d, cable_frame_cb cb, void *ctx)
+static bool take_front(cable_decoder_buf_t *d, cable_frame_cb cb, void *ctx)
 {
     for (;;) {
         const bool head_is_magic =
@@ -134,6 +152,14 @@ static bool take_front(cable_decoder_t *d, cable_frame_cb cb, void *ctx)
         }
 
         const size_t total = CABLE_HEADER_BYTES + payload_len + CABLE_CRC_BYTES;
+
+        // A frame that cannot fit the caller's buffer can never complete. Waiting would fill the buffer and
+        // then shed it a byte at a time anyway; treat the header as noise now. With the fixed decoder
+        // (cap = CABLE_MAX_FRAME) this never fires: every legal length fits.
+        if (total > d->cap) {
+            discard(d, 1);
+            continue;
+        }
         if (d->len < total) return false;
 
         const uint16_t expected = (uint16_t)d->buf[total - 2] | ((uint16_t)d->buf[total - 1] << 8);
@@ -153,13 +179,13 @@ static bool take_front(cable_decoder_t *d, cable_frame_cb cb, void *ctx)
     }
 }
 
-void cable_decoder_feed(cable_decoder_t *d, const uint8_t *data, size_t n,
-                        cable_frame_cb cb, void *ctx)
+void cable_decoder_buf_feed(cable_decoder_buf_t *d, const uint8_t *data, size_t n,
+                             cable_frame_cb cb, void *ctx)
 {
     while (n) {
         // Full and still no frame means the head was never a real one. Making room by dropping the oldest
         // byte keeps the link alive; refusing the new byte instead would wedge it permanently.
-        if (d->len == sizeof(d->buf)) discard(d, 1);
+        if (d->len == d->cap) discard(d, 1);
 
         // Once a valid header is waiting for its payload, no intermediate
         // byte can complete a frame. Copy directly to that boundary instead
@@ -170,12 +196,12 @@ void cable_decoder_feed(cable_decoder_t *d, const uint8_t *data, size_t n,
         if (d->len >= CABLE_HEADER_BYTES && d->buf[0] == CABLE_MAGIC_0 &&
             d->buf[1] == CABLE_MAGIC_1) {
             size_t payload_len = (size_t)d->buf[4] | ((size_t)d->buf[5] << 8);
-            if (payload_len <= CABLE_MAX_PAYLOAD)
+            if (payload_len <= CABLE_MAX_PAYLOAD && CABLE_HEADER_BYTES + payload_len + CABLE_CRC_BYTES <= d->cap)
                 needed += payload_len + CABLE_CRC_BYTES;
         }
         size_t take = needed > d->len ? needed - d->len : 1;
         if (take > n) take = n;
-        if (take > sizeof d->buf - d->len) take = sizeof d->buf - d->len;
+        if (take > d->cap - d->len) take = d->cap - d->len;
         memcpy(d->buf + d->len, data, take);
         d->len += take;
         data += take;
@@ -189,4 +215,52 @@ void cable_decoder_feed(cable_decoder_t *d, const uint8_t *data, size_t n,
             }
         }
     }
+}
+
+// ── the fixed-size decoder, as a wrapper ───────────────────────────────────────────────────────────
+//
+// cable_decoder_t keeps its array and its three public fields (len and the two counters) because the
+// host tests and the transport bench read them, and the frozen reference decoder (test/reference91) is
+// built against that exact struct. Its feed runs the one real decoder over the array it owns.
+//
+// The core works on a copy of the three fields. The frame callback may call cable_decoder_reset(d) or read
+// d->len, so the fields are copied back to d before every callback and re-read after it. Without that a
+// reset inside a callback would be lost when the call returned.
+typedef struct {
+    cable_decoder_t     *d;
+    cable_decoder_buf_t *core;
+    cable_frame_cb       cb;
+    void                *ctx;
+} fixed_call_t;
+
+static void fixed_store(const fixed_call_t *c)
+{
+    c->d->len = c->core->len;
+    c->d->corrupt_frames = c->core->corrupt_frames;
+    c->d->discarded_bytes = c->core->discarded_bytes;
+}
+
+static void fixed_load(const fixed_call_t *c)
+{
+    c->core->len = c->d->len;
+    c->core->corrupt_frames = c->d->corrupt_frames;
+    c->core->discarded_bytes = c->d->discarded_bytes;
+}
+
+static void fixed_trampoline(uint8_t version, uint8_t type, const uint8_t *payload, size_t payload_len, void *arg)
+{
+    fixed_call_t *c = arg;
+    fixed_store(c);
+    c->cb(version, type, payload, payload_len, c->ctx);
+    fixed_load(c);
+}
+
+void cable_decoder_feed(cable_decoder_t *d, const uint8_t *data, size_t n,
+                        cable_frame_cb cb, void *ctx)
+{
+    cable_decoder_buf_t core = { d->buf, sizeof d->buf, 0, 0, 0 };
+    fixed_call_t call = { d, &core, cb, ctx };
+    fixed_load(&call);
+    cable_decoder_buf_feed(&core, data, n, cb ? fixed_trampoline : NULL, &call);
+    fixed_store(&call);
 }

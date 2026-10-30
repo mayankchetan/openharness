@@ -15,6 +15,7 @@ def function(name):
 
 code = r'''
 #include "cable_frame.h"
+#include "cable_xport.h"
 #include <assert.h>
 #include <stdatomic.h>
 #include <stdarg.h>
@@ -51,12 +52,15 @@ static int log_vprintf(const char *fmt,va_list args);
 static int log_line(const char *fmt,...) {
     va_list args;va_start(args,fmt);int n=log_vprintf(fmt,args);va_end(args);return n;
 }
-static int usb_serial_jtag_write_bytes(const void *p,size_t len,int wait) {
-    assert(owner==9&&wait==5);
+// The fake transport: the log path reaches the wire only through the vtable's write.
+static const cable_xport_t *s_xport;
+static int fake_write(const cable_xport_t *x,const uint8_t *p,size_t len,int wait) {
+    assert(x==s_xport&&owner==9&&wait==5);
     if(recurse){recurse=false;assert(log_line("recursive driver log")==0);}
     if(stalled)return 0;
     assert(wire_bytes+len<=sizeof wire);memcpy(wire+wire_bytes,p,len);wire_bytes+=len;return (int)len;
 }
+static const cable_xport_t fake_xport = { "fake", CABLE_XPORT_USB, NULL, NULL, NULL, fake_write, NULL, NULL, NULL };
 static void last_words_add(const char *p,size_t n) { assert(n<sizeof saved);memcpy(saved,p,n);saved[n]=0; }
 static vprintf_like_t esp_log_set_vprintf(vprintf_like_t next) {
     vprintf_like_t old=hook;hook=next;installed++;return old;
@@ -72,7 +76,7 @@ static void received(uint8_t version,uint8_t type,const uint8_t *p,size_t n,void
     framed++;
 }
 int main(void) {
-    hook=plain;s_running=true;
+    hook=plain;s_running=true;s_xport=&fake_xport;
     cable_link_set_log_framing(true);assert(hook==log_vprintf&&installed==1);
     cable_link_set_log_framing(true);assert(installed==1);
     assert(log_line("hello %d\r\n",7)==9&&!strcmp(saved,"hello 7"));

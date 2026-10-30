@@ -1,9 +1,12 @@
-// The USB transport under cable_frame: bytes in from the native USB port, frames out to it.
+// The link under cable_frame: bytes in from a transport, frames out to it.
 //
-// This is the whole of the device's connection to the outside world. There is no WiFi on this firmware
-// and there is not going to be — plugging the cable in is the authorization, and dropping the network
-// takes provisioning, pairing, a backend socket, E2EE and a reconnect ladder out of the design with it.
-// So everything the dial ever says goes through the two functions below.
+// This is the whole of the device's connection to the outside world, and everything the dial ever says goes
+// through the functions below. The decoder, the tx lock, log framing, the reader task and the counters live
+// here; they do not know which wire they run on. The wire is a cable_xport_t (cable_xport.h). Today that is
+// USB-Serial-JTAG only (cable_xport_usb.c), and plugging the cable in is the authorization. Wi-Fi mode and
+// the phone bridge (docs/specs/cable-wifi-link.md) add transports behind the same vtable; their security
+// (TLS-PSK) is a wrapper transport, not a change to this file. Until one of them ships, this firmware has
+// no network: nothing here opens a socket.
 //
 // ── ONE PORT, AND WHAT THAT COSTS ───────────────────────────────────────────────────────────────────
 // Measured on the board on 2026-08-24: it enumerates as exactly one device —
@@ -31,8 +34,10 @@
 #include <stdint.h>
 
 #include "cable_frame.h"
+#include "cable_xport.h"
 
-// Install the USB-Serial-JTAG driver and start the reader task.
+// Open the USB transport and start the reader task. cable_link_start_with() does the same over any transport;
+// cable_link_start() is it with cable_xport_usb().
 //
 // `cb` is invoked once per decoded frame, ON THE READER TASK, with the payload pointing into the
 // decoder's own buffer — it is only valid for the duration of the call. Anything that must outlive it
@@ -47,7 +52,16 @@
 typedef void (*cable_tick_cb)(void *ctx);
 bool cable_link_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx);
 
-// Frame `payload` and write it to the port. Returns true when the whole frame went out.
+// The same over a transport of the caller's choosing (tests, and Wi-Fi / phone-bridge modes later). The
+// transport must outlive the link. Returns false if the transport will not open; nothing is left running.
+bool cable_link_start_with(const cable_xport_t *xport, cable_frame_cb cb, cable_tick_cb tick, void *ctx);
+
+// Which wire the link runs on (usb, wifi or ble). USB before the link starts. The layers above use it to
+// refuse firmware and credential messages on any wire but USB (cable-wifi-link.md section 0: L2 and L3 do not
+// learn the wire, except through this one read-only value).
+cable_xport_kind_t cable_link_transport(void);
+
+// Frame `payload` and write it to the transport. Returns true when the whole frame went out.
 //
 // A false return means the host is not draining the port (an unopened or unplugged CDC endpoint fills
 // the FIFO and the write times out). That is a normal state for this device, not an error condition —

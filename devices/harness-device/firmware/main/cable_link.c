@@ -5,7 +5,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "driver/usb_serial_jtag.h"
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -18,36 +17,10 @@
 
 static const char *TAG = "cable";
 
-// Driver FIFOs.
-//
-// ⚠️ RX IS NOT A CONVENIENCE — IT IS THE ONLY THING BETWEEN A SLOW READER AND SILENT DATA LOSS. There is
-// no back-pressure on this peripheral. The IDF driver's ISR (esp_driver_usb_serial_jtag/src/
-// usb_serial_jtag.c) does:
-//
-//     rx_fifo_len = usb_serial_jtag_ll_read_rxfifo(buf, USB_SER_JTAG_RX_MAX_SIZE);
-//     xRingbufferSendFromISR(rx_ring_buf, buf, rx_fifo_len, &xTaskWoken);
-//
-// It drains the hardware FIFO unconditionally and ignores the ringbuffer's return value, so a full ring
-// means those bytes are simply gone — and because emptying the HW FIFO is what lets the peripheral ACK
-// the next OUT packet, the host is never NAK'd and never learns anything went missing. Not reading fast
-// enough does not slow the sender down; it shreds the stream.
-//
-// Measured on this hardware by the sibling firmware, not theorised: with a smaller ring a firmware
-// transfer died at 0 of 1,342,160 bytes written. Each 8 KB slice takes ~16 ms to reach flash, and at USB
-// full speed ~16 KB arrives while the reader task is inside that write.
-//
-// So the rule this file keeps: RX_BUF ≥ the largest number of bytes the peer may have in flight while
-// this task is blocked. The firmware transfer is the only sender that can saturate the link, and its
-// credit window is 16 KB (docs/specs/cable-protocol.md, "Firmware update"). 32 KB is that window twice
-// over, for scheduling jitter. Changing either number without the other reintroduces exactly this bug.
-#define USJ_RX_BUF (32 * 1024)
+// The USB driver FIFOs (USJ_RX_BUF, USJ_TX_BUF) and the rule that sizes them moved with the driver to
+// cable_xport_usb.c. Nothing in this file depends on which wire is underneath (cable_xport.h).
 
-// TX is sized so the largest thing this link really sends — a PCM chunk plus framing — fits in one go and
-// the write does not block halfway through a frame waiting for the host to drain. (CABLE_MAX_PAYLOAD is
-// 8192, but that is a bound on damage from a corrupt length field, not a size anything actually sends.)
-#define USJ_TX_BUF 2048
-
-// One read's worth of bytes off the port. Small on purpose: the decoder is where reassembly happens, so
+// One read's worth of bytes off the transport. Small on purpose: the decoder is where reassembly happens, so
 // this only has to keep the syscall rate sane, and every byte of it is internal RAM.
 #define READ_CHUNK 256
 
@@ -90,7 +63,11 @@ static const char *TAG = "cable";
 // the other half.
 #define LOG_LINE_MAX 512
 
-static cable_decoder_t s_decoder;
+// The decoder runs over a buffer this file owns (cable_decoder_init_with). Both are touched only by the reader
+// task, and by cable_link_reset_decoder() from that task's callbacks (cable_link.h).
+static uint8_t             s_dec_buf[CABLE_MAX_FRAME];
+static cable_decoder_buf_t s_decoder;
+static const cable_xport_t *s_xport;
 static cable_frame_cb  s_cb;
 static cable_tick_cb   s_tick;
 static void           *s_ctx;
@@ -107,8 +84,9 @@ static SemaphoreHandle_t s_tx_lock;
 // Full-size on purpose, even though nothing sends anything close: at CABLE_MAX_FRAME the encoder can
 // never fail for lack of room here, so a -1 from cable_frame_encode means exactly one thing — the payload
 // is over the protocol's own limit — instead of two things that need telling apart.
-// In PSRAM (EXT_RAM_BSS_ATTR): usb_serial_jtag_write_bytes copies it into its ring buffer from task context,
-// so the USB peripheral never reads this array and the DMA/cache-off rules do not apply.
+// In PSRAM (EXT_RAM_BSS_ATTR): the transport's write() copies what it keeps before it returns (the contract in
+// cable_xport.h; the USB driver copies into its ring buffer from task context), so no peripheral ever reads this
+// array and the DMA/cache-off rules do not apply.
 static EXT_RAM_BSS_ATTR uint8_t s_tx_frame[CABLE_MAX_FRAME];
 
 // ── log framing ─────────────────────────────────────────────────────────────────────────────────────
@@ -119,11 +97,11 @@ static _Atomic(vprintf_like_t) s_prev_vprintf = vprintf;
 static atomic_bool s_log_framing;
 static atomic_uint s_dropped_logs;
 
-static bool send_locked(uint8_t type, const uint8_t *payload, size_t payload_len, TickType_t wait)
+static bool send_locked(uint8_t type, const uint8_t *payload, size_t payload_len, int wait_ms)
 {
     int len = cable_frame_encode(type, payload, payload_len, s_tx_frame, sizeof(s_tx_frame));
     if (len < 0) return false;
-    return usb_serial_jtag_write_bytes(s_tx_frame, (size_t)len, wait) == len;
+    return s_xport->write(s_xport, s_tx_frame, (size_t)len, wait_ms) == len;
 }
 
 static int log_vprintf(const char *fmt, va_list args)
@@ -148,7 +126,7 @@ static int log_vprintf(const char *fmt, va_list args)
         while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) len--;
         // Into the RTC ring first — that copy survives the reboot the next line may be the last before.
         if (len > 0) last_words_add(line, len);
-        if (len > 0 && !send_locked(CABLE_TYPE_LOG, (const uint8_t *)line, len, pdMS_TO_TICKS(LOG_WRITE_WAIT_MS)))
+        if (len > 0 && !send_locked(CABLE_TYPE_LOG, (const uint8_t *)line, len, LOG_WRITE_WAIT_MS))
             atomic_fetch_add_explicit(&s_dropped_logs, 1, memory_order_relaxed);
     }
     xSemaphoreGive(s_tx_lock);
@@ -181,30 +159,34 @@ static void reader_task(void *arg)
     int64_t last_rx_us = 0;
     while (1) {
         // READ_WAIT_MS; 2 s while the chip may sleep (no host can be talking then: a host would have kept it awake)
-        int n = usb_serial_jtag_read_bytes(chunk, sizeof(chunk), pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_CABLE_READER, READ_WAIT_MS)));
+        // n < 0 (closed or failed stream) is handled like n == 0: nothing to feed, and the tick still runs, so
+        // connection expiry keeps working. A transport that fails must still wait out its wait (cable_xport.h).
+        int n = s_xport->read(s_xport, chunk, sizeof(chunk), power_sleep_wait_ms(PP_POLLER_CABLE_READER, READ_WAIT_MS));
         const int64_t now = esp_timer_get_time();
         // This task owns the decoder. Reset before feeding a newly arrived
         // read too: scheduling need not provide an intervening empty read.
         if (s_decoder.len && now - last_rx_us >= FRAME_IDLE_US)
-            cable_decoder_reset(&s_decoder);
+            cable_decoder_buf_reset(&s_decoder);
         // Never fails and never rejects: everything arriving here is untrusted, starts mid-stream after
         // every boot, and the only useful response to a byte that makes no sense is to step over it.
         if (n > 0) {
-            cable_decoder_feed(&s_decoder, chunk, (size_t)n, s_cb, s_ctx);
+            cable_decoder_buf_feed(&s_decoder, chunk, (size_t)n, s_cb, s_ctx);
             last_rx_us = now;
         }
         if (s_tick) s_tick(s_ctx);
     }
 }
 
-bool cable_link_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx)
+bool cable_link_start_with(const cable_xport_t *xport, cable_frame_cb cb, cable_tick_cb tick, void *ctx)
 {
     if (s_running) return true;
+    if (!xport) return false;
 
+    s_xport = xport;
     s_cb = cb;
     s_tick = tick;
     s_ctx = ctx;
-    cable_decoder_init(&s_decoder);
+    if (!cable_decoder_init_with(&s_decoder, s_dec_buf, sizeof s_dec_buf)) return false;
 
     s_tx_lock = xSemaphoreCreateMutex();
     if (!s_tx_lock) {
@@ -212,16 +194,10 @@ bool cable_link_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx)
         return false;
     }
 
-    usb_serial_jtag_driver_config_t cfg = {
-        .tx_buffer_size = USJ_TX_BUF,
-        .rx_buffer_size = USJ_RX_BUF,
-    };
-    esp_err_t err = usb_serial_jtag_driver_install(&cfg);
-    if (err != ESP_OK) {
-        // Say what it costs. The symptom lands far from here — the dial comes up, draws its screen, and
-        // simply never hears from the machine — so the log line has to name the cause itself.
-        ESP_LOGE(TAG, "usb_serial_jtag driver install failed (%s) — no link to the daemon",
-                 esp_err_to_name(err));
+    if (!xport->open(xport)) {
+        // The transport has already said why (it knows its own driver). What it costs is the same on any wire:
+        // the dial comes up, draws its screen, and simply never hears from the machine.
+        ESP_LOGE(TAG, "%s transport did not open — no link to the daemon", xport->name);
         vSemaphoreDelete(s_tx_lock);
         s_tx_lock = NULL;
         return false;
@@ -238,15 +214,20 @@ bool cable_link_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx)
     if (reader_ok != pdPASS) {
         s_running = false;
         ESP_LOGE(TAG, "reader task create failed — no link to the daemon");
-        usb_serial_jtag_driver_uninstall();
+        xport->close(xport);
         vSemaphoreDelete(s_tx_lock);
         s_tx_lock = NULL;
         return false;
     }
 
-    ESP_LOGI(TAG, "usb link up on the native port (frame v%d, max frame %d B)",
+    ESP_LOGI(TAG, "%s link up (frame v%d, max frame %d B)", xport->name,
              CABLE_FRAME_VERSION, CABLE_MAX_FRAME);
     return true;
+}
+
+bool cable_link_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx)
+{
+    return cable_link_start_with(cable_xport_usb(), cb, tick, ctx);
 }
 
 bool cable_link_send(uint8_t type, const uint8_t *payload, size_t payload_len)
@@ -254,7 +235,7 @@ bool cable_link_send(uint8_t type, const uint8_t *payload, size_t payload_len)
     if (!s_running) return false;
 
     xSemaphoreTake(s_tx_lock, portMAX_DELAY);
-    const bool ok = send_locked(type, payload, payload_len, pdMS_TO_TICKS(WRITE_WAIT_MS));
+    const bool ok = send_locked(type, payload, payload_len, WRITE_WAIT_MS);
     const bool too_big = payload_len > CABLE_MAX_PAYLOAD;
     xSemaphoreGive(s_tx_lock);
 
@@ -274,9 +255,9 @@ bool cable_link_send(uint8_t type, const uint8_t *payload, size_t payload_len)
 
 bool cable_link_host_present(void)
 {
-    // Guarded on s_running because the driver call is undefined before install, and "no driver" is
+    // Guarded on s_running because the transport is undefined before open, and "no transport" is
     // indistinguishable from "no host" to everything above: both mean nothing can be said on this port.
-    return s_running && usb_serial_jtag_is_connected();
+    return s_running && s_xport->is_up(s_xport);
 }
 
 void cable_link_counters(uint32_t *corrupt_frames, uint32_t *discarded_bytes)
@@ -287,7 +268,12 @@ void cable_link_counters(uint32_t *corrupt_frames, uint32_t *discarded_bytes)
 
 uint32_t cable_link_dropped_logs(void) { return atomic_load(&s_dropped_logs); }
 
+cable_xport_kind_t cable_link_transport(void)
+{
+    return s_xport ? s_xport->kind : CABLE_XPORT_USB;
+}
+
 void cable_link_reset_decoder(void)
 {
-    cable_decoder_reset(&s_decoder);
+    cable_decoder_buf_reset(&s_decoder);
 }

@@ -24,7 +24,9 @@ static read_t reads[80];
 static unsigned read_count, read_at, frames, ticks;
 static int64_t now;
 static jmp_buf done;
-static cable_decoder_t s_decoder;
+static uint8_t s_dec_buf[CABLE_MAX_FRAME];
+static cable_decoder_buf_t s_decoder;
+static const cable_xport_t *s_xport;
 static cable_frame_cb s_cb;
 static cable_tick_cb s_tick;
 static void *s_ctx;
@@ -32,14 +34,16 @@ static uint8_t payload[CABLE_MAX_PAYLOAD], frame[CABLE_MAX_FRAME], hello[CABLE_M
 static size_t expected_size;
 static const uint8_t *expected;
 static int64_t esp_timer_get_time(void) { return now; }
-static int usb_serial_jtag_read_bytes(uint8_t *out, size_t cap, int wait) {
-    assert(cap == READ_CHUNK && wait == READ_WAIT_MS);
+// The fake transport: replays the scripted reads. The reader passes milliseconds (the USB transport turns them into ticks).
+static int fake_read(const cable_xport_t *x, uint8_t *out, size_t cap, int wait) {
+    assert(x == s_xport && cap == READ_CHUNK && wait == READ_WAIT_MS);
     if (read_at == read_count) longjmp(done, 1);
     const read_t r = reads[read_at++];
     assert(r.len <= cap); now = r.at;
     if (r.len) memcpy(out, r.bytes, r.len);
     return (int)r.len;
 }
+static const cable_xport_t fake_xport = { "fake", CABLE_XPORT_USB, NULL, NULL, fake_read, NULL, NULL, NULL, NULL };
 static void tick(void *ctx) { assert(!ctx); ticks++; }
 static void collect(uint8_t version, uint8_t type, const uint8_t *p, size_t n, void *ctx) {
     assert(!ctx && version == CABLE_FRAME_VERSION && type == CABLE_TYPE_JSON);
@@ -55,7 +59,8 @@ static void add(const uint8_t *p, size_t len, int64_t *at, int64_t interval) {
 }
 static void reset(void) {
     read_count = read_at = frames = ticks = 0; now = 0;
-    cable_decoder_init(&s_decoder);
+    s_xport = &fake_xport;
+    assert(cable_decoder_init_with(&s_decoder, s_dec_buf, sizeof s_dec_buf));
     s_decoder.corrupt_frames = 7; s_decoder.discarded_bytes = 11;
     s_cb = collect; s_tick = tick; s_ctx = NULL;
 }

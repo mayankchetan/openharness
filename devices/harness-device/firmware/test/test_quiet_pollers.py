@@ -53,7 +53,9 @@ assert re.search(r'#ifdef DEVICE_BATTERY_SLEEP\n(?:[^\n]*\n)*?void display_rende
 # --- cable_link reader: 100 ms ---
 link = read('cable_link.c')
 assert re.search(r'#define READ_WAIT_MS 100\b', link)
-assert 'pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_CABLE_READER, READ_WAIT_MS))' in link
+# The reader passes milliseconds to the transport; the USB transport turns them into ticks (cable_xport_usb.c).
+assert 's_xport->read(s_xport, chunk, sizeof(chunk), power_sleep_wait_ms(PP_POLLER_CABLE_READER, READ_WAIT_MS))' in link
+assert 'usb_serial_jtag_read_bytes(buf, cap, pdMS_TO_TICKS(wait_ms))' in read('cable_xport_usb.c')
 checked.append('cable reader 100 ms')
 
 # --- cable_session: 250 ms; no hello while the chip may sleep ---

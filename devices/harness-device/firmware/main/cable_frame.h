@@ -105,6 +105,9 @@ typedef void (*cable_frame_cb)(uint8_t version, uint8_t type,
 // The buffer is a fixed array rather than a heap allocation: this runs on a device where a failed malloc
 // mid-session is a worse outcome than a known 8 KB of BSS, and the ceiling is already fixed by
 // CABLE_MAX_PAYLOAD.
+//
+// Since task W5 cable_link no longer uses this type: it feeds a cable_decoder_buf_t over its own buffer
+// (below). This one stays for the host tests and the transport bench, as a wrapper over the same code.
 typedef struct {
     uint8_t  buf[CABLE_MAX_FRAME];
     size_t   len;
@@ -128,3 +131,29 @@ void cable_decoder_reset(cable_decoder_t *d);
 // makes no sense is to step over it.
 void cable_decoder_feed(cable_decoder_t *d, const uint8_t *data, size_t n,
                         cable_frame_cb cb, void *ctx);
+
+// The same decoder over a buffer the caller owns (task W5).
+//
+// cable_link uses this form so the buffer can live where the caller wants it (PSRAM, task W6) and so a
+// transport with a smaller frame limit can use a smaller one. `cap` is the largest frame (header, payload
+// and CRC) the decoder can hold. A frame longer than `cap` is noise to it: its header is stepped over and
+// the decoder resyncs on the next magic, exactly as for a bad CRC. cap < CABLE_MAX_FRAME therefore also
+// lowers the largest payload this decoder accepts, which is the caller's choice and must match what the
+// far end may send.
+//
+// The buffer must stay valid for as long as the decoder is used, and is touched only from the one task
+// that feeds the decoder. The decoder is a CPU-only parse buffer: nothing here hands it to DMA.
+typedef struct {
+    uint8_t *buf;
+    size_t   cap;
+    size_t   len;
+    uint32_t corrupt_frames;
+    uint32_t discarded_bytes;
+} cable_decoder_buf_t;
+
+// Returns false (and leaves `d` unusable) when buf is NULL or cap is under CABLE_HEADER_BYTES +
+// CABLE_CRC_BYTES, the smallest legal frame.
+bool cable_decoder_init_with(cable_decoder_buf_t *d, uint8_t *buf, size_t cap);
+void cable_decoder_buf_reset(cable_decoder_buf_t *d);
+void cable_decoder_buf_feed(cable_decoder_buf_t *d, const uint8_t *data, size_t n,
+                            cable_frame_cb cb, void *ctx);
