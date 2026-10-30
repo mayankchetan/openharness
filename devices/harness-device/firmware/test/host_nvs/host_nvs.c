@@ -12,6 +12,16 @@ typedef struct { char key[16]; uint8_t data[MAX_VALUE]; size_t len; int used; } 
 static entry_t s_entries[MAX_KEYS];
 static int s_fail_after = -1;
 static int s_mutations;
+static const char *s_forbidden[4];
+
+static void check_forbidden(const char *key, const void *out)
+{
+    for (int i = 0; i < 4; i++) if (out && s_forbidden[i] && !strcmp(s_forbidden[i], key)) __builtin_trap();
+}
+void host_nvs_forbid_read(const char *key)
+{
+    for (int i = 0; i < 4; i++) if (!s_forbidden[i]) { s_forbidden[i] = key; return; }
+}
 
 static entry_t *find(const char *key)
 {
@@ -28,7 +38,7 @@ static int mutating_allowed(void)
     return 1;
 }
 
-void host_nvs_reset(void) { memset(s_entries, 0, sizeof s_entries); s_fail_after = -1; s_mutations = 0; }
+void host_nvs_reset(void) { memset(s_entries, 0, sizeof s_entries); memset(s_forbidden, 0, sizeof s_forbidden); s_fail_after = -1; s_mutations = 0; }
 void host_nvs_fail_after(int mutations) { s_fail_after = mutations; s_mutations = 0; }
 int host_nvs_mutations(void) { return s_mutations; }
 int host_nvs_count(void) { int n = 0; for (int i = 0; i < MAX_KEYS; i++) n += s_entries[i].used; return n; }
@@ -85,6 +95,7 @@ esp_err_t nvs_erase_all(nvs_handle_t h)
 esp_err_t nvs_get_str(nvs_handle_t h, const char *key, char *out, size_t *len)
 {
     (void)h;
+    check_forbidden(key, out);
     entry_t *e = find(key);
     if (!e) return ESP_ERR_NVS_NOT_FOUND;
     if (!out) { *len = e->len; return ESP_OK; }
@@ -120,6 +131,7 @@ esp_err_t nvs_set_u16(nvs_handle_t h, const char *key, uint16_t value) { (void)h
 esp_err_t nvs_get_blob(nvs_handle_t h, const char *key, void *out, size_t *len)
 {
     (void)h;
+    check_forbidden(key, out);
     entry_t *e = find(key);
     if (!e) return ESP_ERR_NVS_NOT_FOUND;
     if (!out) { *len = e->len; return ESP_OK; }

@@ -1,4 +1,5 @@
 #include "config_store.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "ram_telemetry.h"
@@ -284,9 +285,17 @@ static bool ipv4_ok(const char *s)
     }
 }
 
+/** An address the dial could never be sent to the daemon at: 0.0.0.0, 255.255.255.255, loopback (127/8) and multicast (224/4). */
+static bool host_unusable(const char *s)
+{
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (sscanf(s, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return true;
+    return (a == 0 && b == 0 && c == 0 && d == 0) || (a == 255 && b == 255 && c == 255 && d == 255) || a == 127 || (a >= 224 && a <= 239);
+}
+
 static config_net_err_t host_port_check(const char *host, long port)
 {
-    if (!ipv4_ok(host)) return CFG_NET_E_HOST;
+    if (!ipv4_ok(host) || host_unusable(host)) return CFG_NET_E_HOST;
     if (port < CFG_NET_PORT_MIN || port > 65535) return CFG_NET_E_PORT;
     return CFG_NET_OK;
 }
@@ -301,10 +310,9 @@ static int b64_value(char c)
     return -1;
 }
 
-bool config_net_key_decode(const char *b64, uint8_t out[CFG_NET_KEY_LEN])
+static bool b64_decode32(const char *b64, uint8_t *bytes)
 {
     if (!b64 || bounded_len(b64, 44) != 44 || b64[43] != '=') return false;
-    uint8_t bytes[CFG_NET_KEY_LEN];
     size_t o = 0;
     for (size_t i = 0; i < 40; i += 4) {   // ten whole groups: 30 bytes
         const int a = b64_value(b64[i]), b = b64_value(b64[i + 1]), c = b64_value(b64[i + 2]), d = b64_value(b64[i + 3]);
@@ -318,9 +326,17 @@ bool config_net_key_decode(const char *b64, uint8_t out[CFG_NET_KEY_LEN])
     if ((a | b | c) < 0 || (c & 3)) return false;
     bytes[o++] = (uint8_t)((a << 2) | (b >> 4));
     bytes[o++] = (uint8_t)(((b & 15) << 4) | (c >> 2));
-    memcpy(out, bytes, CFG_NET_KEY_LEN);
-    scrub(bytes, sizeof bytes);
     return true;
+}
+
+bool config_net_key_decode(const char *b64, uint8_t out[CFG_NET_KEY_LEN])
+{
+    // The scratch holds half a key when a decode fails part-way: it is overwritten on every path.
+    uint8_t bytes[CFG_NET_KEY_LEN];
+    const bool ok = b64_decode32(b64, bytes);
+    if (ok) memcpy(out, bytes, CFG_NET_KEY_LEN);
+    scrub(bytes, sizeof bytes);
+    return ok;
 }
 
 static bool wl_get_str(nvs_handle_t h, const char *key, char *dst, size_t cap)
@@ -357,15 +373,28 @@ bool config_net_load(config_net_t *out)
 void config_net_info(config_net_info_t *out)
 {
     memset(out, 0, sizeof *out);
-    config_net_t whole;
-    if (config_net_load(&whole)) {
-        out->saved = true;
-        memcpy(out->ssid, whole.ssid, sizeof out->ssid);
-        memcpy(out->host, whole.host, sizeof out->host);
-        out->port = whole.port;
-        out->mode = whole.mode;
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return;
+    uint8_t version = 0, mode = 0;
+    uint16_t port = 0;
+    size_t pass_len = 0, key_len = 0;
+    // The password and the key are never read here: their presence and size are asked of NVS (a NULL buffer), which is all this needs
+    // to say "provisioned". A password is 0 or 8 to 63 bytes, held with its terminator.
+    bool ok = nvs_get_u8(h, K_WL_VER, &version) == ESP_OK && version == WL_VERSION
+        && wl_get_str(h, K_WL_SSID, out->ssid, sizeof out->ssid)
+        && wl_get_str(h, K_WL_HOST, out->host, sizeof out->host)
+        && nvs_get_u16(h, K_WL_PORT, &port) == ESP_OK
+        && nvs_get_str(h, K_WL_PASS, NULL, &pass_len) == ESP_OK && (pass_len == 1 || (pass_len >= 9 && pass_len <= CFG_NET_PASS_MAX + 1))
+        && nvs_get_blob(h, K_WL_KEY, NULL, &key_len) == ESP_OK && key_len == CFG_NET_KEY_LEN;
+    if (ok) nvs_get_u8(h, K_WL_MODE, &mode);
+    nvs_close(h);
+    if (!ok || !text_ok(out->ssid, 1, CFG_NET_SSID_MAX) || host_port_check(out->host, port) != CFG_NET_OK) {
+        memset(out, 0, sizeof *out);
+        return;
     }
-    scrub(&whole, sizeof whole);
+    out->saved = true;
+    out->port = port;
+    out->mode = mode == 1 ? 1 : 0;
 }
 
 /** A key that is not there is not an error to erase. */
@@ -377,9 +406,35 @@ config_net_err_t config_net_check(const char *ssid, const char *pass, const char
     if (!pass || (pass[0] != 0 && !text_ok(pass, 8, CFG_NET_PASS_MAX))) return CFG_NET_E_PASS;
     const config_net_err_t where = host_port_check(host, port);
     if (where != CFG_NET_OK) return where;
-    if (!key) return CFG_NET_E_KEY;
+    if (config_net_check_key(key) != CFG_NET_OK) return CFG_NET_E_KEY;
     if (mode != 0 && mode != 1) return CFG_NET_E_MODE;
     return CFG_NET_OK;
+}
+
+/** A key must be there and must not be all zero: that is what an uninitialised buffer looks like, not a key anyone drew. */
+config_net_err_t config_net_check_key(const uint8_t *key)
+{
+    if (!key) return CFG_NET_E_KEY;
+    for (size_t i = 0; i < CFG_NET_KEY_LEN; i++) if (key[i]) return CFG_NET_OK;
+    return CFG_NET_E_KEY;
+}
+
+/** First step of every change to a held configuration: the marker goes, and the removal is committed before anything else is written. */
+static bool marker_off(nvs_handle_t h)
+{
+    return erased(nvs_erase_key(h, K_WL_VER)) && nvs_commit(h) == ESP_OK;
+}
+
+/**
+ * Last step: the marker comes back, and is committed. If that commit fails the settings are whole, yet the reply will say they are not;
+ * the marker is taken back if the store allows, so that "refused" and "unprovisioned" mean the same thing.
+ */
+static bool marker_on(nvs_handle_t h)
+{
+    if (nvs_set_u8(h, K_WL_VER, WL_VERSION) != ESP_OK) return false;
+    if (nvs_commit(h) == ESP_OK) return true;
+    if (erased(nvs_erase_key(h, K_WL_VER))) nvs_commit(h);
+    return false;
 }
 
 config_net_err_t config_net_check_host(const char *host, long port) { return host_port_check(host, port); }
@@ -395,7 +450,7 @@ config_net_err_t config_net_set(const char *ssid, const char *pass, const char *
     nvs_handle_t h;
     if (open_rw(&h) != ESP_OK) return CFG_NET_E_STORAGE;
     // The marker goes first, so a cut anywhere below leaves the dial unprovisioned, and comes back last.
-    bool ok = erased(nvs_erase_key(h, K_WL_VER)) && nvs_commit(h) == ESP_OK
+    const bool ok = marker_off(h)
         && nvs_set_str(h, K_WL_SSID, ssid) == ESP_OK
         && nvs_set_str(h, K_WL_PASS, pass) == ESP_OK
         && nvs_set_str(h, K_WL_HOST, host) == ESP_OK
@@ -403,12 +458,7 @@ config_net_err_t config_net_set(const char *ssid, const char *pass, const char *
         && nvs_set_blob(h, K_WL_KEY, key, CFG_NET_KEY_LEN) == ESP_OK
         && nvs_set_u8(h, K_WL_MODE, (uint8_t)mode) == ESP_OK
         && nvs_commit(h) == ESP_OK
-        && nvs_set_u8(h, K_WL_VER, WL_VERSION) == ESP_OK;
-    const bool marked = ok;
-    ok = ok && nvs_commit(h) == ESP_OK;
-    // The marker is set but the last commit failed: the settings are whole, yet the reply will say they are not. Take the marker
-    // back if the store allows, so that "refused" and "unprovisioned" mean the same thing.
-    if (marked && !ok && erased(nvs_erase_key(h, K_WL_VER))) nvs_commit(h);
+        && marker_on(h);
     close_rw(h);
     return ok ? CFG_NET_OK : CFG_NET_E_STORAGE;
 }
@@ -422,11 +472,12 @@ static bool provisioned(void)
 
 config_net_err_t config_net_set_key(const uint8_t *key)
 {
-    if (!key) return CFG_NET_E_KEY;
+    if (config_net_check_key(key) != CFG_NET_OK) return CFG_NET_E_KEY;
     if (!provisioned()) return CFG_NET_E_NOT_PROVISIONED;
     nvs_handle_t h;
     if (open_rw(&h) != ESP_OK) return CFG_NET_E_STORAGE;
-    const bool ok = nvs_set_blob(h, K_WL_KEY, key, CFG_NET_KEY_LEN) == ESP_OK && nvs_commit(h) == ESP_OK;
+    // Under the marker rule like a set: a cut between two writes of a change leaves the dial unprovisioned, never half changed.
+    const bool ok = marker_off(h) && nvs_set_blob(h, K_WL_KEY, key, CFG_NET_KEY_LEN) == ESP_OK && nvs_commit(h) == ESP_OK && marker_on(h);
     close_rw(h);
     ESP_LOGI(TAG, "net key: %s", ok ? "replaced" : "FAILED");
     return ok ? CFG_NET_OK : CFG_NET_E_STORAGE;
@@ -439,7 +490,8 @@ config_net_err_t config_net_set_host(const char *host, long port)
     if (!provisioned()) return CFG_NET_E_NOT_PROVISIONED;
     nvs_handle_t h;
     if (open_rw(&h) != ESP_OK) return CFG_NET_E_STORAGE;
-    const bool ok = nvs_set_str(h, K_WL_HOST, host) == ESP_OK && nvs_set_u16(h, K_WL_PORT, (uint16_t)port) == ESP_OK && nvs_commit(h) == ESP_OK;
+    const bool ok = marker_off(h) && nvs_set_str(h, K_WL_HOST, host) == ESP_OK && nvs_set_u16(h, K_WL_PORT, (uint16_t)port) == ESP_OK
+        && nvs_commit(h) == ESP_OK && marker_on(h);
     close_rw(h);
     ESP_LOGI(TAG, "net host: host_len=%u %s", (unsigned)bounded_len(host, 32), ok ? "replaced" : "FAILED");
     return ok ? CFG_NET_OK : CFG_NET_E_STORAGE;
@@ -451,7 +503,7 @@ config_net_err_t config_net_set_mode(long mode)
     if (!provisioned()) return CFG_NET_E_NOT_PROVISIONED;
     nvs_handle_t h;
     if (open_rw(&h) != ESP_OK) return CFG_NET_E_STORAGE;
-    const bool ok = nvs_set_u8(h, K_WL_MODE, (uint8_t)mode) == ESP_OK && nvs_commit(h) == ESP_OK;
+    const bool ok = marker_off(h) && nvs_set_u8(h, K_WL_MODE, (uint8_t)mode) == ESP_OK && nvs_commit(h) == ESP_OK && marker_on(h);
     close_rw(h);
     ESP_LOGI(TAG, "net mode %d: %s", (int)mode, ok ? "ok" : "FAILED");
     return ok ? CFG_NET_OK : CFG_NET_E_STORAGE;

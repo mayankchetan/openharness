@@ -15,6 +15,7 @@ HERE = Path(__file__).resolve().parent
 MAIN = HERE / '../main'
 CLIENT = (MAIN / 'cable_client.c').read_text()
 STORE = (MAIN / 'config_store.c').read_text()
+LINK = (MAIN / 'cable_link.c').read_text()
 JSON_DIR = Path(os.environ['IDF_PATH']) / 'components/json/cJSON'
 
 
@@ -33,15 +34,16 @@ net_block = CLIENT[CLIENT.index("THE DIAL'S WI-FI SETTINGS"):CLIENT.index('stati
 net_store = function('net_store_task')
 
 # 1. Off the cable, nothing is touched: the transport check is the first thing handle_net does, before any config_net_ call.
+first_call = re.search(r'config_net_(?!err_t)\w+\(', handle_net).start()
 assert 'cable_link_transport() != CABLE_XPORT_USB' in handle_net
-assert handle_net.index('cable_link_transport() != CABLE_XPORT_USB') < handle_net.index('config_net_')
-assert handle_net.index('cable_client_supports(CABLE_FEATURE_NET)') < handle_net.index('config_net_')
+assert handle_net.index('cable_link_transport() != CABLE_XPORT_USB') < first_call
+assert handle_net.index('cable_client_supports(CABLE_FEATURE_NET)') < first_call
 
 # 1b. THE READER WRITES NO NVS. The cable_link reader's stack is in PSRAM and must not run a flash write (power_off_request follows the
 # same rule). handle_net only reads and checks: it calls no nvs_ function and no config_net_ writer, and hands every write to the
 # net_store task, which has an internal stack (xTaskCreate, not task_create_psram).
 assert not re.search(r'\bnvs_\w+', net_block)
-allowed_in_handle_net = {'config_net_key_decode', 'config_net_check', 'config_net_check_host', 'config_net_check_mode', 'config_net_err_name', 'config_net_err_t'}
+allowed_in_handle_net = {'config_net_key_decode', 'config_net_check', 'config_net_check_host', 'config_net_check_mode', 'config_net_check_key', 'config_net_err_name', 'config_net_err_t'}
 assert set(re.findall(r'\bconfig_net_\w+', handle_net)) <= allowed_in_handle_net, set(re.findall(r'\bconfig_net_\w+', handle_net))
 writers = {'config_net_set', 'config_net_set_key', 'config_net_set_host', 'config_net_set_mode', 'config_net_clear'}
 for name in writers:
@@ -50,7 +52,7 @@ for name in writers:
 # the writers are called from net_store_task and from nowhere else in cable_client.c
 for name in writers:
     assert len(re.findall(r'\b' + name + r'\(', CLIENT)) == 1, name
-assert re.search(r'xTaskCreate\(net_store_task, "net_store", NET_STORE_STACK, NULL, \d, NULL\) != pdPASS', handle_net)
+assert re.search(r'xTaskCreate\(net_store_task, "net_store", NET_STORE_STACK, NULL, \d, NULL\) == pdPASS', handle_net)
 net_code = re.sub(r'//[^\n]*', '', net_block)
 assert 'task_create_psram' not in net_code and 'WithCaps' not in net_code
 assert re.search(r'#define NET_STORE_STACK 4096\b', net_block)
@@ -95,8 +97,16 @@ for call in logs:
     assert fmt.count('%s') == fixed_words, call
 
 # 5. The strings of the request are overwritten once used.
-assert 'net_scrub((char *)pass)' in handle_net
-assert 'net_scrub((char *)net_text(p, "key"))' in handle_net
+# every way out of handle_net passes the label where the secrets of the request are overwritten: no return statement at all
+assert not re.search(r'\breturn\b', re.sub(r'//[^\n]*', '', handle_net))
+done = handle_net[handle_net.index('done:'):]
+assert 'net_scrub(pass)' in done and 'net_scrub(key_text)' in done
+assert handle_net.index('char *pass = (char *)net_text(p, "pass")') < handle_net.index('goto done')   # found before the first way out
+# the decoder's own copy of a net.* frame is overwritten once the frame has been handled, whatever became of it
+frame = CLIENT[CLIENT.index('static void on_frame('):CLIENT.index('// ── session task')]
+assert 'memcmp(payload + i, "\\"net.", 5)' in frame
+assert frame.index('handle_message(root)') < frame.index('cable_link_scrub_payload(payload, payload_len)')
+assert len(re.findall(r'\breturn;', frame[frame.index('carries_secret = false'):])) == 0, 'no way out of the JSON path skips the scrub'
 assert 'net_zero(key, sizeof key)' in handle_net   # the reader's own copy of the key
 
 # 6. The hello offers net on the cable only.
@@ -107,6 +117,7 @@ assert re.search(r'if \(cable_link_transport\(\) == CABLE_XPORT_USB\) msg_string
 code = r'''
 #include "cJSON.h"
 #include "cable_features.h"
+#include "cable_frame.h"
 #include "cable_json_guard.h"
 #include "cable_xport.h"
 #include "config_store.h"
@@ -187,6 +198,8 @@ static void run_pending_task(void)
     fn(NULL);
 }
 '''
+link_scrub = function('cable_link_scrub_payload', LINK)
+code += 'static uint8_t s_dec_buf[CABLE_MAX_FRAME];\n' + link_scrub
 code += re.search(r'#define NET_STORE_STACK[^\n]*\n', CLIENT)[0]
 code += re.search(r'typedef struct \{[^}]*\} net_request_t;\n', CLIENT)[0]
 code += re.search(r'static EXT_RAM_BSS_ATTR net_request_t s_net_req;[^\n]*\n', CLIENT)[0]
@@ -368,7 +381,7 @@ static void test_off_the_cable_nothing_is_touched(void)
             s_transport = kind;
             refused(messages[i], "transport");
             assert(host_nvs_count() == 0);
-            assert(!saved_of(reply));
+            assert(!cJSON_GetObjectItemCaseSensitive(reply, "saved"));   // a refusal off the cable says nothing of what is held
         }
     }
     // even a dial that holds a configuration, asked over Wi-Fi to clear or change it, keeps it
@@ -443,7 +456,7 @@ static void test_writes_run_in_the_store_task(void)
     assert(sends == 1 && tasks_created == 1);
     cJSON *r = cJSON_Parse(wire);
     assert(!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "ok")) && !strcmp(err_of(r), "busy") && cJSON_GetObjectItemCaseSensitive(r, "id")->valueint == 8);
-    assert(!saved_of(r) && !cJSON_GetObjectItemCaseSensitive(r, "ssid"));
+    assert(!cJSON_GetObjectItemCaseSensitive(r, "saved") && !cJSON_GetObjectItemCaseSensitive(r, "ssid"));
     cJSON_Delete(r);
     const char *more[] = {SET, "{\"t\":\"net.mode\",\"mode\":0}", "{\"t\":\"net.key\",\"key\":\"" KEY2_B64 "\"}", "{\"t\":\"net.host\",\"host\":\"10.0.0.2\",\"port\":19000}"};
     for (unsigned i = 0; i < sizeof more / sizeof more[0]; i++) {
@@ -456,10 +469,14 @@ static void test_writes_run_in_the_store_task(void)
     }
     // the first request's slot is untouched by all that, and so is NVS
     assert(!strcmp(s_net_req.pass, PASS) && s_net_req.op == 's' && host_nvs_count() == 0);
-    // net.get is a read and is still answered; a refusal of a bad request too
+    // net.get while a write is waiting is answered busy: the state it would report is about to change
     sends = 0;
     fire("{\"t\":\"net.get\",\"id\":9}");
     assert(sends == 1 && tasks_created == 1);
+    r = cJSON_Parse(wire);
+    assert(!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "ok")) && !strcmp(err_of(r), "busy") && cJSON_GetObjectItemCaseSensitive(r, "id")->valueint == 9);
+    assert(!cJSON_GetObjectItemCaseSensitive(r, "saved") && !cJSON_GetObjectItemCaseSensitive(r, "ssid"));
+    cJSON_Delete(r);
     // the task runs: it writes, answers, clears the slot, ends, and frees the way for the next
     sends = 0;
     run_pending_task();
@@ -471,6 +488,9 @@ static void test_writes_run_in_the_store_task(void)
     assert(strstr(s_log, "net_store: stack high-water 1234 B free of 4096"));
     config_net_t n;
     assert(config_net_load(&n) && !strcmp(n.pass, PASS));
+    // and once the line is free again, net.get is a read as before
+    r = ask("{\"t\":\"net.get\"}");
+    assert(ok_of(r) && saved_of(r) && !err_of(r));
     sends = 0;
     fire("{\"t\":\"net.mode\",\"mode\":0}");
     assert(tasks_created == 2 && sends == 0);
@@ -514,6 +534,56 @@ static void test_every_write_is_a_task_and_nothing_else_is(void)
     refused("{\"t\":\"net.mode\",\"mode\":1}", "not_provisioned");
     assert(slot_is_clear() && !atomic_load(&s_net_busy));
     assert(ok_of(ask(SET)));
+}
+
+static bool is_zeroes(const char *s) { return !s || !s[0]; }
+
+static void test_secrets_are_scrubbed_on_every_exit(void)
+{
+    // each of these leaves handle_net by a different way; the password and the key of the parsed request are zero after every one
+    struct { const char *json; const char *what; cable_xport_kind_t kind; unsigned features; bool busy; } t[] = {
+        {SET, "served", CABLE_XPORT_USB, CABLE_FEATURE_NET, false},
+        {SET, "off the cable", CABLE_XPORT_WIFI, CABLE_FEATURE_NET, false},
+        {SET, "no feature", CABLE_XPORT_USB, 0, false},
+        {SET, "busy", CABLE_XPORT_USB, CABLE_FEATURE_NET, true},
+        {"{\"t\":\"net.set\",\"ssid\":\"\",\"pass\":\"" PASS "\",\"host\":\"" HOST "\",\"port\":18480,\"key\":\"" KEY_B64 "\",\"mode\":1}", "bad ssid", CABLE_XPORT_USB, CABLE_FEATURE_NET, false},
+        {"{\"t\":\"net.set\",\"ssid\":\"" SSID "\",\"pass\":\"" PASS "\",\"host\":\"" HOST "\",\"port\":18480,\"key\":\"" KEY_B64 "\",\"mode\":9}", "bad mode", CABLE_XPORT_USB, CABLE_FEATURE_NET, false},
+        {"{\"t\":\"net.key\",\"key\":\"" KEY2_B64 "\",\"pass\":\"" PASS "\"}", "key, with a stray password", CABLE_XPORT_USB, CABLE_FEATURE_NET, false},
+        {"{\"t\":\"net.get\",\"key\":\"" KEY_B64 "\",\"pass\":\"" PASS "\"}", "get, with stray secrets", CABLE_XPORT_USB, CABLE_FEATURE_NET, false},
+        {"{\"t\":\"net.zzz\",\"key\":\"" KEY_B64 "\",\"pass\":\"" PASS "\"}", "unknown op", CABLE_XPORT_USB, CABLE_FEATURE_NET, false},
+    };
+    for (unsigned i = 0; i < sizeof t / sizeof t[0]; i++) {
+        fresh();
+        s_transport = t[i].kind;
+        atomic_store(&s_features, t[i].features);
+        if (t[i].busy) atomic_store(&s_net_busy, true);
+        cJSON *root = NULL;
+        ask_keep(t[i].json, &root);
+        const cJSON *pass = cJSON_GetObjectItemCaseSensitive(root, "pass"), *key = cJSON_GetObjectItemCaseSensitive(root, "key");
+        if (!is_zeroes(pass ? pass->valuestring : NULL) || !is_zeroes(key ? key->valuestring : NULL)) { fprintf(stderr, "not scrubbed: %s\n", t[i].what); assert(0); }
+        cJSON_Delete(root);
+    }
+}
+
+static void test_the_decoders_copy_of_a_frame_is_overwritten(void)
+{
+    memset(s_dec_buf, 0xAA, sizeof s_dec_buf);
+    // inside the buffer: exactly the named bytes
+    cable_link_scrub_payload(s_dec_buf + 10, 100);
+    for (size_t i = 0; i < sizeof s_dec_buf; i++) assert(s_dec_buf[i] == ((i >= 10 && i < 110) ? 0 : 0xAA));
+    // the whole of what is left of the buffer
+    cable_link_scrub_payload(s_dec_buf + 200, sizeof s_dec_buf - 200);
+    assert(s_dec_buf[sizeof s_dec_buf - 1] == 0 && s_dec_buf[199] == 0xAA);
+    // a pointer outside the buffer, or a length that runs past it, or nothing, is ignored
+    memset(s_dec_buf, 0xAA, sizeof s_dec_buf);
+    uint8_t other[16] = {1};
+    cable_link_scrub_payload(other, sizeof other);
+    assert(other[0] == 1);
+    cable_link_scrub_payload(s_dec_buf + 5, sizeof s_dec_buf);
+    cable_link_scrub_payload(s_dec_buf + sizeof s_dec_buf + 1, 1);
+    cable_link_scrub_payload(NULL, 4);
+    for (size_t i = 0; i < sizeof s_dec_buf; i++) assert(s_dec_buf[i] == 0xAA);
+    cable_link_scrub_payload(s_dec_buf + sizeof s_dec_buf, 0);   // the end of the buffer, nothing to do
 }
 
 static void test_a_task_that_cannot_start(void)
@@ -577,6 +647,8 @@ int main(void)
     test_writes_run_in_the_store_task();
     test_every_write_is_a_task_and_nothing_else_is();
     test_a_task_that_cannot_start();
+    test_secrets_are_scrubbed_on_every_exit();
+    test_the_decoders_copy_of_a_frame_is_overwritten();
     test_json_guard();
     test_nothing_is_logged();
     cJSON_Delete(reply);

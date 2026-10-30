@@ -59,7 +59,7 @@ void config_save_swipe_reversed(bool reversed);
 // only (cable_client.c refuses them on any other link) and never logged: a log line may carry a length, never a value.
 //
 // The marker rules, which the tests hold to (test_net_config.c):
-//   - a set removes wl_ver FIRST, writes the other keys, and writes wl_ver LAST. A power cut between two keys leaves wl_ver
+//   - a set removes wl_ver FIRST, writes the other keys, and writes wl_ver LAST. So does every change to a held configuration (key, host, mode); A power cut between two keys leaves wl_ver
 //     absent, so the dial is unprovisioned and never holds half of one network and half of another;
 //   - a clear removes wl_ver FIRST for the same reason;
 //   - config_net_load / config_net_info say "provisioned" only when wl_ver is 1 AND every key is present and valid;
@@ -70,6 +70,8 @@ void config_save_swipe_reversed(bool reversed);
 #define CFG_NET_KEY_LEN  32
 #define CFG_NET_PORT_MIN 1024
 
+// A host the daemon could be at: a dotted IPv4 other than 0.0.0.0, 255.255.255.255, loopback (127/8) and multicast (224/4). The daemon refuses
+// the same (cli/src/lib/dialNetRules.ts) and everything that is not a private LAN address besides.
 // Why a request was refused. The names (config_net_err_name) are what net.state sends back as `err`: field names or reasons, never values.
 typedef enum {
     CFG_NET_OK = 0,
@@ -112,6 +114,7 @@ bool config_net_key_decode(const char *b64, uint8_t out[CFG_NET_KEY_LEN]);
 // The checks alone, with no NVS access: the cable reader (a PSRAM stack, which must not write flash) validates a request with these before
 // it hands the write to the net_store task. config_net_set and the setters below run the same checks again.
 config_net_err_t config_net_check(const char *ssid, const char *pass, const char *host, long port, const uint8_t *key, long mode);
+config_net_err_t config_net_check_key(const uint8_t *key);   // present and not all zero
 config_net_err_t config_net_check_host(const char *host, long port);
 config_net_err_t config_net_check_mode(long mode);
 

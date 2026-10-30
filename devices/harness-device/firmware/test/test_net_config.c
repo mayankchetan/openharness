@@ -31,12 +31,14 @@ extern int host_nvs_count(void);
 extern int host_nvs_has(const char *key);
 extern size_t host_nvs_size(const char *key);
 extern const void *host_nvs_raw(const char *key);
+extern void host_nvs_forbid_read(const char *key);
 
 #define SSID "home-net"
 #define PASS "correct horse battery"
 #define HOST "192.168.1.20"
 static const uint8_t KEY[32] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31};
 static const uint8_t KEY2[32] = {9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9};
+static const uint8_t ZERO_KEY[32] = {0};
 static const char *const WL_KEYS[] = {"wl_ssid", "wl_pass", "wl_host", "wl_port", "wl_key", "wl_ver", "wl_mode"};
 
 static void fresh(void) { host_nvs_reset(); s_log[0] = 0; }
@@ -50,7 +52,18 @@ static void test_validation_table(void)
         {SSID, PASS, HOST, 18480, KEY, 1, CFG_NET_OK, "all good"},
         {SSID, "", HOST, 18480, KEY, 0, CFG_NET_OK, "an open network has an empty password"},
         {"a", "12345678", "10.0.0.1", 1024, KEY, 0, CFG_NET_OK, "the smallest of each"},
-        {"12345678901234567890123456789012", "123456789012345678901234567890123456789012345678901234567890123", "255.255.255.255", 65535, KEY, 1, CFG_NET_OK, "the largest of each"},
+        {"12345678901234567890123456789012", "123456789012345678901234567890123456789012345678901234567890123", "223.255.255.254", 65535, KEY, 1, CFG_NET_OK, "the largest of each"},
+        {SSID, PASS, "126.255.255.255", 18480, KEY, 1, CFG_NET_OK, "just below loopback"},
+        {SSID, PASS, "128.0.0.1", 18480, KEY, 1, CFG_NET_OK, "just above loopback"},
+        {SSID, PASS, "240.0.0.1", 18480, KEY, 1, CFG_NET_OK, "above multicast"},
+        {SSID, PASS, "0.0.0.1", 18480, KEY, 1, CFG_NET_OK, "only 0.0.0.0 itself is refused"},
+        {SSID, PASS, "0.0.0.0", 18480, KEY, 1, CFG_NET_E_HOST, "0.0.0.0"},
+        {SSID, PASS, "255.255.255.255", 18480, KEY, 1, CFG_NET_E_HOST, "broadcast"},
+        {SSID, PASS, "127.0.0.1", 18480, KEY, 1, CFG_NET_E_HOST, "loopback"},
+        {SSID, PASS, "127.255.255.254", 18480, KEY, 1, CFG_NET_E_HOST, "loopback, the top of the block"},
+        {SSID, PASS, "224.0.0.1", 18480, KEY, 1, CFG_NET_E_HOST, "multicast"},
+        {SSID, PASS, "239.255.255.255", 18480, KEY, 1, CFG_NET_E_HOST, "multicast, the top of the block"},
+        {SSID, PASS, HOST, 18480, ZERO_KEY, 1, CFG_NET_E_KEY, "an all-zero key"},
         {NULL, PASS, HOST, 18480, KEY, 1, CFG_NET_E_SSID, "no ssid"},
         {"", PASS, HOST, 18480, KEY, 1, CFG_NET_E_SSID, "empty ssid"},
         {"123456789012345678901234567890123", PASS, HOST, 18480, KEY, 1, CFG_NET_E_SSID, "33-byte ssid"},
@@ -177,6 +190,85 @@ static void test_power_cut_between_keys(void)
         else if (cut < total - 1) assert(!config_net_load(&n));                                              // the marker is gone: neither
         else assert(config_net_load(&n) && !strcmp(n.ssid, SSID) && !memcmp(n.key, KEY, 32));                  // whole, the new one
     }
+}
+
+/** A change to a held configuration, cut after each write in turn: the dial is unprovisioned, or has the old one, or (the last commit only) the new one. */
+static void power_cut_in_a_change(const char *what, config_net_err_t (*change)(void), bool (*is_old)(const config_net_t *), bool (*is_new)(const config_net_t *))
+{
+    fresh();
+    assert(config_net_set("old-net", "old-password", "10.0.0.2", 2000, KEY2, 0) == CFG_NET_OK);
+    host_nvs_fail_after(-1);
+    assert(change() == CFG_NET_OK);
+    const int total = host_nvs_mutations();
+    assert(total >= 6);   // marker off + commit, the write(s), commit, marker on + commit
+    for (int cut = 0; cut < total; cut++) {
+        fresh();
+        assert(config_net_set("old-net", "old-password", "10.0.0.2", 2000, KEY2, 0) == CFG_NET_OK);
+        host_nvs_fail_after(cut);
+        config_net_err_t got = change();
+        config_net_t n;
+        if (got != CFG_NET_E_STORAGE) { fprintf(stderr, "%s cut %d: got %d\n", what, cut, (int)got); assert(0); }
+        if (cut == 0) assert(config_net_load(&n) && is_old(&n));            // nothing was touched: the old one stands
+        else if (cut < total - 1) assert(!config_net_load(&n));              // the marker is gone: unprovisioned, never half changed
+        else assert(config_net_load(&n) && is_new(&n));                      // whole, the new one
+    }
+}
+static config_net_err_t change_key(void) { return config_net_set_key(KEY); }
+static bool old_key(const config_net_t *n) { return !memcmp(n->key, KEY2, 32) && !strcmp(n->ssid, "old-net"); }
+static bool new_key(const config_net_t *n) { return !memcmp(n->key, KEY, 32) && !strcmp(n->ssid, "old-net"); }
+static config_net_err_t change_host(void) { return config_net_set_host("10.9.8.7", 19000); }
+static bool old_host(const config_net_t *n) { return !strcmp(n->host, "10.0.0.2") && n->port == 2000; }
+static bool new_host(const config_net_t *n) { return !strcmp(n->host, "10.9.8.7") && n->port == 19000 && !memcmp(n->key, KEY2, 32); }
+static config_net_err_t change_mode(void) { return config_net_set_mode(1); }
+static bool old_mode(const config_net_t *n) { return n->mode == 0; }
+static bool new_mode(const config_net_t *n) { return n->mode == 1 && !strcmp(n->ssid, "old-net"); }
+
+static void test_power_cut_in_a_change(void)
+{
+    power_cut_in_a_change("key", change_key, old_key, new_key);
+    power_cut_in_a_change("host", change_host, old_host, new_host);
+    power_cut_in_a_change("mode", change_mode, old_mode, new_mode);
+    // an all-zero key is no change at all
+    fresh();
+    assert(set_good() == CFG_NET_OK);
+    host_nvs_fail_after(-1);
+    const int before = host_nvs_mutations();
+    assert(config_net_set_key(ZERO_KEY) == CFG_NET_E_KEY && host_nvs_mutations() == before);
+    config_net_t n;
+    assert(config_net_load(&n) && !memcmp(n.key, KEY, 32));
+}
+
+static void test_info_never_reads_the_secrets(void)
+{
+    fresh();
+    assert(set_good() == CFG_NET_OK);
+    host_nvs_forbid_read("wl_pass");
+    host_nvs_forbid_read("wl_key");
+    config_net_info_t info;
+    config_net_info(&info);   // would trap if it read either into a buffer
+    assert(info.saved && !strcmp(info.ssid, SSID) && !strcmp(info.host, HOST) && info.port == 18480 && info.mode == 1);
+    // an open network has a password of length 0, a key of 31 bytes is not a key, a password of 7 or 65 bytes is not one: all by size alone
+    fresh();
+    assert(config_net_set(SSID, "", HOST, 18480, KEY, 0) == CFG_NET_OK);
+    host_nvs_forbid_read("wl_pass");
+    host_nvs_forbid_read("wl_key");
+    config_net_info(&info);
+    assert(info.saved && info.mode == 0);
+    nvs_handle_t h;
+    assert(nvs_open("pair", NVS_READWRITE, &h) == ESP_OK);
+    assert(nvs_set_blob(h, "wl_key", KEY, 31) == ESP_OK);
+    config_net_info(&info);
+    assert(!info.saved && !info.ssid[0] && !info.host[0] && !info.port);
+    assert(nvs_set_blob(h, "wl_key", KEY, 32) == ESP_OK);
+    assert(nvs_set_str(h, "wl_pass", "1234567") == ESP_OK);
+    config_net_info(&info);
+    assert(!info.saved);
+    assert(nvs_set_str(h, "wl_pass", "1234567890123456789012345678901234567890123456789012345678901234") == ESP_OK);
+    config_net_info(&info);
+    assert(!info.saved);
+    assert(nvs_set_str(h, "wl_pass", "12345678") == ESP_OK);
+    config_net_info(&info);
+    assert(info.saved);
 }
 
 static void test_commit_marker_is_last_and_first_out(void)
@@ -364,6 +456,8 @@ int main(void)
     test_validation_table();
     test_round_trip_and_shapes();
     test_power_cut_between_keys();
+    test_power_cut_in_a_change();
+    test_info_never_reads_the_secrets();
     test_commit_marker_is_last_and_first_out();
     test_clear();
     test_changes_need_a_configuration();

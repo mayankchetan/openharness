@@ -47,6 +47,7 @@ static void deallocate(void *p) {
 static int64_t esp_timer_get_time(void) { return clock_us; }
 static void fw_update_slice(const uint8_t *p,size_t n) { (void)p; (void)n; fw_slices++; }
 static void handle_pet_slice(const uint8_t *p,size_t n) { (void)p; (void)n; pet_slices++; }
+static void cable_link_scrub_payload(const uint8_t *p,size_t n) { (void)p; (void)n; }
 static void handle_message(const cJSON *root) {
     assert(cJSON_IsObject(root)); handled++;
     const cJSON *v = cJSON_GetObjectItemCaseSensitive(root,"n");

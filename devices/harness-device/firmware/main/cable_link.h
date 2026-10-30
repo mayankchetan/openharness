@@ -107,3 +107,8 @@ uint32_t cable_link_dropped_logs(void);
 // reader and no lock; another task must not reset it during a feed. The reader
 // also expires a partial frame after a 15-second gap in received bytes.
 void cable_link_reset_decoder(void);
+
+// Overwrite `len` bytes of a frame's payload in the decoder's buffer, once the frame has been handled. For a frame that carried a secret
+// (net.set: the Wi-Fi password and the key): the decoder keeps the bytes of a frame until later frames overwrite them. Call it from the
+// frame callback, with the callback's own `payload` pointer; a pointer outside the buffer is ignored. Plain CPU stores, never DMA.
+void cable_link_scrub_payload(const uint8_t *payload, size_t len);

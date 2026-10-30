@@ -225,6 +225,14 @@ when the USB cable is unplugged, 0 = USB only), and `wl_ver = 1`, the commit mar
 - A set removes `wl_ver` first, writes the other keys, and writes `wl_ver` last. A clear removes `wl_ver` first. A dial with no
   `wl_ver`, a marker of another version, or any key missing or invalid treats Wi-Fi as unprovisioned.
 - `config_clear_all` (factory reset) takes every key of the namespace, these included.
+- NVS is log-structured: erasing a key, a clear or a factory reset removes it logically, and the old bytes (the password, the key) stay in flash
+  until garbage collection overwrites them. The real fix is NVS encryption (spec 5.4, hardening); until then the dial's flash is plaintext to
+  whoever holds it.
+- Every change to a held configuration (`net.key`, `net.host`, `net.mode`, as well as `net.set`) removes `wl_ver` first, writes the change,
+  and writes `wl_ver` last, so that a power cut leaves the dial with the old configuration or with none, never half of a change.
+- A host the daemon could be at is a dotted IPv4 that is not 0.0.0.0, 255.255.255.255, loopback (127/8) or multicast (224/4); the daemon
+  also refuses anything that is not a private address. An all-zero key is refused on both sides.
+- A reply with no state omits `saved`. While a write is running, `net.get` is answered `ok:false, err:"busy"`.
 
 Who writes. The cable reader task has its stack in PSRAM and does not write flash. It parses and checks a write (`set`, `clear`, `mode`, `key`,
 `host`), copies it into one static slot, and starts the `net_store` task (internal stack, 4,096 B), which writes NVS, sends the `net.state`

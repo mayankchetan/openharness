@@ -33,6 +33,7 @@ def instrument(code, trace_file, main):
 static int64_t s_last_rx_us;
 static uint32_t s_bad, s_unknown;
 static int64_t esp_timer_get_time(void) { return (int64_t)fake_ms * 1000 + 1; }
+static void cable_link_scrub_payload(const uint8_t *p, size_t n) { (void)p; (void)n; }
 static void fw_update_slice(const uint8_t *p, size_t n) { (void)p; (void)n; assert(!"Unexpected firmware write in replay"); }
 static void audio_notify_done(void) {} // no real speaker or audio hardware in this harness
 '''

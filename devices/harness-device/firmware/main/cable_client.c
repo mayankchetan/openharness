@@ -1449,10 +1449,14 @@ static void net_zero(void *p, size_t n)
     while (n--) *v++ = 0;
 }
 
+/**
+ * Overwrite a string of the parsed request. cJSON's allocation for it can be longer than the text only when the text had escapes, and
+ * its size is not exposed, so the string and its terminator are covered here; the raw text of the whole frame, escapes and all, is
+ * overwritten by cable_link_scrub_payload once the frame has been handled.
+ */
 static void net_scrub(char *s)
 {
-    volatile char *v = (volatile char *)s;
-    while (v && *v) *v++ = 0;
+    if (s) net_zero(s, strlen(s) + 1);
 }
 
 /** A string field of the request, or NULL when it is missing or is not a string. */
@@ -1478,15 +1482,17 @@ static void net_reply(long id, bool ok, const char *err, bool state)
     if (id > 0 && id <= 65535) msg_number(&root, "id", (double)id);
     msg_bool(&root, "ok", ok);
     if (err) msg_string(&root, "err", err);
-    config_net_info_t info;
-    if (state) config_net_info(&info);
-    else memset(&info, 0, sizeof info);
-    msg_bool(&root, "saved", info.saved);
-    if (info.saved) {
-        msg_string(&root, "ssid", info.ssid);
-        msg_string(&root, "host", info.host);
-        msg_number(&root, "port", info.port);
-        msg_number(&root, "mode", info.mode);
+    // A reply without state (a refusal off the cable, or "busy") says nothing of what the dial holds, not even whether it holds anything.
+    if (state) {
+        config_net_info_t info;
+        config_net_info(&info);
+        msg_bool(&root, "saved", info.saved);
+        if (info.saved) {
+            msg_string(&root, "ssid", info.ssid);
+            msg_string(&root, "host", info.host);
+            msg_number(&root, "port", info.port);
+            msg_number(&root, "mode", info.mode);
+        }
     }
     send_json(root);
 }
@@ -1515,20 +1521,29 @@ static void net_store_task(void *arg)
 static void handle_net(const char *t, const cJSON *p)
 {
     const long id = net_whole(p, "id");
-    // The cable is the authorisation. Over any other link the dial answers nothing it was asked, and says why.
-    if (cable_link_transport() != CABLE_XPORT_USB) { net_reply(id, false, "transport", false); return; }
-    if (!cable_client_supports(CABLE_FEATURE_NET)) { net_reply(id, false, "feature", false); return; }
     const char *op = t + 4;   // "net." was matched by the caller
-    if (!strcmp(op, "get")) { net_reply(id, true, NULL, true); return; }
-    // Everything below only checks; nothing here touches NVS for writing.
+    // The secrets of the request, found before anything can return: every way out passes `done`, which overwrites them where they sit
+    // in the parsed message (and the reader's own copy of the key), whether the request was served, refused or turned away.
+    char *pass = (char *)net_text(p, "pass"), *key_text = (char *)net_text(p, "key");
+    uint8_t key[CFG_NET_KEY_LEN] = {0};
     char kind = 0;
     config_net_err_t err = CFG_NET_OK;
-    uint8_t key[CFG_NET_KEY_LEN] = {0};
-    const char *ssid = net_text(p, "ssid"), *pass = net_text(p, "pass"), *host = net_text(p, "host");
+    const char *refusal = NULL;
+    // The cable is the authorisation. Over any other link the dial answers nothing it was asked, and says why.
+    if (cable_link_transport() != CABLE_XPORT_USB) { net_reply(id, false, "transport", false); goto done; }
+    if (!cable_client_supports(CABLE_FEATURE_NET)) { net_reply(id, false, "feature", false); goto done; }
+    if (!strcmp(op, "get")) {
+        // A read, answered at once, except while a write is running: then the answer would be a state that is about to change.
+        if (atomic_load(&s_net_busy)) net_reply(id, false, "busy", false);
+        else net_reply(id, true, NULL, true);
+        goto done;
+    }
+    // Everything below only checks; nothing here touches NVS for writing.
+    const char *ssid = net_text(p, "ssid"), *host = net_text(p, "host");
     const long port = net_whole(p, "port"), mode = net_whole(p, "mode");
     if (!strcmp(op, "set")) {
         kind = 's';
-        const bool key_ok = config_net_key_decode(net_text(p, "key"), key);
+        const bool key_ok = config_net_key_decode(key_text, key);
         err = config_net_check(ssid, pass, host, port, key_ok ? key : NULL, mode);
     } else if (!strcmp(op, "clear")) {
         kind = 'c';
@@ -1537,14 +1552,14 @@ static void handle_net(const char *t, const cJSON *p)
         err = config_net_check_mode(mode);
     } else if (!strcmp(op, "key")) {
         kind = 'k';
-        err = config_net_key_decode(net_text(p, "key"), key) ? CFG_NET_OK : CFG_NET_E_KEY;
+        err = config_net_key_decode(key_text, key) ? config_net_check_key(key) : CFG_NET_E_KEY;
     } else if (!strcmp(op, "host")) {
         kind = 'h';
         err = config_net_check_host(host, port);
     } else {
         s_unknown++;
     }
-    const char *refusal = !kind ? "op" : err != CFG_NET_OK ? config_net_err_name(err) : NULL;
+    refusal = !kind ? "op" : err != CFG_NET_OK ? config_net_err_name(err) : NULL;
     // One request at a time: a second write is turned away, and changes nothing.
     if (!refusal && atomic_exchange(&s_net_busy, true)) refusal = "busy";
     if (!refusal) {
@@ -1557,20 +1572,17 @@ static void handle_net(const char *t, const cJSON *p)
         if (ssid && kind == 's') memcpy(s_net_req.ssid, ssid, strlen(ssid) + 1);
         if (pass && kind == 's') memcpy(s_net_req.pass, pass, strlen(pass) + 1);
         if (host && (kind == 's' || kind == 'h')) memcpy(s_net_req.host, host, strlen(host) + 1);
-    }
-    // Once copied or refused, the secrets of the request are overwritten where they sit in the parsed message and on this stack.
-    net_scrub((char *)pass);
-    net_scrub((char *)net_text(p, "key"));
-    net_zero(key, sizeof key);
-    if (!refusal) {
-        // Internal stack (xTaskCreate, not task_create_psram): this task writes NVS.
-        if (xTaskCreate(net_store_task, "net_store", NET_STORE_STACK, NULL, 4, NULL) != pdPASS) {
-            net_zero(&s_net_req, sizeof s_net_req);
-            atomic_store(&s_net_busy, false);
-            refusal = "storage";
-        } else return;   // net_store sends the reply
+        // Internal stack (xTaskCreate, not task_create_psram): this task writes NVS. It sends the reply.
+        if (xTaskCreate(net_store_task, "net_store", NET_STORE_STACK, NULL, 4, NULL) == pdPASS) goto done;
+        net_zero(&s_net_req, sizeof s_net_req);
+        atomic_store(&s_net_busy, false);
+        refusal = "storage";
     }
     net_reply(id, false, refusal, strcmp(refusal, "busy") != 0);
+done:
+    net_scrub(pass);
+    net_scrub(key_text);
+    net_zero(key, sizeof key);
 }
 
 static void handle_message(const cJSON *root)
@@ -1835,18 +1847,32 @@ static void on_frame(uint8_t version, uint8_t type, const uint8_t *payload, size
 
     // Parse directly from the bounded frame. cJSON owns its decoded strings;
     // none of the tree retains this buffer after the callback returns.
-    if (!cable_json_guard(payload, payload_len)) { s_bad++; return; }
-    const char *end = NULL;
-    cJSON *root = cJSON_ParseWithLengthOpts((const char *)payload, payload_len, &end, false);
-    if (root) {
-        const char *limit = (const char *)payload + payload_len;
-        while (end < limit && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')) end++;
-        if (end != limit || !cJSON_IsObject(root)) { cJSON_Delete(root); root = NULL; }
+    //
+    // A net.* frame carries the Wi-Fi password and key in the decoder's buffer; wherever it ends up (served, refused, or not even valid
+    // JSON), that text is overwritten once it has been handled.
+    bool carries_secret = false;
+    for (size_t i = 0; i + 5 <= payload_len; i++) {
+        if (memcmp(payload + i, "\"net.", 5) == 0) { carries_secret = true; break; }
     }
-    if (!root) { s_bad++; return; }
-    s_last_rx_us = esp_timer_get_time();
-    handle_message(root);
-    cJSON_Delete(root);
+    if (!cable_json_guard(payload, payload_len)) {
+        s_bad++;
+    } else {
+        const char *end = NULL;
+        cJSON *root = cJSON_ParseWithLengthOpts((const char *)payload, payload_len, &end, false);
+        if (root) {
+            const char *limit = (const char *)payload + payload_len;
+            while (end < limit && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')) end++;
+            if (end != limit || !cJSON_IsObject(root)) { cJSON_Delete(root); root = NULL; }
+        }
+        if (!root) {
+            s_bad++;
+        } else {
+            s_last_rx_us = esp_timer_get_time();
+            handle_message(root);
+            cJSON_Delete(root);
+        }
+    }
+    if (carries_secret) cable_link_scrub_payload(payload, payload_len);
 }
 
 // ── session task ────────────────────────────────────────────────────────────────────────────────────

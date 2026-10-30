@@ -45,7 +45,9 @@ for path in sorted(main.rglob('*')):
         continue
     text = '\n'.join(code_lines(path.read_text(errors='replace')))
     assert not re.search(r'\bs_dec_buf\b', text), f'{path.name} takes the decoder buffer'
-uses = [l.strip() for l in code_lines(link) if re.search(r'\bs_dec_buf\b', l)]
+# (cable_link_scrub_payload is the one other place: it overwrites a handled frame with CPU stores, checked below)
+scrub = re.search(r'void cable_link_scrub_payload\(.*?\n\}\n', link, re.S).group(0)
+uses = [l.strip() for l in code_lines(link.replace(scrub, '')) if re.search(r'\bs_dec_buf\b', l)]
 assert len(uses) == 2, uses
 assert any(re.match(r'static EXT_RAM_BSS_ATTR uint8_t\s+s_dec_buf\[CABLE_MAX_FRAME\];', u) for u in uses)
 assert 'cable_decoder_init_with(&s_decoder, s_dec_buf, sizeof s_dec_buf)' in ' '.join(uses)
@@ -74,7 +76,9 @@ for line in code_lines(on_frame):
     for call in re.finditer(r'\b([A-Za-z_]\w*)\s*\(([^()]*)\)', line):   # innermost calls: name(args without parentheses)
         if re.search(r'\bpayload\b', call.group(2)) and call.group(1) not in ('if', 'while', 'sizeof', 'on_frame'):
             callees.add(call.group(1))
-assert callees == {'fw_update_slice', 'handle_pet_slice', 'cable_json_guard', 'cJSON_ParseWithLengthOpts'}, callees
+# memcmp looks for a net.* frame in it, and cable_link_scrub_payload overwrites it afterwards: plain CPU loads and stores
+assert callees == {'fw_update_slice', 'handle_pet_slice', 'cable_json_guard', 'cJSON_ParseWithLengthOpts', 'memcmp', 'cable_link_scrub_payload'}, callees
+assert 'volatile uint8_t *v' in scrub and not re.search(r'\b(?:spi_|i2s_|esp_lcd|gdma|dma_)', scrub)
 # each of them uses the pointer on the CPU
 fw = (main / 'fw_update.c').read_text()
 assert re.search(r'esp_ota_write\(s_handle, data, len\)', fw)

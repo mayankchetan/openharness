@@ -284,3 +284,11 @@ void cable_link_reset_decoder(void)
 {
     cable_decoder_buf_reset(&s_decoder);
 }
+
+void cable_link_scrub_payload(const uint8_t *payload, size_t len)
+{
+    if (!payload || payload < s_dec_buf || payload > s_dec_buf + sizeof s_dec_buf || len > (size_t)(s_dec_buf + sizeof s_dec_buf - payload)) return;
+    // Volatile stores, so that the compiler cannot drop them as dead.
+    volatile uint8_t *v = s_dec_buf + (payload - s_dec_buf);
+    while (len--) *v++ = 0;
+}

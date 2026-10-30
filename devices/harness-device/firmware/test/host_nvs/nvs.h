@@ -37,6 +37,7 @@ void host_nvs_reset(void);                    // empty store, no failure armed
 void host_nvs_fail_after(int mutations);      // the next `mutations` mutating calls work, every one after fails (-1: never fail)
 int  host_nvs_mutations(void);                // mutating calls made since the last reset or fail_after
 int  host_nvs_count(void);                    // keys held
+void host_nvs_forbid_read(const char *key);     // a get of this key into a buffer aborts the test (a size query, with a NULL buffer, is allowed)
 int  host_nvs_has(const char *key);           // 1 when the key is held
 size_t host_nvs_size(const char *key);        // bytes held under the key, 0 when absent
 const void *host_nvs_raw(const char *key);    // the stored bytes (strings include their nul), NULL when absent
