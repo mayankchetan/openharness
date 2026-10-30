@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { EnvIssue, flag, matching, maybe, maybeNumber, number, oneOf, parseEnv, text, unlessFalse, url } from './envFields.js'
+import { EnvIssue, flag, matching, maybe, maybeNumber, number, oneOf, parseEnv, port, text, unlessFalse, url } from './envFields.js'
 
 // The values a variable can arrive with: unset, empty, padded, and the ones each kind is about.
 const VALUES = [undefined, '', ' ', 'true', 'false', 'TRUE', '0', '42', ' 7 ', 'x', 'test', 'prod', 'stag',
@@ -67,5 +67,19 @@ describe('the environment read whole', () => {
 
   it('lets anything but an issue through: a bug is not a bad variable', () => {
     expect(() => parseEnv({ BROKEN: () => { throw new TypeError('a bug') } }, {})).toThrow('a bug')
+  })
+})
+
+describe('a TCP port', () => {
+  it('is a whole number from 1 to 65535, the fallback when unset, and an issue otherwise', () => {
+    const field = port('18480')
+    expect(field(undefined)).toBe(18480)
+    expect(field('1')).toBe(1)
+    expect(field('65535')).toBe(65535)
+    expect(field(' 7 ')).toBe(7)
+    for (const bad of ['0', '-1', '65536', '70000', '1.5', 'x', '', ' ', 'NaN', 'Infinity']) {
+      expect(() => field(bad), JSON.stringify(bad)).toThrow(EnvIssue)
+    }
+    expect(parseEnv({ P: field }, { P: '70000' })).toEqual({ ok: false, issues: { P: ['Invalid port: expected a whole number from 1 to 65535'] } })
   })
 })

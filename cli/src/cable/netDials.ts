@@ -570,6 +570,11 @@ export class NetSlot {
     return this.#current?.isOpen ? this.#current : null
   }
 
+  /** Is there a link, open or waiting for the session to take it? */
+  get active(): boolean {
+    return this.port !== null || (this.#waiting !== null && !this.#waiting.socket.destroyed)
+  }
+
   offer(connection: NetDialConnection): void {
     if (this.#closed) {
       connection.socket.destroy()

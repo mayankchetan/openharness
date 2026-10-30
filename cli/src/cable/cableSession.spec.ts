@@ -21,6 +21,7 @@ import type { PetStore } from './pets/store.js'
 /** A port whose two ends are both in this process. */
 class LoopbackPort implements CablePort {
   readonly path = '/dev/loopback'
+  readonly transport = 'usb' as const
   isOpen = true
   /** Everything the daemon wrote, decoded back into messages. */
   readonly sent: Array<Record<string, unknown>> = []
@@ -726,7 +727,7 @@ describe('cable session', () => {
     const seen: unknown[] = []
     const { session, port } = await connect(makeHost({ onDialStatus: (status) => seen.push(status) }))
     port.say({ t: 'hello', product: 'harness', fw: '0.0.58', proto: 1, mac: 'aa:bb' })
-    await vi.waitFor(() => expect(seen).toEqual([{ attached: true, fw: '0.0.58', mac: 'aa:bb' }]))
+    await vi.waitFor(() => expect(seen).toEqual([{ attached: true, fw: '0.0.58', mac: 'aa:bb', transport: 'usb' }]))
 
     port.say({ t: 'hello', product: 'harness', fw: '0.0.58', proto: 1, mac: 'aa:bb' })
     await settle()
@@ -2162,10 +2163,10 @@ describe('cable session', () => {
     const { session, port } = await connect(makeHost({ log: (l) => lines.push(l), onDialStatus: (s) => seen.push(s) }))
     port.say({ t: 'hello', product: 'harness', mac: 'aa:bb', fw: '0.0.68', proto: 3, hw: 'cst816s' })
     await vi.waitFor(() => expect(lines.some((l) => l.includes('on fw 0.0.68 proto 3 hw cst816s'))).toBe(true))
-    expect(seen).toEqual([{ attached: true, fw: '0.0.68', hw: 'cst816s', mac: 'aa:bb' }])
+    expect(seen).toEqual([{ attached: true, fw: '0.0.68', hw: 'cst816s', mac: 'aa:bb', transport: 'usb' }])
     port.say({ t: 'hello', product: 'harness', mac: 'cc:dd', fw: '0.0.67', proto: 3 })
     await vi.waitFor(() => expect(lines.some((l) => l.includes('dial cc:dd on fw 0.0.67 proto 3'))).toBe(true))
-    expect(seen.at(-1)).toEqual({ attached: true, fw: '0.0.67', mac: 'cc:dd' })
+    expect(seen.at(-1)).toEqual({ attached: true, fw: '0.0.67', mac: 'cc:dd', transport: 'usb' })
     await session.stop()
   })
 
@@ -2394,6 +2395,7 @@ describe('cable session', () => {
     // time; every frame parks.
     class SlowPort implements CablePort {
       readonly path = 'slow'
+      readonly transport = 'usb' as const
       isOpen = true
       readonly sent: Array<Record<string, unknown>> = []
       private decoder = new CableDecoder()

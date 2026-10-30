@@ -1932,8 +1932,8 @@ export class CableSession {
 
   /** A firmware image goes over the cable only: the dial's OTA path takes plain HTTP and no image signature, so nothing over Wi-Fi may start one. */
   private mayOfferFirmwareHere(): boolean {
-    const transport = this.link?.transport
-    return transport === undefined || transport === 'usb'
+    // Only a port that says it is the cable. One that says nothing is not trusted with an image either.
+    return this.link?.transport === 'usb'
   }
 
   private async maybeOfferFirmware(runningVersion: string): Promise<void> {

@@ -453,7 +453,8 @@ export function startDevices(core: CoreApi, ports: CorePorts, deps: DevicesDeps)
     netDials = new NetDials({
       keys, port: net.port, bind: net.bind, enabled: net.enabled,
       log: (line) => log(`[cable] ${line}`),
-      onDial: (connection) => part.call('dial', () => cable.adoptNet(connection)),
+      // Not through part.call: that swallows a throw, and the listener closes the socket of a link nobody could take.
+      onDial: (connection) => cable.adoptNet(connection),
     })
     netDials.start()
   }

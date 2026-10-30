@@ -46,7 +46,7 @@ class UsbPeer implements CablePort {
   }
 }
 
-function setup(extra: Partial<CableFleetOptions> = {}, hostOver: Partial<CableHost> = {}) {
+function setup(extra: Partial<CableFleetOptions> = {}, hostOver: Partial<CableHost> = {}, Session: ConstructorParameters<typeof CableFleet>[0] = CableSession) {
   const host: CableHost = {
     localMachine: () => ({ id: 'local', name: 'Fixture' }),
     listMachines: async () => ({ machines: [], source: 'backend' }),
@@ -84,7 +84,7 @@ function setup(extra: Partial<CableFleetOptions> = {}, hostOver: Partial<CableHo
   const logs = join(dir, 'logs')
   let present: DialPort[] = []
   const usb: UsbPeer[] = []
-  const fleet = new CableFleet(CableSession, host, logs, DialLog, {
+  const fleet = new CableFleet(Session, host, logs, DialLog, {
     canUseUsb: () => true,
     inUse: async () => false,
     discover: async () => present,
@@ -299,6 +299,73 @@ describe('one dial on both links', () => {
       expect(rows).toHaveLength(1)
       expect(rows[0]).toMatchObject({ attached: true, transport: 'usb' })
     })
+  })
+
+  async function usbAttached(s: Awaited<ReturnType<typeof provisioned>>, mac: string) {
+    s.setUsb([usbDevice(mac)])
+    s.fleet.start()
+    await vi.waitFor(() => expect(s.usb).toHaveLength(1))
+    s.usb[0].say({ t: 'hello', product: 'harness', mac, fw: 'fixture', proto: 3 })
+    await vi.waitFor(() => expect(s.fleet.devices()[0]?.attached).toBe(true))
+  }
+
+  it('turns a Wi-Fi link away while the same dial is attached on USB, says so once, and leaves the USB session alone', async () => {
+    const s = await provisioned()
+    await usbAttached(s, A)
+    for (let i = 0; i < 3; i++) {
+      // refused as soon as the handshake is done: the dial may see the close before it sees the handshake finish
+      const wifi = await s.dial(A, s.keyA).catch(() => null)
+      if (wifi) await vi.waitFor(() => expect(wifi.closed).toBe(true))
+    }
+    await vi.waitFor(() => expect(s.net.authenticated).toBe(0))
+    expect(vi.mocked(s.host.log).mock.calls.filter((c) => /Wi-Fi link from 127\.0\.0\.1 is refused/.test(String(c[0])))).toHaveLength(1)
+    expect(s.usb[0].isOpen).toBe(true)
+    expect(s.fleet.devices()).toHaveLength(1)
+    expect(s.fleet.devices()[0]).toMatchObject({ attached: true, transport: 'usb' })
+  })
+
+  it('a Wi-Fi dial that says it is the dial on USB closes its own link and nothing else', async () => {
+    const s = await provisioned()
+    await usbAttached(s, A)
+    const wifi = await s.dial(B, s.keyB)
+    wifi.say({ t: 'hello', product: 'harness', mac: A, fw: 'fixture', proto: 3 })
+    await vi.waitFor(() => expect(wifi.closed).toBe(true))
+    expect(s.usb[0].isOpen).toBe(true)
+    expect(s.fleet.devices().filter((d) => d.attached)).toHaveLength(1)
+    expect(s.fleet.devices()[0]).toMatchObject({ mac: A, transport: 'usb' })
+  })
+
+  it('prints at most 17 printable characters of the MAC a dial claims', async () => {
+    const s = await provisioned()
+    const wifi = await s.dial(A, s.keyA)
+    wifi.say({ t: 'hello', product: 'harness', mac: B + String.fromCharCode(27) + '[31m' + 'X'.repeat(300), fw: 'fixture', proto: 3 })
+    await vi.waitFor(() => expect(wifi.closed).toBe(true))
+    const line = String(vi.mocked(s.host.log).mock.calls.map((c) => c[0]).find((l) => /says it is/.test(String(l))))
+    expect(line).toContain('says it is ' + B + ',')
+    expect(line).not.toContain(String.fromCharCode(27))
+    expect(line.length).toBeLessThan(300)
+    expect(line).not.toContain('XXXX')
+  })
+
+  it('a USB attach also drops a Wi-Fi link that is waiting for its session', async () => {
+    // A session that never asks for its port: the connection waits in the slot.
+    class Idle {
+      isConnected = false
+      wantsStats = false
+      constructor() {}
+      start() {}
+      async stop() {}
+    }
+    const s = setup({}, {}, Idle as unknown as ConstructorParameters<typeof CableFleet>[0])
+    const key = randomBytes(32)
+    s.keys.set(A, key)
+    await s.net.settled()
+    const wifi = await s.dial(A, key)
+    const entries = (s.fleet as unknown as { netEntries: Map<string, { slot: { active: boolean } }> }).netEntries
+    await vi.waitFor(() => expect(entries.get(A)?.slot.active).toBe(true))
+    ;(s.fleet as unknown as { supersedeNet(mac: string): void }).supersedeNet(A)
+    await vi.waitFor(() => expect(wifi.closed).toBe(true))
+    expect(entries.get(A)?.slot.active).toBe(false)
   })
 
   it('a USB dial with a different MAC leaves the Wi-Fi dial alone', async () => {

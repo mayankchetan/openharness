@@ -92,6 +92,8 @@ export class CableFleet {
   private netEntries = new Map<string, NetEntry>()
   /** Set by `stop`: a connection offered after it is closed, not adopted. Wi-Fi dials do not wait for `start` (CABLE_DISABLE only leaves the serial port alone). */
   private netClosed = false
+  /** When a Wi-Fi link was last refused because the same dial is on USB, by MAC: said once a minute, as the dial retries every few seconds. */
+  private readonly netRefusedAt = new Map<string, number>()
   private timer?: ReturnType<typeof setInterval>
   private scanTask?: Promise<void>
   private stopped = true
@@ -367,6 +369,17 @@ export class CableFleet {
   adoptNet(connection: NetDialConnection): void {
     if (this.netClosed) { connection.socket.destroy(); return }
     const id = connection.id.toUpperCase()
+    // USB wins, both ways round: a dial whose cable session is up is not given a second link beside it. This never touches
+    // the USB session; it only turns the Wi-Fi peer away.
+    if ([...this.entries.values()].some(e => e.attached && e.status.mac?.toUpperCase() === id)) {
+      connection.socket.destroy()
+      const now = Date.now()
+      if (now - (this.netRefusedAt.get(id) ?? 0) >= 60_000) {
+        this.netRefusedAt.set(id, now)
+        this.host.log(`cable: ${id} is on USB — its Wi-Fi link from ${connection.peer} is refused [wifi ${id}]`)
+      }
+      return
+    }
     const entry = this.netEntries.get(id) ?? this.openNet(id)
     entry.rejected = false
     entry.slot.offer(connection)
@@ -412,7 +425,9 @@ export class CableFleet {
         if (key === 'onDialStatus') return (status: DialStatus) => {
           // The key it proved is this MAC's. A dial that holds it and says it is another must not take that dial's row.
           if (status.mac && status.mac.toUpperCase() !== id) {
-            this.host.log(`cable: the dial that proved the key of ${id} says it is ${status.mac}, not ${id} — closing its Wi-Fi link [wifi ${id}]`)
+            // What the dial sent, shown short and printable: it is the one thing in this line that a peer chose.
+            const said = String(status.mac).slice(0, 17).replace(/[^\x20-\x7e]/g, '?')
+            this.host.log(`cable: the dial that proved the key of ${id} says it is ${said}, not ${id} — closing its Wi-Fi link [wifi ${id}]`)
             entry.rejected = true
             setTimeout(() => slot.drop('identity mismatch'), 0)
             return
@@ -448,7 +463,7 @@ export class CableFleet {
   /** A dial attached on USB: if the same MAC is live over Wi-Fi, that link closes. USB wins, so the reboot window of a mode switch leaves one session. */
   private supersedeNet(mac: string | undefined): void {
     const net = mac ? this.netEntries.get(mac.toUpperCase()) : undefined
-    if (!net || !(net.attached || net.slot.port)) return
+    if (!net || !(net.attached || net.slot.active)) return
     this.host.log(`cable: ${mac} is on USB — closing its Wi-Fi link (superseded by USB) [wifi ${net.port.serialNumber}]`)
     net.slot.drop('superseded by USB')
   }

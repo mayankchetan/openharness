@@ -18,6 +18,7 @@ const CableFleet: typeof SourceFleet = process.env.HARNESS_TEST_USB_FLEET
 const device = (path: string, serialNumber: string): DialPort => ({ path, serialNumber, vendorId: 0x303a, productId: 0x1001 })
 
 class Peer implements CablePort {
+  readonly transport = 'usb' as const
   isOpen = true
   sent: Record<string, unknown>[] = []
   private decoder = new CableDecoder()

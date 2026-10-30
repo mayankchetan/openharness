@@ -3,7 +3,7 @@ import './loadEnv.js'
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { EnvIssue, flag, matching, maybe, maybeNumber, number, oneOf, parseEnv, text, unlessFalse, url, type EnvField, type EnvOf } from './envFields.js'
+import { EnvIssue, flag, matching, maybe, maybeNumber, number, oneOf, parseEnv, port, text, unlessFalse, url, type EnvField, type EnvOf } from './envFields.js'
 import { parseTerminalBackends } from './terminalConfig.js'
 import { adoptComputerId } from '../lib/computerIdentity.js'
 
@@ -383,7 +383,8 @@ const fields = {
   HARNESS_BIN_DIR: text(adapterBinDir),
   // ── the dial on the USB cable ──────────────────────────────────────────────────────────────────
   // Set 'true' to leave the serial port alone entirely. The port is exclusive, so this is what a
-  // developer flips before running esptool or a serial monitor against the dial.
+  // developer flips before running esptool or a serial monitor against the dial. It does not touch the Wi-Fi listener
+  // below (CABLE_NET_*): dials that are provisioned for Wi-Fi still connect.
   CABLE_DISABLE: flag('false'),
   // Transcription for voice captured on the dial. The device holds no cloud credential and never talks to
   // one; the daemon has an account, and this call is authenticated by the SSO session `harness login`
@@ -418,7 +419,7 @@ const fields = {
   // port. 'false' never opens it.
   CABLE_NET_ENABLE: flag('true'),
   // The TCP port the dials connect to. 18473 and 18474 are the daemon's and the team's.
-  CABLE_NET_PORT: number('18480'),
+  CABLE_NET_PORT: port('18480'),
   // The address the listener binds. All IPv4 interfaces by default; set one address to pin it. Only private, link-local and
   // loopback peers are accepted either way, and every peer must still prove the dial's key.
   CABLE_NET_BIND: text('0.0.0.0'),

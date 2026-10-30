@@ -13,6 +13,7 @@ import { DialLog } from './dialLog.js'
 
 class Loopback implements CablePort {
   readonly path = '/dev/loopback'
+  readonly transport = 'usb' as const
   isOpen = true
   readonly sent: Array<Record<string, unknown>> = []
   private decoder = new CableDecoder()

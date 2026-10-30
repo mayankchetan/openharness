@@ -21,6 +21,12 @@ export const text = (fallback: string): EnvField<string> => (raw) => raw ?? fall
 export const maybe: EnvField<string | undefined> = (raw) => raw
 /** A number (`Number`, so not a number is NaN, as before), [fallback] when unset. */
 export const number = (fallback: string): EnvField<number> => (raw) => Number(raw ?? fallback)
+/** A TCP port: a whole number from 1 to 65535, [fallback] when unset; anything else is an issue. */
+export const port = (fallback: string): EnvField<number> => (raw) => {
+  const value = Number(raw ?? fallback)
+  if (!Number.isInteger(value) || value < 1 || value > 65535) throw new EnvIssue('Invalid port: expected a whole number from 1 to 65535')
+  return value
+}
 /** A number, or undefined when unset. */
 export const maybeNumber: EnvField<number | undefined> = (raw) => raw === undefined ? undefined : Number(raw)
 /** True only for `true`, [fallback] when unset. */

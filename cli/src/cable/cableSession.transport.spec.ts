@@ -116,12 +116,23 @@ describe('firmware is never offered over Wi-Fi', () => {
     await session.stop()
   })
 
-  it.each([undefined, 'usb'] as const)('control: a port whose transport is %s is still offered the image', async (transport) => {
+  it('control: a port that says usb is still offered the image', async () => {
     const lookup = firmwareFor()
-    const { session, port } = await connect(host({ firmwareFor: lookup }), transport, transport ? 'cable' : undefined)
+    const { session, port } = await connect(host({ firmwareFor: lookup }), 'usb', 'cable')
     port.say(OLD_PRO)
     await vi.waitFor(() => expect(lookup).toHaveBeenCalledWith('0.0.1', 'harness-pro'))
     expect(port.types().filter((t) => t === 'fw.offer')).toHaveLength(1)
+    await session.stop()
+  })
+
+  it('a port that says nothing about its link is not trusted with an image either', async () => {
+    const lookup = firmwareFor()
+    const { session, port } = await connect(host({ firmwareFor: lookup }), undefined)
+    port.say(OLD_PRO)
+    await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
+    await settle()
+    expect(lookup).not.toHaveBeenCalled()
+    expect(port.types()).not.toContain('fw.offer')
     await session.stop()
   })
 })
