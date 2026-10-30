@@ -50,6 +50,8 @@ cc -std=c11 -Wall -Wextra -Werror -O1 \
    -o "$out/test_cable_frame" "$here/test_cable_frame.c" "$here/../main/cable_frame.c"
 "$out/test_cable_frame" "$here/vectors/cable_frame.txt"
 python3 "$here/test_cable_transport.py"
+# IMA ADPCM voice blocks (frame type 0x07): encoder and decoder against the shared vectors, sanitizers on.
+python3 "$here/test_adpcm_ima.py"
 
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -o "$out/test_cable_json_guard" "$here/test_cable_json_guard.c" "$here/../main/cable_json_guard.c"
