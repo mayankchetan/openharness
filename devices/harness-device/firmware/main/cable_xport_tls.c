@@ -42,6 +42,7 @@ typedef struct {
     atomic_int           writers_waiting;
     atomic_bool          up;        // handshake finished and the link is intact
     atomic_bool          closing;   // close() is waiting for the mutex: long loops give up
+    atomic_int           hs_error;  // the mbedTLS code that ended the last handshake (0: none); read by cable_xport_tls_last_error()
     // Below: only under `lock`.
     bool                 inner_closed;
     bool                 write_pending;   // a record is inside mbedTLS and one write() call is still finishing it
@@ -128,7 +129,10 @@ static bool tls_handshake(tls_t *t)
         if (r == MBEDTLS_ERR_SSL_WANT_WRITE) vTaskDelay(1);
     }
     t->deadline_us = 0;
-    if (r != 0) ESP_LOGW(TAG, "handshake failed: -0x%04X", (unsigned)-r);
+    if (r != 0) {
+        atomic_store(&t->hs_error, r);
+        ESP_LOGW(TAG, "handshake failed: -0x%04X", (unsigned)-r);
+    }
     return r == 0;
 }
 
@@ -143,6 +147,7 @@ static bool tls_open(const cable_xport_t *x)
     xSemaphoreTake(t->lock, portMAX_DELAY);
     bool ok = false;
     atomic_store(&t->up, false);
+    atomic_store(&t->hs_error, 0);
     if (t->ssl_ready) {   // open() again without close(): free the old session and close the inner transport first
         release_session(t);
         close_inner(t);
@@ -350,6 +355,7 @@ const cable_xport_t *cable_xport_tls_wrap(const cable_xport_t *inner, const char
     atomic_init(&t->writers_waiting, 0);
     atomic_init(&t->up, false);
     atomic_init(&t->closing, false);
+    atomic_init(&t->hs_error, 0);
 
     mbedtls_ssl_config_init(&t->conf);
     int r = mbedtls_ssl_config_defaults(&t->conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
@@ -386,6 +392,11 @@ const cable_xport_t *cable_xport_tls_wrap(const cable_xport_t *inner, const char
         .inner = inner,
     };
     return &t->self;
+}
+
+int cable_xport_tls_last_error(const cable_xport_t *x)
+{
+    return x && x->ctx ? atomic_load(&((tls_t *)x->ctx)->hs_error) : 0;
 }
 
 void cable_xport_tls_free(const cable_xport_t *x)

@@ -49,5 +49,10 @@
 const cable_xport_t *cable_xport_tls_wrap(const cable_xport_t *inner, const char *identity,
                                           const uint8_t *psk, size_t psk_len);
 
+// The mbedTLS error code (negative, e.g. -0x7780) that ended the last handshake, or 0 when the last open() got that far and succeeded or
+// failed before the handshake began (inner transport would not open). Reset at the start of every open(). Only a code: the net task
+// sorts "the daemon refused us" from "the network failed" with it (net_link.c). Safe from any task.
+int cable_xport_tls_last_error(const cable_xport_t *x);
+
 // Close the wrapper (and with it the inner transport) and free everything, zeroizing the key copy. NULL is allowed.
 void cable_xport_tls_free(const cable_xport_t *x);

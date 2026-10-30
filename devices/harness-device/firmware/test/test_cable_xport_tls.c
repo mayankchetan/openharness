@@ -586,6 +586,7 @@ static void run_echo(const char *name, int max_read, int max_write, uint32_t fra
     CHECK(t->open(t));
     int64_t hs_ms = ms_now() - t0;
     CHECK(t->is_up(t));
+    CHECK(cable_xport_tls_last_error(t) == 0);   // a finished handshake leaves no error code
     CHECK(atomic_load(&l->client.open_calls) == 1);
 
     cable_decoder_buf_t d;
@@ -637,6 +638,8 @@ static void expect_refused(const char *name, const uint8_t *client_key, const ch
     int64_t t0 = ms_now();
     CHECK(!t->open(t));
     int64_t ms = ms_now() - t0;
+    const int hs_err = cable_xport_tls_last_error(t);
+    CHECK(hs_err < 0);   // the code that ended the handshake, for the net task (net_link.c sorts "refused" from "network failed" with it)
     CHECK(ms < 4500);
     CHECK(!t->is_up(t));
     CHECK(atomic_load(&l->client.closed_by_wrapper));   // the inner transport was closed again
@@ -648,7 +651,7 @@ static void expect_refused(const char *name, const uint8_t *client_key, const ch
     server_join(&s);
     cable_xport_tls_free(t);
     free(l);
-    printf("ok %s: refused in %lld ms\n", name, (long long)ms);
+    printf("ok %s: refused in %lld ms, mbedTLS code -0x%04X\n", name, (long long)ms, (unsigned)-hs_err);
 }
 
 static void test_refusals(void)
