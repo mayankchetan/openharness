@@ -65,7 +65,13 @@ static const char *TAG = "cable";
 
 // The decoder runs over a buffer this file owns (cable_decoder_init_with). Both are touched only by the reader
 // task, and by cable_link_reset_decoder() from that task's callbacks (cable_link.h).
-static uint8_t             s_dec_buf[CABLE_MAX_FRAME];
+//
+// 8.2 KB in PSRAM (EXT_RAM_BSS_ATTR, task W6), like s_tx_frame below. Safe because it is a CPU-only parse buffer:
+// bytes reach it by memcpy from the reader's 256-byte chunk (cable_decoder_buf_feed), never from a peripheral, and
+// the frame callback only parses it, copies it, or passes it to esp_ota_write, which copies a non-DRAM source
+// through a stack buffer (esp_flash_write) instead of using DMA. test_decoder_psram.py pins these facts. The USB
+// driver's own RX ring (32 KB, cable_xport_usb.c) stays internal: the ISR writes it.
+static EXT_RAM_BSS_ATTR uint8_t s_dec_buf[CABLE_MAX_FRAME];
 static cable_decoder_buf_t s_decoder;
 static const cable_xport_t *s_xport;
 static cable_frame_cb  s_cb;

@@ -56,6 +56,8 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
    -o "$out/test_cable_xport" "$here/test_cable_xport.c" "$here/../main/cable_frame.c"
 "$out/test_cable_xport"
 python3 "$here/test_cable_xport.py"
+# The decoder buffer is in PSRAM (W6): only cable_link.c names it, and every consumer of a frame payload is CPU-side (no DMA).
+python3 "$here/test_decoder_psram.py"
 # IMA ADPCM voice blocks (frame type 0x07): encoder and decoder against the shared vectors, sanitizers on.
 python3 "$here/test_adpcm_ima.py"
 # The ADPCM sender (W4): wiring of the flags and fields, and the VOX probe's review gates. The sender loop itself runs in test_audio_stream.py.
