@@ -25,6 +25,7 @@ import { readCompanionIdentity, type CompanionIdentity } from './companionProtoc
 import { ADPCM_BLOCK_PCM_BYTES, AdpcmAssembler } from './adpcm.js'
 import { CABLE_MAX_PAYLOAD, CableDecoder, CableType, encodeCableFrame } from './cableFrame.js'
 import { DialDebug, type DebugTouch, type DoneResult, type ShotResult } from './dialDebug.js'
+import { DialNet, type NetRequest, type NetResult } from './dialNet.js'
 import { DialLog } from './dialLog.js'
 import { FirmwareTransfer, otaKeyFor } from './fwPush.js'
 import { PACK_VERSION } from './pets/pack.js'
@@ -452,6 +453,12 @@ export interface CableHost {
   onDialAttached?(): void
   onDialGone?(): void
   /**
+   * A dial on the CABLE has greeted and said it keeps Wi-Fi settings (`hello.net`). Told once per link, after the greeting,
+   * and never for any other link. The host reads the dial's state through the handle and brings the daemon address it holds up
+   * to date (cable/netProvision.ts). A throw or a rejection is logged and costs the session nothing.
+   */
+  onNetCapable?(dial: NetDialHandle): void | Promise<void>
+  /**
    * The port this session opened turned out not to be a Harness dial: it talked in something else, or
    * never said anything at all. Told once, so whoever owns discovery can stop offering the port — a
    * second ESP32 board on the desk is somebody's work in progress, not ours to keep probing.
@@ -575,6 +582,12 @@ export interface CablePort {
 
 /** The links a dial can come in on. */
 export type CableTransport = 'usb' | 'wifi' | 'ble' | 'tunnel'
+
+/** What a host is given for a dial that keeps Wi-Fi settings: its MAC, and a way to ask it (dialNet.ts). */
+export interface NetDialHandle {
+  mac: string
+  net(request: NetRequest): Promise<NetResult>
+}
 
 /** Open the dial's port, or null when it is not there. Both are ordinary answers. */
 export type PortOpener = (
@@ -847,6 +860,12 @@ export class CableSession {
   private voiceUploadId = ''
   /** The host debug commands: a screenshot and injected touch, one at a time (dialDebug.ts). */
   private readonly debug = new DialDebug({ send: (msg) => this.send(msg), log: (line) => this.log(line) })
+  /** The Wi-Fi settings, one request at a time (dialNet.ts). Nothing that goes through it is ever logged but its op and outcome. */
+  private readonly netRequests = new DialNet({ send: (msg) => this.send(msg), log: (line) => this.log(line) })
+  /** `hello.net === 'v1'`: the dial keeps Wi-Fi settings and speaks net.*. Per link; the welcome then lists "net" (on the cable only). */
+  private netCapable = false
+  /** The host has been told, on this link, that the dial keeps Wi-Fi settings. */
+  private netAnnounced = false
 
   constructor(
     private readonly host: CableHost,
@@ -880,6 +899,7 @@ export class CableSession {
     if (this.timer) clearInterval(this.timer)
     this.timer = null
     this.debug.abort('the daemon is stopping')
+    this.netRequests.abort('the daemon is stopping')
     await this.link?.close('daemon stopping')
     this.link = null
   }
@@ -1086,6 +1106,8 @@ export class CableSession {
     if (this.traffic.rx || this.traffic.tx) this.logLink('link at close')
     this.log(`cable: closed (${why})`)
     this.debug.abort('the dial went away')
+    this.netRequests.abort('the dial went away')
+    this.netAnnounced = false
     this.cancelFormVoice()
     this.cancelSearchVoice()
     this.passageCarry.clear()
@@ -1232,6 +1254,8 @@ export class CableSession {
         // A debug reply is answered here, in the order it arrived: the picture's begin, chunks and end must be
         // seen as the dial sent them, and onMessage is async. (It is also nothing the vocabulary below knows.)
         if (this.debug.message(msg)) return
+        // The Wi-Fi settings' one answer, taken the same way: nothing of it is logged or passed on.
+        if (this.netRequests.message(msg)) return
         // Its failure is this dial's: a rejection left unhandled would end the whole devices process.
         void this.onMessage(msg).catch((error: unknown) => this.fault(error))
         return
@@ -1294,6 +1318,7 @@ export class CableSession {
         this.superTabWaits = str('superTab') === 'wait-v1'
         this.swarmCard = str('swarmCard') === 'v1'
         this.adpcmVoice = str('voiceCodec') === 'adpcm-v1'
+        this.netCapable = str('net') === 'v1'
         this.wantCards(this.swarmCard)
         this.seqOn = str('board') === 'pro'
         this.seq = 0
@@ -1328,6 +1353,9 @@ export class CableSession {
             // Only to a dial that said it can send it. Not tied to a transport: the dial chooses per turn, and the
             // decode below is the same on USB, Wi-Fi or a later phone link.
             ...(this.adpcmVoice ? ['voice.adpcm'] : []),
+            // Wi-Fi settings go over the cable only (the dial refuses them on any other link, and this side sends none), and
+            // only to a dial that said it keeps them.
+            ...(this.mayNetHere() ? ['net'] : []),
           ],
         })
         // Log a dial that is new OR that came back running something else. The version half of that test
@@ -1373,6 +1401,8 @@ export class CableSession {
         // hardware every fifteen seconds, and nothing about the next greeting changes what went wrong.
         // Never over a link that is not the cable: see maybeOfferFirmware.
         if (this.mayOfferFirmwareHere()) await this.maybeOfferFirmware(str('fw') ?? '')
+        // Not while an image is going over: the dial is erasing a flash slot and answers nothing.
+        if (!this.transfer) this.announceNet()
         // AFTER the firmware offer, so a pending image is already `this.transfer` and the pets wait for it.
         this.readPetHello(msg)
         await this.syncPets()
@@ -1936,6 +1966,22 @@ export class CableSession {
     return this.link?.transport === 'usb'
   }
 
+  /** Wi-Fi settings (the password, the key) cross the cable and nothing else, to a dial that said it keeps them (dialNet.ts). */
+  private mayNetHere(): boolean {
+    return this.netCapable && this.link?.transport === 'usb'
+  }
+
+  /** Tell the host, once per link, that this dial on the cable keeps Wi-Fi settings (CableHost.onNetCapable). */
+  private announceNet(): void {
+    const mac = this.greetedMac
+    if (this.netAnnounced || !this.mayNetHere() || !mac || !this.host.onNetCapable) return
+    this.netAnnounced = true
+    const failed = (error: unknown) => this.log(`cable: net setup for ${mac} failed: ${error instanceof Error ? error.message : String(error)}`)
+    try {
+      void Promise.resolve(this.host.onNetCapable({ mac, net: (request) => this.net(request) })).catch(failed)
+    } catch (error) { failed(error) }
+  }
+
   private async maybeOfferFirmware(runningVersion: string): Promise<void> {
     // The call site checks this too; here it holds for any other caller.
     if (!this.mayOfferFirmwareHere()) return
@@ -2497,6 +2543,17 @@ export class CableSession {
   async debugTouch(request: DebugTouch): Promise<DoneResult> {
     if (!this.isConnected) return { ok: false, kind: 'gone', message: 'the dial is not connected' }
     return this.debug.touch(request)
+  }
+
+  /**
+   * The dial's Wi-Fi settings, over the cable only (dialNet.ts): set, read, clear, switch, rekey or readdress. Refused here,
+   * before anything is sent, on any other link and for a dial that did not say it keeps them. Never rejects.
+   */
+  async net(request: NetRequest): Promise<NetResult> {
+    if (!this.isConnected) return { ok: false, kind: 'gone', message: 'the dial is not connected' }
+    if (this.link?.transport !== 'usb') return { ok: false, kind: 'transport', message: 'Wi-Fi settings go to a dial over its USB cable only' }
+    if (!this.netCapable) return { ok: false, kind: 'unsupported', message: 'this dial\'s firmware does not keep Wi-Fi settings' }
+    return this.netRequests.request(request)
   }
 
   private async send(msg: Message): Promise<boolean> {

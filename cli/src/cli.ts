@@ -186,6 +186,10 @@ Machine:
                                neither touches a local install-cli.sh build without --force)
   harness flash [flags]        re-flash a plugged-in circle device over USB. Flags go straight to the
                                flasher: --detect-only, --port, --version, --yes, --erase-nvs
+  harness dial wifi <set|show|forget|rotate|on|off|firewall>
+                               give a plugged-in dial a Wi-Fi network and the key it proves to this computer with.
+                               \`set\` asks for the network name and the password (typed, never an argument);
+                               \`firewall\` prints the Windows firewall command, it does not run it
 
 Grid (the fleet of AI engines the \`grid\` CLI serves — needs \`grid\` on PATH):
   harness grid login           sign in to your grid reusing THIS computer's Autonomous account —
@@ -1864,8 +1868,9 @@ function readStdinLine(): Promise<string> {
  *  leaves nothing on screen at all. Owning the raw keystrokes here means nothing else is redrawing the
  *  line. Falls back to a plain (unmasked) single-line read when stdin isn't a TTY — there's no
  *  terminal to suppress echo on regardless; `--stdin` is the supported path for scripted/GUI callers,
- *  this only guards a caller that piped input without passing it. */
-function promptPassword(prompt: string): Promise<string> {
+ *  this only guards a caller that piped input without passing it. `mask` is what each keystroke shows; an
+ *  empty one shows nothing at all, not even the length (the dial's Wi-Fi password). */
+function promptPassword(prompt: string, mask = '*'): Promise<string> {
   if (!process.stdin.isTTY) {
     process.stdout.write(prompt)
     return readStdinLine().then((line) => { process.stdout.write('\n'); return line })
@@ -1886,7 +1891,7 @@ function promptPassword(prompt: string): Promise<string> {
       if (key.ctrl && (key.name === 'c' || key.name === 'd')) { cleanup(); process.stdout.write('\n'); process.exit(130) }
       if (key.name === 'return' || key.name === 'enter') { cleanup(); process.stdout.write('\n'); resolve(value); return }
       if (key.name === 'backspace') {
-        if (value.length) { value = value.slice(0, -1); process.stdout.write('\b \b') }
+        if (value.length) { value = value.slice(0, -1); if (mask) process.stdout.write('\b \b') }
         return
       }
       // Anything else that isn't a single printable character — arrows, tab, escape, function keys,
@@ -1894,10 +1899,36 @@ function promptPassword(prompt: string): Promise<string> {
       // password buffer.
       if (str && !key.ctrl && !key.meta && str.length === 1 && str.charCodeAt(0) >= 0x20) {
         value += str
-        process.stdout.write('*')
+        if (mask) process.stdout.write(mask)
       }
     }
     stdin.on('keypress', onKeypress)
+  })
+}
+
+/**
+ * `harness dial wifi ...` (lib/dialWifiCommand.ts): the daemon does the work over its local API; this gives the command its
+ * terminal. The password is typed with nothing shown (a piped stdin gives it as a line, for scripts), and never comes from the
+ * command line or the environment. Returns the exit code.
+ */
+async function dialMainCommand(rest: string[]): Promise<number> {
+  const { dialCommand, stdinLines } = await import('./lib/dialWifiCommand.js')
+  const tty = process.stdin.isTTY === true
+  const piped = tty ? null : stdinLines(process.stdin)
+  return dialCommand(rest, {
+    tty,
+    call: async (path, body) => {
+      try {
+        const res = await daemonRequest('POST', path, body)
+        return { status: res.status, body: (await res.json().catch(() => ({}))) as Record<string, unknown> }
+      } catch { return null }
+    },
+    ask: (label) => piped ? piped() : askLine(label),
+    askSecret: (label) => piped ? piped() : promptPassword(label, ''),
+    out: (line) => console.log(line),
+    err: (line) => console.error(line),
+    platform: process.platform,
+    port: env.CABLE_NET_PORT,
   })
 }
 
@@ -2917,6 +2948,10 @@ switch (cmd) {
     break
   case 'devices':
     devicesCommand(args[0], args[1], flags).catch(onError)
+    break
+  case 'dial':
+    // The raw words, not `args`/`flags`: `--dial 00:11:..` carries a value that `args` would take for a word of its own.
+    dialMainCommand(rest).then((code) => { process.exitCode = code }).catch(onError)
     break
   case 'remote-password':
     if (args[0] === 'set') remotePasswordSetCommand(flags.includes('--json'), flags.includes('--stdin')).catch(onError)

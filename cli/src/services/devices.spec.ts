@@ -16,7 +16,7 @@ import type { DevicesDeps } from './devices.js'
 const seen = vi.hoisted(() => ({
   host: null as unknown as CableHostWiring,
   dial: null as unknown as { onDialStatus(status: unknown): void },
-  cable: null as unknown as { args: unknown[]; calls: Array<[string, unknown[]]>; setSettings: (id: string, patch: unknown) => Promise<{ ok: boolean; error?: string }>; debug: ReturnType<typeof import('vitest').vi.fn> },
+  cable: null as unknown as { args: unknown[]; calls: Array<[string, unknown[]]>; setSettings: (id: string, patch: unknown) => Promise<{ ok: boolean; error?: string }>; debug: ReturnType<typeof import('vitest').vi.fn>; net: ReturnType<typeof import('vitest').vi.fn> },
   bridges: {} as Record<string, { wiring: Record<string, (...args: unknown[]) => unknown>; calls: Array<[string, unknown[]]> }>,
   fleet: null as null | { deps: FleetDeps; events: ((event: FleetEvent) => void) | null; fail: boolean },
   voice: { sessions: vi.fn(), connected: vi.fn(), shutdown: vi.fn() },
@@ -69,6 +69,9 @@ vi.mock('../cable/cableFleet.js', async (real) => {
     // The firmware's debug commands (cable/cableFleet.ts debug): the picture is two pixels, red and green.
     debug = vi.fn(async (_dial: string | undefined, request: { cmd: string }): Promise<unknown> =>
       request.cmd === 'shot' ? { ok: true, width: 2, height: 1, pixels: Buffer.from([0xf8, 0x00, 0x07, 0xe0]) } : { ok: true })
+    // A dial's Wi-Fi settings over the cable (cable/cableFleet.ts net): nothing set, until a test says otherwise.
+    net = vi.fn(async (_dial: string | undefined, request: { op: string }): Promise<unknown> =>
+      request.op === 'get' ? { ok: true, saved: false, dial: 'B8:1F:3F:CA:E5:58' } : { ok: true, saved: true, dial: 'B8:1F:3F:CA:E5:58' })
   }
   return { ...actual, CableFleet: FakeCable }
 })
@@ -127,6 +130,10 @@ vi.mock('../lib/voiceRouter.js', () => ({
   routeVoiceTask: vi.fn(),
 }))
 
+// The route probe that finds this computer's LAN address (cable/netProvision.ts lanAddress): a fake UDP socket, so no test opens one.
+vi.mock('node:dgram', () => ({
+  createSocket: () => ({ once: () => undefined, connect: (_port: number, _host: string, done: () => void) => done(), address: () => ({ address: '10.1.2.3' }), close: () => undefined }),
+}))
 const jevMade = vi.hoisted(() => vi.fn())
 vi.mock('../lib/jev/jevClient.js', async (orig) => {
   const actual = await orig<typeof import('../lib/jev/jevClient.js')>()
@@ -156,7 +163,7 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-function start(over: { core?: CoreApi; faults?: string[]; cableDisabled?: boolean; net?: DevicesDeps['net']; testDialPort?: string; readUsage?: DevicesDeps['readUsage']; now?: () => number; decideTier?: DevicesDeps['decideTier'] | null } = {}) {
+function start(over: { core?: CoreApi; faults?: string[]; cableDisabled?: boolean; net?: DevicesDeps['net']; lan?: DevicesDeps['lan']; testDialPort?: string; readUsage?: DevicesDeps['readUsage']; now?: () => number; decideTier?: DevicesDeps['decideTier'] | null } = {}) {
   const core = over.core ?? fakeCore({ dataDir })
   const ports: CorePorts = emptyPorts()
   const onExit = vi.fn()
@@ -168,6 +175,7 @@ function start(over: { core?: CoreApi; faults?: string[]; cableDisabled?: boolea
     testDialPort: over.testDialPort,
     cableDisabled: over.cableDisabled,
     net: over.net,
+    lan: over.lan,
     readUsage: over.readUsage,
     now: over.now,
     decideTier: over.decideTier === null ? undefined : over.decideTier ?? (async () => ({ tier: 'alert', by: 'test', detail: '', ms: 0 })),
@@ -1288,5 +1296,74 @@ describe('the Wi-Fi dials', () => {
     await vi.waitFor(() => expect(logs.some((l) => /Wi-Fi dials listening/.test(l))).toBe(true))
     expect(calls('start')).toHaveLength(0)
     await port.stop()
+  })
+})
+
+describe('the dial Wi-Fi request', () => {
+  const owner = { local: true, owner: true }
+  const ID = 'B8:1F:3F:CA:E5:58'
+  const withKeys = async () => {
+    const { DIAL_KEY_FILE, DialKeys } = await import('../cable/dialKeys.js')
+    const keysFile = join(dataDir, 'devices', DIAL_KEY_FILE)
+    const keys = new DialKeys(keysFile)
+    return { keys, net: { keysFile, keys, port: 18480, bind: '127.0.0.1', enabled: false } }
+  }
+
+  it('is not answered at all where the Wi-Fi link is not set up in this process', async () => {
+    const { requests } = start()
+    expect(await requests.dial_net({ op: 'status' }, owner)).toEqual({ error: 'DISABLED' })
+    expect(seen.cable.net).not.toHaveBeenCalled()
+  })
+
+  it('is answered to the owner on this computer only, never to the owner\'s relayed app', async () => {
+    const { net } = await withKeys()
+    const { requests } = start({ net })
+    expect(await requests.dial_net({ op: 'status' }, { local: false, owner: false })).toEqual({ error: 'OWNER_REQUIRED' })
+    expect(await requests.dial_net({ op: 'status' }, { local: true, owner: false })).toEqual({ error: 'OWNER_REQUIRED' })
+    expect(await requests.dial_net({ op: 'status' }, { local: false, owner: true })).toEqual({ error: 'LOCAL_ONLY' })
+    expect(seen.cable.net).not.toHaveBeenCalled()
+  })
+
+  it('gives the dial its settings through the fleet, and keeps the key it was given', async () => {
+    const { net, keys } = await withKeys()
+    const { requests } = start({ net, lan: async () => '192.168.1.20' })
+    const answer = await requests.dial_net({ op: 'provision', ssid: 'home-net', pass: 'correct horse battery' }, owner)
+    expect(answer).toMatchObject({ ok: true, dial: ID, saved: true, ssid: 'home-net', host: '192.168.1.20', port: 18480, mode: 1 })
+    const sent = seen.cable.net.mock.calls[0]
+    expect(sent[0]).toBeUndefined()
+    expect(sent[1]).toMatchObject({ op: 'set', ssid: 'home-net', pass: 'correct horse battery', host: '192.168.1.20', port: 18480, mode: 1 })
+    expect(keys.get(ID)).toEqual(sent[1].key)
+  })
+
+  it('logs the outcome of a provision and nothing it carried', async () => {
+    const { net } = await withKeys()
+    const { requests } = start({ net, lan: async () => '192.168.1.20' })
+    await requests.dial_net({ op: 'provision', ssid: 'home-net', pass: 'correct horse battery' }, owner)
+    const text = logs.join('\n')
+    expect(text).toContain(`[cable] cable: net: ${ID} was given Wi-Fi settings`)
+    expect(text).not.toContain('correct horse')
+    expect(text).not.toContain('home-net')
+  })
+
+  it('looks up this computer\'s own address when the caller has no way to say it', async () => {
+    const { net } = await withKeys()
+    const { requests } = start({ net })
+    expect(await requests.dial_net({ op: 'status' }, owner)).toMatchObject({ ok: true, port: 18480, lan: '10.1.2.3' })
+  })
+
+  it('brings the address a plugged-in dial holds up to date: the fleet is given the way to ask', async () => {
+    const { net, keys } = await withKeys()
+    keys.set(ID, Buffer.alloc(32, 7))
+    start({ net, lan: async () => '192.168.1.20' })
+    const onNetDial = (seen.cable.args[4] as { onNetDial: (dial: unknown) => Promise<void> }).onNetDial
+    const asked: unknown[] = []
+    await onNetDial({ mac: ID, net: async (request: { op: string }) => { asked.push(request); return request.op === 'get' ? { ok: true, saved: true, host: '192.168.1.99', port: 18480 } : { ok: true, saved: true } } })
+    expect(asked).toEqual([{ op: 'get' }, { op: 'host', host: '192.168.1.20', port: 18480 }])
+  })
+
+  it('has no one to bring an address up to date for where the Wi-Fi link is not set up', async () => {
+    start()
+    const onNetDial = (seen.cable.args[4] as { onNetDial: (dial: unknown) => unknown }).onNetDial
+    expect(await onNetDial({ mac: ID, net: async () => { throw new Error('must not be asked') } })).toBeUndefined()
   })
 })

@@ -1270,8 +1270,9 @@ export type VoiceRouteReply = { t: 'taken' } | { t: 'sent'; agentId: string } | 
 
 /** The Devices tab (services/devices.ts): the devices on this computer, and a device's settings. Only
  *  the owner, on this computer or through the owner's own app, may manage them. `dial_debug` is the firmware's
- *  screenshot and injected touch (lib/dialDebugHttp.ts): a process on this computer only, and only with CABLE_DEBUG_API. */
-export const DEVICES_REQUESTS = ['harness_devices_list', 'harness_device_settings', 'pet_preview', 'pet_apply', 'pet_reset', 'pet_status', 'dial_debug'] as const
+ *  screenshot and injected touch (lib/dialDebugHttp.ts): a process on this computer only, and only with CABLE_DEBUG_API. `dial_net` is a dial's
+ *  Wi-Fi settings and key (lib/dialNetHttp.ts, cable/netProvision.ts): a process on this computer only, never the owner's relayed app. */
+export const DEVICES_REQUESTS = ['harness_devices_list', 'harness_device_settings', 'pet_preview', 'pet_apply', 'pet_reset', 'pet_status', 'dial_debug', 'dial_net'] as const
 
 /**
  * The core's calls into the devices: what the windows on this computer said that the dial follows, the

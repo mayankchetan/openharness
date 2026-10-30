@@ -238,6 +238,7 @@ import { createWifiLink } from './wifiLink.js'
 import { wifiDoors } from './wifiAgents.js'
 import { autonomousDeviceLocalRequest, deviceAddonRoutes, machineAddonRoutes } from '../lib/deviceManagementHttp.js'
 import { dialDebugHandler } from '../lib/dialDebugHttp.js'
+import { dialNetHandler } from '../lib/dialNetHttp.js'
 import { loadOrCreateHookCredential } from '../lib/hookAuth.js'
 import { attachLocalWsServer, LOCAL_WS_PATH, LOCAL_WS_PROTOCOL_VERSION } from '../localWsServer.js'
 import { TERMINAL_BINARY_VERSION } from '../lib/terminalBinary.js'
@@ -2162,6 +2163,10 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     onDialDebug: dialDebugHandler(env.CABLE_DEBUG_API, (payload, waitMs) => outOfProcess.has('devices')
       ? serviceLinks.call('devices', 'dial_debug', payload, waitMs)
       : new Promise((resolve) => { if (!serviceHost.route('dial_debug', payload, { local: true, owner: true }, resolve)) resolve({ error: 'SERVICE_UNAVAILABLE' }) })),
+    // A dial's Wi-Fi settings and key (lib/dialNetHttp.ts): always a route; the devices answer DISABLED where the Wi-Fi link is not set up.
+    onDialNet: dialNetHandler((payload, waitMs) => outOfProcess.has('devices')
+      ? serviceLinks.call('devices', 'dial_net', payload, waitMs)
+      : new Promise((resolve) => { if (!serviceHost.route('dial_net', payload, { local: true, owner: true }, resolve)) resolve({ error: 'SERVICE_UNAVAILABLE' }) })),
   }, { socketPath: localSocketListenPath(env.ADAPTER_DATA_DIR, env.PORT), pipeToken, allowPortFallback: true })
   // On Windows the record also names the pipe and this core's pid: both are new on each start, so clients read them here.
   try { saveDaemonPort(env.ADAPTER_DATA_DIR, env.PORT, hookPort, pipeToken && localSocket ? { pipe: localSocket.path, pid: process.pid } : undefined) } catch (error) {

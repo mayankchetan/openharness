@@ -27,6 +27,7 @@ import { cableEventFor, cableStepFor, cableQuestionCloseFor, cableQuestionFor, D
 import { CableSession } from '../cable/cableSession.js'
 import { DIAL_KEY_FILE, DialKeys } from '../cable/dialKeys.js'
 import { NetDials } from '../cable/netDials.js'
+import { NetProvisioner, lanAddress } from '../cable/netProvision.js'
 import { PetStore } from '../cable/pets/store.js'
 import { DialLog } from '../cable/dialLog.js'
 import { DialVerdicts } from '../cable/dialPortVerdicts.js'
@@ -64,6 +65,8 @@ export interface DevicesDeps {
    * keystore or opens a port.
    */
   net?: 'env' | { keysFile: string; port: number; bind: string; enabled: boolean; /** The keystore, when the caller holds it (tests); else read from `keysFile`. */ keys?: DialKeys }
+  /** This computer's LAN IPv4 on its default route, which a provisioned dial is told to connect to (cable/netProvision.ts `lanAddress`); a test names its own. */
+  lan?: () => Promise<string | null>
   /** `HARNESSD_TEST_FAULTS`: parts to fail, for the end-to-end suite. */
   faults?: ReadonlySet<string>
   log?: (line: string) => void
@@ -270,10 +273,14 @@ export function startDevices(core: CoreApi, ports: CorePorts, deps: DevicesDeps)
   if (existsSync(legacyDialLog)) {
     try { writeFileSync(legacyDialLog, `moved to ${join(deps.logsDir, 'dial-YYYYMMDD.log')}\n`) } catch { /* best effort */ }
   }
+  /** Gives a dial its Wi-Fi settings and key and keeps the keystore in step; there only where the Wi-Fi link is set up (below). */
+  let provisioner: NetProvisioner | null = null
   const cable = new CableFleet(deps.Session ?? CableSession, cableHost, deps.logsDir, DialLog, {
     serials: deps.dialSerials,
     verdicts: new DialVerdicts(join(core.dataDir, 'dial-ports.json')),
     faults: deps.faults,
+    // A dial plugged in that keeps Wi-Fi settings: its stored address of this computer is brought up to date (spec 5.5).
+    onNetDial: (dial) => provisioner?.resyncHost(dial),
     ...testDialDiscovery(deps.testDialPort),
     ...deps.cable,
   })
@@ -459,6 +466,12 @@ export function startDevices(core: CoreApi, ports: CorePorts, deps: DevicesDeps)
       onDial: (connection) => cable.adoptNet(connection),
     })
     netDials.start()
+    provisioner = new NetProvisioner({
+      net: (dial, request) => cable.net(dial, request),
+      keys, port: net.port, lan: deps.lan ?? lanAddress,
+      // Only `cable: net: ...` lines of its own: no value of a request is ever in one (netProvision.ts).
+      log: (line) => log(`[cable] ${line}`),
+    })
   }
   ;(deps.onExit ?? ((run) => { process.once('exit', run) }))(() => shutdownVoiceRouter())
 
@@ -629,9 +642,20 @@ export function startDevices(core: CoreApi, ports: CorePorts, deps: DevicesDeps)
       return refuse(`The picture could not be made into a PNG: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
+  // A dial's Wi-Fi settings and key (cable/netProvision.ts), reached through the core's /api/dial/net routes (lib/dialNetHttp.ts).
+  // The body carries the Wi-Fi password, so this answers a process on this computer only, as the owner, and never the owner's
+  // relayed app (the request is in no E2EE list). Nothing is logged here: a request is handed on as it is and the provisioner
+  // logs outcomes, never values.
+  const dialNet = async (payload: Record<string, unknown>, asker: { local?: boolean; owner: boolean }): Promise<Record<string, unknown>> => {
+    if (!provisioner) return { error: 'DISABLED' }
+    if (!asker.owner) return { error: 'OWNER_REQUIRED' }
+    if (!asker.local) return { error: 'LOCAL_ONLY' }
+    return provisioner.handle(payload)
+  }
   return {
     harness_devices_list: answer('harness_devices_list'), harness_device_settings: answer('harness_device_settings'),
     pet_preview: local('pet_preview'), pet_apply: local('pet_apply'), pet_reset: local('pet_reset'), pet_status: local('pet_status'),
     dial_debug: dialDebug,
+    dial_net: dialNet,
   }
 }

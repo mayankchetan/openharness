@@ -27,6 +27,7 @@ import { hookCredentialMatches, loadOrCreateHookCredential } from './lib/hookAut
 import { LOCAL_CREDENTIAL_REQUIRED, localCredentialMatches } from './lib/localCredential.js'
 import { routeStoreRequest, type StoreHandler } from './lib/storeProxy.js'
 import type { DialDebugReply } from './lib/dialDebugHttp.js'
+import type { DialNetReply } from './lib/dialNetHttp.js'
 import type { HookTerminalHint } from './lib/terminalTypes.js'
 import { ENGINES, type AgentEngine } from './engines/types.js'
 import { isLoopbackRequest, loopbackHosts } from './lib/loopbackRequest.js'
@@ -206,6 +207,9 @@ export interface HookServerHandlers {
   /** POST /api/dial/debug/{shot,tap,press,swipe} — the dial's screenshot and injected touch (lib/dialDebugHttp.ts). Given
    *  only with CABLE_DEBUG_API on: without it the routes are not there and answer 404 like any unknown route. */
   onDialDebug?: (op: string, body: unknown) => Promise<DialDebugReply>
+  /** POST /api/dial/net/{provision,status,forget,rotate,mode} — a dial's Wi-Fi settings and key (lib/dialNetHttp.ts). The body of
+   *  `provision` carries the Wi-Fi password: this route logs its path and nothing from the body, not even on a failure. */
+  onDialNet?: (op: string, body: unknown) => Promise<DialNetReply>
 }
 
 export { STORE_PATH_RE } from './lib/storeProxy.js'
@@ -1263,6 +1267,25 @@ export function startHookServer(
           res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': reply.png.length, 'Cache-Control': 'no-store' })
           res.end(reply.png)
         } else json(reply.status, reply.body)
+        return
+      }
+
+      // A dial's Wi-Fi settings and key (lib/dialNetHttp.ts): the same rules as the debug routes above (loopback, the local
+      // credential, the CSRF header, POST only), and a body with a password in it, so nothing of it is ever put in a log.
+      if (handlers.onDialNet && url.startsWith('/api/dial/net/')) {
+        if (req.method !== 'POST') { json(405, { error: 'METHOD_NOT_ALLOWED' }); return }
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        const raw = (await readBody(req)).trim()
+        let body: unknown
+        try { body = raw ? JSON.parse(raw) : undefined } catch { json(400, { error: 'Invalid JSON body', kind: 'bad_request' }); return }
+        let reply: DialNetReply
+        // The failure line names the route and the error's own words, never the body. The handlers below throw only strings of their own.
+        try { reply = await handlers.onDialNet(url.slice('/api/dial/net/'.length), body) }
+        catch {
+          console.error(`[hook] ${req.method} ${url} failed`)
+          json(502, { error: 'The dial Wi-Fi request failed. See the daemon\'s log.', kind: 'unavailable' }); return
+        }
+        json(reply.status, reply.body)
         return
       }
 

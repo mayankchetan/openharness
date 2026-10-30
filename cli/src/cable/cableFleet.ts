@@ -4,11 +4,12 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { resetBoard } from './boardReset.js'
 import type { DebugFailure, DebugTouch, DoneResult, ShotResult } from './dialDebug.js'
+import type { NetFailure, NetRequest, NetResult } from './dialNet.js'
 import { DialVerdicts } from './dialPortVerdicts.js'
 import { findDialPorts, portInUse, SerialLink, type DialPort } from './serial.js'
 import { isUsbConsoleUser } from './usbConsoleUser.js'
 import { NetSlot, type NetDialConnection } from './netDials.js'
-import type { CableSession, CableHost, CablePort, DialStatus, PortOpener } from './cableSession.js'
+import type { CableSession, CableHost, CablePort, DialStatus, NetDialHandle, PortOpener } from './cableSession.js'
 import type { DialLog } from './dialLog.js'
 
 type Surface = Pick<CableSession, keyof CableSession>
@@ -41,7 +42,15 @@ export interface CableFleetOptions {
   dropBackoffMs?: number
   /** Reset a board over its cable; false when it cannot be done here (boardReset.ts). */
   reset?: (path: string) => Promise<boolean>
+  /**
+   * Told, once per link, of each dial on the CABLE that greeted and keeps Wi-Fi settings (`hello.net`): the owner of the
+   * keystore brings that dial's stored daemon address up to date (netProvision.ts). Never for a dial that is on Wi-Fi.
+   */
+  onNetDial?: (dial: NetDialHandle) => void | Promise<void>
 }
+
+/** What `CableFleet.net` answers: the session's result, and the MAC of the dial it came from when there was one. */
+export type FleetNetResult = NetResult & { dial?: string }
 
 /** Faults within a minute that drop one dial; a hostile stream drops it at once. */
 const FAULTS_TO_DROP = 5
@@ -285,6 +294,8 @@ export class CableFleet {
             entry.status = { ...status, id }
             this.publish()
           }
+          // Only a USB entry has this: a dial on Wi-Fi is never asked about Wi-Fi settings (the session would refuse anyway).
+          if (key === 'onNetCapable') return (dial: NetDialHandle) => this.options.onNetDial?.(dial)
           if (key === 'log') return (line: string) => this.host.log(`${line} [usb ${id}]`)
           if (key === 'onFault') return (error: unknown, hostile?: boolean) => this.faulted(id, entry, error, hostile === true)
           const value = Reflect.get(target, key, target)
@@ -559,6 +570,35 @@ export class CableFleet {
     } catch (error) {
       this.host.log(`cable: ${entry.port.path} debug ${request.cmd}: ${String(error)}`)
       return { ok: false, kind: 'gone', message: `The dial failed: ${error instanceof Error ? error.message : String(error)}` }
+    }
+  }
+
+  /**
+   * A Wi-Fi settings request (dialNet.ts), addressed: the dial named by its serial (`id`) or its mac, otherwise the only one
+   * that is connected on the cable. Several and no name is `ambiguous`, never a guess: the Wi-Fi password of the wrong
+   * robot is worse than a question. A dial that is on Wi-Fi only is not asked: its settings change over the cable.
+   */
+  async net(dial: string | undefined, request: NetRequest): Promise<FleetNetResult> {
+    const refuse = (kind: NetFailure['kind'], message: string): NetFailure => ({ ok: false, kind, message })
+    const wanted = dial?.trim().toUpperCase()
+    let entry: Entry | undefined
+    if (wanted) {
+      entry = [...this.entries].find(([id, e]) => id.toUpperCase() === wanted || e.status.mac?.toUpperCase() === wanted)?.[1]
+      if (!entry && this.netEntries.has(wanted)) return refuse('transport', `The dial "${dial!.trim().slice(0, 64)}" is on Wi-Fi. Its Wi-Fi settings change over its USB cable.`)
+      if (!entry) return refuse('no_dial', `No dial "${dial!.trim().slice(0, 64)}" is on this computer's USB cable.`)
+      if (!entry.attached || !entry.session.isConnected) return refuse('no_dial', `The dial "${dial!.trim().slice(0, 64)}" is not connected.`)
+    } else {
+      const live = [...this.entries.values()].filter(e => e.attached && e.session.isConnected)
+      if (live.length > 1) return refuse('ambiguous', 'More than one dial is on the USB cable. Name one with --dial <MAC>.')
+      entry = live[0]
+      if (!entry) return refuse('no_dial', 'No dial is connected on the USB cable.')
+    }
+    try {
+      const result = await entry.session.net(request)
+      return entry.status.mac ? { ...result, dial: entry.status.mac } : result
+    } catch (error) {
+      this.host.log(`cable: ${entry.port.path} net.${request.op}: ${error instanceof Error ? error.message : String(error)}`)
+      return refuse('gone', `The dial failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
