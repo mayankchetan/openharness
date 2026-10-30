@@ -13,10 +13,12 @@
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 
-static const char *TAG = "wifi";
+// Not "wifi": that is the tag of the closed Wi-Fi driver, whose level nwifi_start() lowers (see LOG LEVELS in wifi_sta.h).
+static const char *TAG = "nwifi";
 
 static EventGroupHandle_t s_bits;
 static nwifi_event_cb s_cb;
+static esp_netif_t *s_netif;
 static int64_t s_connect_us;   // when the last nwifi_connect() ran, for ms_to_ip
 
 // Runs on the system event task (internal stack, 2,304 B): bits, one log line, one callback. Never the SSID, the password or the AP's address.
@@ -56,42 +58,64 @@ static void zero(void *p, size_t n)
     while (n--) *v++ = 0;
 }
 
+// Undo what nwifi_start() did, as far as it got: stop and deinit the driver (when it was initialised), take the handlers off the event loop, free
+// the netif. The default event loop and esp_netif_init() stay (neither has a matching undo that is safe to call), as does the event group.
+static void teardown(bool driver_inited)
+{
+    if (driver_inited) {
+        esp_wifi_stop();     // fine whether or not esp_wifi_start() was reached
+        esp_wifi_deinit();
+    }
+    esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event);
+    esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event);
+    esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_LOST_IP, on_event);
+    if (s_netif) {
+        esp_netif_destroy_default_wifi(s_netif);
+        s_netif = NULL;
+    }
+    s_cb = NULL;
+    if (s_bits) xEventGroupClearBits(s_bits, NWIFI_ASSOCIATED | NWIFI_GOT_IP | NWIFI_DISCONNECTED);
+}
+
+void nwifi_stop(void) { teardown(true); }
+
+static bool fail(const char *what, esp_err_t e, bool driver_inited)
+{
+    ESP_LOGE(TAG, "%s failed: %s", what, esp_err_to_name(e));
+    teardown(driver_inited);
+    return false;
+}
+
 bool nwifi_start(const char *ssid, const char *pass, nwifi_event_cb on_event_cb)
 {
     if (!ssid || !*ssid || !pass) return false;
-    s_cb = on_event_cb;
-    s_bits = xEventGroupCreate();
+    if (!s_bits) s_bits = xEventGroupCreate();
     if (!s_bits) return false;
+    s_cb = on_event_cb;
 
     esp_err_t e = esp_netif_init();
     if (e == ESP_OK) e = esp_event_loop_create_default();
-    if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {   // INVALID_STATE: the loop already exists
-        ESP_LOGE(TAG, "netif/event loop init failed: %s", esp_err_to_name(e));
-        return false;
-    }
-    esp_netif_t *netif = esp_netif_create_default_wifi_sta();
-    if (!netif) {
-        ESP_LOGE(TAG, "no netif");
-        return false;
-    }
+    if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) return fail("netif/event loop init", e, false);   // INVALID_STATE: the loop already exists
+    s_netif = esp_netif_create_default_wifi_sta();
+    if (!s_netif) return fail("netif create", ESP_ERR_NO_MEM, false);
     uint8_t mac[6] = {0};
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     char hostname[16];
     snprintf(hostname, sizeof hostname, "dial-%02x", mac[5]);
-    esp_netif_set_hostname(netif, hostname);
-    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event, NULL);
-    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event, NULL);
-    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_LOST_IP, on_event, NULL);
+    esp_netif_set_hostname(s_netif, hostname);
+    e = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event, NULL);
+    if (e == ESP_OK) e = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event, NULL);
+    if (e == ESP_OK) e = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_LOST_IP, on_event, NULL);
+    if (e != ESP_OK) return fail("event handlers", e, false);
 
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
-    init.nvs_enable = 0;   // the driver neither reads nor writes NVS (FLASH SAFETY in wifi_sta.h)
+    init.nvs_enable = 0;   // the driver neither reads nor writes NVS (FLASH SAFETY in wifi_sta.h); CONFIG_ESP_WIFI_NVS_ENABLED=n says the same at build time
     e = esp_wifi_init(&init);
-    if (e != ESP_OK) {
-        ESP_LOGE(TAG, "esp_wifi_init failed: %s", esp_err_to_name(e));
-        return false;
-    }
-    esp_wifi_set_storage(WIFI_STORAGE_RAM);   // credentials stay out of NVS (bench6 did the same)
-    esp_wifi_set_mode(WIFI_MODE_STA);
+    if (e != ESP_OK) return fail("esp_wifi_init", e, false);
+    e = esp_wifi_set_storage(WIFI_STORAGE_RAM);   // credentials stay out of NVS (bench6 did the same)
+    if (e != ESP_OK) return fail("esp_wifi_set_storage", e, true);
+    e = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (e != ESP_OK) return fail("esp_wifi_set_mode", e, true);
 
     wifi_config_t wc;
     memset(&wc, 0, sizeof wc);
@@ -105,18 +129,17 @@ bool nwifi_start(const char *ssid, const char *pass, nwifi_event_cb on_event_cb)
     wc.sta.listen_interval = 3;
     e = esp_wifi_set_config(WIFI_IF_STA, &wc);
     zero(&wc, sizeof wc);
-    if (e != ESP_OK) {
-        ESP_LOGE(TAG, "esp_wifi_set_config failed: %s", esp_err_to_name(e));
-        return false;
-    }
+    if (e != ESP_OK) return fail("esp_wifi_set_config", e, true);
     ESP_LOGI(TAG, "config ssid_len=%u pass_len=%u authmode_min=%s storage=ram hostname=%s", (unsigned)ssid_len, (unsigned)pass_len,
              pass_len ? "wpa2_psk" : "open", hostname);
 
+    // LOG LEVELS (wifi_sta.h): before the driver starts, so its first lines are already filtered.
+    esp_log_level_set("wifi", ESP_LOG_WARN);
+    esp_log_level_set("net80211", ESP_LOG_WARN);
+    esp_log_level_set("pp", ESP_LOG_WARN);
+
     e = esp_wifi_start();   // first esp_phy_enable of the boot: may read and write the "phy" namespace, hence the internal-stack rule
-    if (e != ESP_OK) {
-        ESP_LOGE(TAG, "esp_wifi_start failed: %s", esp_err_to_name(e));
-        return false;
-    }
+    if (e != ESP_OK) return fail("esp_wifi_start", e, true);
     e = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);   // every number in the spec was measured with this
     ESP_LOGI(TAG, "started ps=min_modem listen_interval=3 (%s)", e == ESP_OK ? "ps set" : esp_err_to_name(e));
     return true;

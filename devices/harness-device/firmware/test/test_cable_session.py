@@ -35,6 +35,7 @@ code = r'''
 #define FRAME_IDLE_US INT64_C(15000000)
 #define SILENCE_MS 15000
 #define READER_STACK 6144
+#define READER_STACK_RADIO 8192
 #define CABLE_HEADER_BYTES 6
 #define CABLE_CRC_BYTES 2
 #define CABLE_FRAME_VERSION 1
@@ -143,6 +144,7 @@ static int xTaskCreate(void (*task)(void *),const char *name,int stack,void *arg
         hello_handle=(void *)2;*(TaskHandle_t *)handle=hello_handle;hellos++;return pdPASS;
     }
     if (fail_reader) return 0;
+    assert(stack == READER_STACK); /* the USB transport keeps the 6,144 B reader; a radio transport gets READER_STACK_RADIO (test_net_link_source.py) */
     assert(driver && s_running && s_tick && !connected && s_last_rx_us == now);
     // A welcome can arrive on the new reader before xTaskCreate returns.
     owner = 1; s_cb(1,1,NULL,0,s_ctx); owner = 0; new_task_ready = true;

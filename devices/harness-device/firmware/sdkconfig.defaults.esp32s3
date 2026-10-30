@@ -43,6 +43,9 @@ CONFIG_ESP_WIFI_RX_IRAM_OPT=n
 # one. That is why the Wi-Fi bring-up runs on an internal-stack task (net_link.c, wifi_sta.h) and the PSRAM-stack net_link task never does. This is the
 # IDF default, written down because the stack rule depends on it.
 CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE=y
+# The Wi-Fi driver keeps nothing in NVS: no stored station config, no read at esp_wifi_init (the dial gets its network from net.set, over the cable,
+# into its own "pair" namespace). Off here at build time; wifi_sta.c also sets nvs_enable = 0 and WIFI_STORAGE_RAM at run time. Flash code only.
+CONFIG_ESP_WIFI_NVS_ENABLED=n
 
 # --- HTTP server (captive portal) ---
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024

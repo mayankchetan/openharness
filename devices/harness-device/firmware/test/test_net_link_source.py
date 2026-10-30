@@ -107,7 +107,7 @@ net = code('net_link.c')
 start_fn = body(net, 'net_link_start')
 guard = start_fn.index('return false')
 assert re.search(r'if \(!config_net_load\(&cfg\) \|\| cfg\.mode != 1\)', start_fn[:guard + 20]), 'the first thing net_link_start does is the mode check'
-for first_use in ('heap_caps_calloc', 'xTaskCreate', 'ulTaskNotifyTake'):
+for first_use in ('heap_caps_calloc', 'xTaskCreate', 'xSemaphoreTake'):
     assert start_fn.find(first_use) > guard, f'{first_use} is missing or comes before the USB-mode return'
 for never in ('nwifi_', 'esp_wifi_', 'cable_xport_tcp', 'cable_xport_tls', 'ui_'):
     assert never not in start_fn, f'net_link_start itself must not touch {never}: that is net_init_task'
@@ -117,7 +117,7 @@ assert 'xTaskCreate(net_init_task, "net_init", NET_INIT_STACK' in text('net_link
 assert 'task_create_psram(net_init_task' not in net
 
 # ── 3. what the PSRAM-stack task can reach ──────────────────────────────────────────────────────────
-FLASH = re.compile(r'\b(nvs_\w+|config_\w+|esp_ota_\w+|esp_partition_\w+|esp_flash_\w+|spi_flash_\w+|esp_phy_\w+|fw_update_\w+|esp_wifi_init|esp_wifi_start|nwifi_start|'
+FLASH = re.compile(r'\b(nvs_\w+|config_\w+|esp_ota_\w+|esp_partition_\w+|esp_flash_\w+|spi_flash_\w+|esp_phy_\w+|fw_update_\w+|esp_wifi_init|esp_wifi_start|esp_wifi_stop|esp_wifi_deinit|nwifi_start|nwifi_stop|'
                    r'esp_mmap\w*|esp_vfs_\w+|fopen|fwrite|remove|rename|last_words_\w+)\b')
 reachable = ['net_link_task', 'join_wifi', 'note_open_failure', 'log_stacks', 'serve', 'backoff', 'sleep_ms', 'ui_flush', 'post']
 for name in reachable:
@@ -138,10 +138,26 @@ assert 'vTaskDelete' not in task and 'vTaskDelete(NULL)' in body(net, 'net_init_
 # ── 4. the radio configuration ──────────────────────────────────────────────────────────────────────
 start_sta = body(sta, 'nwifi_start')
 assert 'init.nvs_enable = 0;' in start_sta and 'esp_wifi_set_storage(WIFI_STORAGE_RAM)' in start_sta
+# every step of the bring-up is checked, and a failure takes down what was made (driver inited or not)
+for call, inited in (('esp_wifi_init(&init)', 'false'), ('esp_wifi_set_storage(WIFI_STORAGE_RAM)', 'true'), ('esp_wifi_set_mode(WIFI_MODE_STA)', 'true'),
+                     ('esp_wifi_set_config(WIFI_IF_STA, &wc)', 'true'), ('esp_wifi_start()', 'true')):
+    assert re.search(r'e = ' + re.escape(call) + r';[^\n]*\n(?:[^\n]*\n)??\s*if \(e != ESP_OK\) return fail\(""' + r', e, ' + inited + r'\);', start_sta), call
+fail_fn = body(sta, 'fail')
+assert 'teardown(driver_inited)' in fail_fn and 'return false' in fail_fn
+td = body(sta, 'teardown')
+assert td.index('esp_wifi_stop()') < td.index('esp_wifi_deinit()') < td.index('esp_event_handler_unregister(WIFI_EVENT') < td.index('esp_netif_destroy_default_wifi(s_netif)')
+assert body(sta, 'nwifi_stop').strip() == '{ teardown(true); }'
+# log levels: the closed driver's tags are lowered to WARN before it starts, and this module's own tag is a different one
+for tag in ('wifi', 'net80211', 'pp'):
+    assert f'esp_log_level_set("{tag}", ESP_LOG_WARN)' in text('wifi_sta.c'), tag
+assert text('wifi_sta.c').index('esp_log_level_set("wifi", ESP_LOG_WARN)') < text('wifi_sta.c').index('esp_wifi_start();')
+assert 'static const char *TAG = "nwifi";' in text('wifi_sta.c'), 'our own lines must not share the driver tag that is lowered'
+for phrase in ('LOG LEVELS', 'WARN and ERROR lines still pass', 'Invalid AP(<bssid>) SSID=<name>', 'PWD:%s'):
+    assert phrase in text('wifi_sta.h'), phrase
 assert 'esp_wifi_set_ps(WIFI_PS_MIN_MODEM)' in start_sta
 assert 'WIFI_PS_NONE' not in sta and 'WIFI_PS_MAX_MODEM' not in sta, 'min-modem always for now'
 assert re.search(r'snprintf\(hostname, sizeof hostname, "dial-%02x", mac\[5\]\)', text('wifi_sta.c')), 'hostname dial-<last MAC byte, hex>'
-assert 'esp_netif_set_hostname(netif, hostname)' in start_sta
+assert 'esp_netif_set_hostname(s_netif, hostname)' in start_sta
 assert len(re.findall(r'listen_interval\s*=', sta)) == 1 and 'wc.sta.listen_interval = 3;' in start_sta, 'listen interval set once, in the association config'
 assert 'zero(&wc, sizeof wc)' in start_sta, 'the driver config copy of the password is scrubbed'
 assert 'wc.sta.pmf_cfg.capable = true' in start_sta
@@ -181,13 +197,74 @@ assert re.search(r'cable_link_transport\(\) != CABLE_XPORT_USB && !cable_link_ho
 # net.* is USB only (also pinned in test_cable_net_set.py)
 assert 'cable_link_transport() != CABLE_XPORT_USB) { net_reply(id, false, "transport", false); goto done; }' in client
 
+# ── 5b. start-up hand-off: ownership of the boot block, no notification of a task that may be gone ──────────────────
+raw_net = text('net_link.c')
+assert 'xTaskNotifyGive' not in raw_net and 'ulTaskNotifyTake' not in raw_net and 'TaskHandle_t waiter' not in raw_net, 'no task notification in the hand-off'
+boot_struct = re.search(r'typedef struct \{\s*config_net_t cfg;(.*?)\} boot_t;', net, re.S).group(1)
+assert 'SemaphoreHandle_t done' in boot_struct and 'atomic_int phase' in boot_struct and 'atomic_int refs' in boot_struct
+rel = body(net, 'boot_release')
+assert 'atomic_fetch_sub(&b->refs, 1) != 1) return' in rel and 'vSemaphoreDelete(b->done)' in rel and 'free(b)' in rel
+assert len(re.findall(r'\bfree\(b\)', net)) == 1, 'b is freed in one place: boot_release, by whoever touches it last'
+init_fn = body(net, 'net_init_task')
+assert 'atomic_compare_exchange_strong(&b->phase, &expected, PHASE_COMMITTED)' in init_fn, 'net_init commits before it starts net_link'
+assert init_fn.index('PHASE_COMMITTED') < init_fn.index('atomic_store(&s_tls, tls)') < init_fn.index('task_create_psram(net_link_task') , 'the point of no return comes first'
+assert init_fn.index('xSemaphoreGive(b->done)') < init_fn.index('boot_release(b)') < init_fn.index('vTaskDelete(NULL)')
+assert init_fn.count('boot_release(b)') == 1 and 'b->' not in init_fn[init_fn.index('boot_release(b)'):], 'net_init does not touch b after releasing it'
+start_fn2 = body(net, 'net_link_start')
+assert 'atomic_compare_exchange_strong(&b->phase, &expected, PHASE_ABANDONED)' in start_fn2
+abandon = start_fn2[start_fn2.index('PHASE_ABANDONED'):]
+assert abandon.index('boot_release(b)') < abandon.index('return false'), 'on timeout the caller lets go of b and returns'
+assert 'b->' not in abandon[abandon.index('boot_release(b)'):abandon.index('return false')], 'and does not touch b after that'
+assert 'xSemaphoreTake(b->done, portMAX_DELAY)' in start_fn2, 'a committed start-up is waited for to the end (a task create away)'
+assert start_fn2.count('atomic_store(&b->refs, 1)') == 2, 'with no net_init task there is one holder'
+
+# ── 5c. failure fallbacks: whatever net_init made is taken down, and the caller falls back to USB ───────────────────
+undo_fn = body(net, 'undo')
+assert undo_fn.index('post(NET_EV_STOP)') < undo_fn.index('atomic_store(&s_tls, NULL)') < undo_fn.index('nwifi_stop()') < undo_fn.index('cable_xport_tls_free(tls)')
+assert 'if (radio) nwifi_stop()' in undo_fn and 'if (tls) cable_xport_tls_free(tls)' in undo_fn
+assert re.search(r'if \(!b->ok\) undo\(tls, radio\);', init_fn), 'every failed path of net_init ends in undo()'
+assert init_fn.index('if (!b->ok) undo(') > init_fn.index('} while (0);')
+# the failure points all break out of the do-while; none returns early past undo()
+do_block = init_fn[init_fn.index('do {'):init_fn.index('} while (0);')]
+assert 'return' not in do_block and do_block.count('break;') >= 6, 'no early return inside the start-up block'
+# a failed net_link task create is one of them
+assert re.search(r'if \(task_ok != pdPASS\) \{[^}]*break;', do_block)
+# a failed nwifi_start leaves nothing running (it takes its own pieces down) and the TLS wrapper is freed by undo()
+assert re.search(r'if \(!nwifi_start\(b->cfg\.ssid, b->cfg\.pass, post\)\) break;', do_block)
+assert 'radio = true;' in do_block and do_block.index('nwifi_start') < do_block.index('radio = true;')
+# the caller of a failed start-up gets false and app_main runs USB mode (test above: wifi_mode ? net_link_xport() : cable_xport_usb())
+assert 'return ok;' in start_fn2 and 'const bool ok = finished && b->ok;' in start_fn2
+
+# ── 5d. refusals: only an alert counts, and three in a row ───────────────────────────────────────────────────
+hs = re.sub(r'//[^\n]*', '', text('net_hs_class.h'))
+assert re.search(r'return mbedtls_error == MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE;', hs) and hs.count('MBEDTLS_ERR_') == 1, 'one code: the alert'
+note = body(net, 'note_open_failure')
+assert 'net_handshake_event(&s_refusals, alert)' in note and 'post(ev)' in note and 'post(NET_EV_TLS_REFUSED)' not in note
+assert 'net_refusal_reset(&s_refusals)' in note, 'a TCP failure breaks the run'
+assert 'net_refusal_reset(&s_refusals);\n        post(NET_EV_LINK_UP)' in net.replace('\r', ''), 'a link up clears the count'
+st = code('net_state.c')
+assert 'NET_REFUSALS_TO_AUTH_FAILED' in code('net_state.h') and re.search(r'#define NET_REFUSALS_TO_AUTH_FAILED 3\b', code('net_state.h'))
+assert 'Key refused: reset dial' in text('net_state.c') and 'W14' in text('net_state.c'), 'caption names the way out and the comment says USB recovery returns with W14'
+
+# ── 5e. reader stack and ring lock discipline ─────────────────────────────────────────────────────────────
+link_raw = text('cable_link.c')
+assert re.search(r'#define READER_STACK 6144\b', link_raw) and re.search(r'#define READER_STACK_RADIO 8192\b', link_raw)
+assert re.search(r'#if TASK_STACK_PSRAM_READER\s+const uint32_t reader_stack = xport->kind == CABLE_XPORT_USB \? READER_STACK : READER_STACK_RADIO;', link_raw)
+assert 'task_create_psram(reader_task, "cable_link", reader_stack' in link_raw, 'the larger stack only exists where the stack is in PSRAM'
+ring_src = code('log_ring.c')
+for locked in re.findall(r'RING_LOCK\(\);(.*?)RING_UNLOCK\(\);', ring_src, re.S):
+    assert not re.search(r'\b(memcpy|memmove|memset|put|get)\s*\(', locked), 'a copy of a line happens inside the ring lock: ' + locked[:80]
+assert ring_src.count('RING_LOCK();') == ring_src.count('RING_UNLOCK();') >= 5
+assert "log_ring_write(r, &slot, line);\n    log_ring_commit(r, &slot);" in ring_src.replace('\r', ''), 'push is reserve, copy outside the lock, commit'
+
 # ── 6. the lines the bench reads ────────────────────────────────────────────────────────────────────
 raw = text('net_link.c') + text('wifi_sta.c') + text('cable_xport_tcp.c')
 for line in ('USB mode (', 'Wi-Fi mode (wl_mode = 1)', 'state %s -> %s', 'retry in %u ms (attempt %u, %s, state %s)', 'link up #%u handshake_ms=%d boot_ms=%d',
              'link down after %u ms (%s)', 'stacks %s: net_link free_min=%u B cable_link free_min=%d B', 'net_init done ok=%d stack free_min=%u B',
              'ram_telemetry_checkpoint("net_link_up")', 'ram_telemetry_checkpoint("wifi_started")', 'got ip " IPSTR " ms_to_ip=%d', 'disconnected reason=%d',
              'associated channel=%u authmode=%d', 'ap rssi=%d channel=%u', 'config ssid_len=%u pass_len=%u authmode_min=%s storage=ram hostname=%s',
-             'handshake refused by the daemon (mbedTLS -0x%04X)', 'daemon unreachable (errno %d)', 'connected in %d ms'):
+             'handshake answered with an alert (mbedTLS -0x%04X), %u in a row', 'handshake failed without an alert (mbedTLS -0x%04X)',
+             'daemon unreachable (errno %d)', 'connected in %d ms'):
     assert line in raw, line
 
 # ── 7. built into the image ─────────────────────────────────────────────────────────────────────────

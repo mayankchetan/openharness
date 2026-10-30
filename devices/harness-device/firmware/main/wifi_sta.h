@@ -7,10 +7,21 @@
 //     (inside esp_wifi_start) reads the stored data and, when it is missing or stale, runs a full calibration and WRITES it back
 //     (esp_phy_load_cal_and_init: esp_phy_load_cal_data_from_nvs / esp_phy_store_cal_data_to_nvs). Later enables of the same boot do not.
 //     That first enable happens inside nwifi_start(), which net_link.c runs on the short-lived internal-stack `net_init` task.
-//   * The Wi-Fi driver's own settings store. Off: wifi_init_config_t.nvs_enable = 0 and esp_wifi_set_storage(WIFI_STORAGE_RAM), so it neither
-//     reads nor writes NVS and keeps the credentials only in RAM.
+//   * The Wi-Fi driver's own settings store. Off twice: CONFIG_ESP_WIFI_NVS_ENABLED=n (so wifi_init_config_t.nvs_enable is 0 by default) and
+//     nvs_enable = 0 plus esp_wifi_set_storage(WIFI_STORAGE_RAM) in code, so it neither reads nor writes NVS and keeps the credentials in RAM only.
 // After nwifi_start() returns, everything left (connect, disconnect, the event bits) is flash-free and may be called from the PSRAM-stack
 // `net_link` task.
+//
+// LOG LEVELS. The closed Wi-Fi libraries (libnet80211.a, libpp.a) write through esp_log under their own tags, and those lines reach the cable_link
+// log hook and so the daemon's dial log. A scan of the strings in libnet80211.a (IDF 5.5.6, esp32s3) finds format strings that carry the network name,
+// the access point's MAC address (BSSID) or, in one debug dump in ieee80211_ioctl.o, the password: "connected with %s, aid = %d, channel %d, %s,
+// bssid = ..." (wl_cnx.o), "scan specific ssid=%s", "ssid=%s, channel=%d ...", "history=%d, ssid=%s", "bssid=...", "add bssid ... to blacklist",
+// "Invalid AP(<bssid>) SSID=%s: ...", "[idx:%d]SSID:[%d]%s, PWD:%s". The level of each line is not recorded in the string, and the tag is set by the
+// closed code (the console shows these as "wifi:" lines). So nwifi_start() sets "wifi", and defensively "net80211" and "pp", to WARN before the
+// driver starts. What that does and does not promise: INFO and DEBUG lines of those tags are gone (that holds "connected with <name>... bssid",
+// the scan lines and, if it is logged below WARN, the password dump). WARN and ERROR lines still pass, and the "Invalid AP(<bssid>) SSID=<name>"
+// family, which the driver prints for an access point with a broken security configuration, may carry the name and the BSSID. This module's own
+// lines use the tag "nwifi" and carry lengths, channels, reasons and the dial's own IP address, never the name, the password or the BSSID.
 #pragma once
 
 #include <stdbool.h>
@@ -28,9 +39,15 @@
 typedef void (*nwifi_event_cb)(net_event_t event);
 
 // Bring the station up: netif, event loop, hostname dial-<last MAC byte>, driver (6 static RX, 6 TX buffers by sdkconfig), RAM storage,
-// WPA2-or-better threshold (open when `pass` is empty), listen interval 3, WIFI_PS_MIN_MODEM, esp_wifi_start(). Does not connect.
-// The password is copied into the driver's config and the local copy is zeroed. INTERNAL-STACK TASK ONLY (see FLASH SAFETY above).
+// WPA2-or-better threshold (open when `pass` is empty), listen interval 3, log levels (above), WIFI_PS_MIN_MODEM, esp_wifi_start(). Does not connect.
+// The password is copied into the driver's config and the local copy is zeroed. Every step is checked; on a failure whatever was made is taken
+// down again (driver stopped and deinitialised where it exists, handlers removed, netif freed) and the result is false. INTERNAL-STACK TASK ONLY
+// (see FLASH SAFETY above).
 bool nwifi_start(const char *ssid, const char *pass, nwifi_event_cb on_event);
+
+// Take the station down after a successful nwifi_start(): esp_wifi_stop, esp_wifi_deinit, handlers off the event loop, netif freed. For the
+// fallback to USB mode when Wi-Fi mode cannot go on. Internal-stack task only, and only when no other task is using the radio.
+void nwifi_stop(void);
 
 // Start joining (esp_wifi_connect). Clears NWIFI_DISCONNECTED first. Safe to repeat while a join is under way.
 void nwifi_connect(void);

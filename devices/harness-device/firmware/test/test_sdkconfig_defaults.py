@@ -86,7 +86,8 @@ assert defaults.get('CONFIG_MBEDTLS_SSL_PROTO_TLS1_3', 'n') == 'n', 'TLS 1.3 sta
 assert 'CONFIG_ESP_TLS_PSK_VERIFICATION' not in defaults, 'the esp-tls PSK switch would select RSA-PSK; the wrapper does not use esp-tls'
 
 assert 'CONFIG_MBEDTLS_DYNAMIC_BUFFER' not in defaults or defaults['CONFIG_MBEDTLS_DYNAMIC_BUFFER'] == 'n', 'the measured TLS numbers are for static record buffers'
-assert 'CONFIG_ESP_WIFI_NVS_ENABLED' not in defaults, 'the driver keeps its NVS option as measured; wifi_sta.c switches it off at run time (nvs_enable = 0, WIFI_STORAGE_RAM)'
+# The driver stores nothing in NVS: off at build time (and wifi_sta.c sets nvs_enable = 0 and WIFI_STORAGE_RAM at run time, which the source test pins).
+assert defaults.get('CONFIG_ESP_WIFI_NVS_ENABLED') == 'n', 'CONFIG_ESP_WIFI_NVS_ENABLED=n'
 # Wi-Fi mode never turns the radio on in USB mode: the radio code is linked in, but its only entry is net_link_start() (test_net_link_source.py).
 
 # The wifi_init.c compile-time checks (esp_wifi/src/wifi_init.c:51-57): the BA window may not exceed the

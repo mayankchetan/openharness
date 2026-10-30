@@ -60,6 +60,11 @@ static const char *TAG = "cable";
 // the reader must stay internal, because esp_ota_begin asserts on a PSRAM stack.
 #define READER_STACK 6144
 
+// Wi-Fi mode (a non-USB transport): the same task also runs ssl_read, whose record decryption and CBC/HMAC code sits under the frame callback on this
+// stack, and the callback chain is unchanged. 8,192 B, only when the stack is in PSRAM (TASK_STACK_PSRAM_READER, the NO_OTA product build), where it
+// costs no internal RAM. USB mode keeps 6,144 B. net_link.c logs this task's high-water mark at every link up and down.
+#define READER_STACK_RADIO 8192
+
 // One log line's worth of formatted text. Anything longer is truncated rather than split: a log line is
 // diagnostic, and half of one that arrives is worth more than a mechanism that could deadlock producing
 // the other half.
@@ -250,7 +255,8 @@ bool cable_link_start_with(const cable_xport_t *xport, cable_frame_cb cb, cable_
     // installed driver/send path visible before that callback can run.
     s_running = true;
 #if TASK_STACK_PSRAM_READER
-    const BaseType_t reader_ok = task_create_psram(reader_task, "cable_link", READER_STACK, NULL, 5, NULL, tskNO_AFFINITY);
+    const uint32_t reader_stack = xport->kind == CABLE_XPORT_USB ? READER_STACK : READER_STACK_RADIO;
+    const BaseType_t reader_ok = task_create_psram(reader_task, "cable_link", reader_stack, NULL, 5, NULL, tskNO_AFFINITY);
 #else
     const BaseType_t reader_ok = xTaskCreate(reader_task, "cable_link", READER_STACK, NULL, 5, NULL);
 #endif

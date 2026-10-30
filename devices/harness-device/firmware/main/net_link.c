@@ -15,6 +15,7 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "net_hs_class.h"
 #include "net_state.h"
@@ -39,6 +40,7 @@ static atomic_int s_state = NET_OFF;       // net_state_t; changed only through 
 static atomic_bool s_ui_dirty;
 static _Atomic(const cable_xport_t *) s_tls;
 static unsigned s_links;                   // links established since boot (net_link task only)
+static net_refusal_t s_refusals;           // handshakes in a row that the daemon answered with an alert (net_link task only)
 
 // The only writer of s_state. Safe from the event task and from net_link: a compare-and-swap loop over the pure table.
 static void post(net_event_t event)
@@ -158,17 +160,21 @@ static void note_open_failure(const cable_xport_t *tls)
     if (!(nwifi_bits() & NWIFI_GOT_IP)) return;   // the access point went away under us; its own events say so
     if (!cable_xport_tcp_connected_once()) {
         ESP_LOGW(TAG, "daemon unreachable (errno %d)", cable_xport_tcp_last_errno());
+        net_refusal_reset(&s_refusals);
         post(NET_EV_TCP_FAIL);
         return;
     }
+    // Only a TLS alert from the daemon is a refusal (net_hs_class.h), and AUTH_FAILED needs three in a row: a reset, an EOF, a close_notify or a
+    // timeout is an ordinary failed handshake on the 1..60 s ladder.
     const int err = cable_xport_tls_last_error(tls);
-    if (net_hs_refused(err)) {
-        ESP_LOGW(TAG, "handshake refused by the daemon (mbedTLS -0x%04X)", (unsigned)-err);
-        post(NET_EV_TLS_REFUSED);
+    const bool alert = net_hs_refused(err);
+    const net_event_t ev = net_handshake_event(&s_refusals, alert);
+    if (alert) {
+        ESP_LOGW(TAG, "handshake answered with an alert (mbedTLS -0x%04X), %u in a row", (unsigned)-err, (unsigned)s_refusals.refusals);
     } else {
-        ESP_LOGW(TAG, "handshake failed (mbedTLS -0x%04X)", (unsigned)-err);
-        post(NET_EV_TLS_FAIL);
+        ESP_LOGW(TAG, "handshake failed without an alert (mbedTLS -0x%04X)", (unsigned)-err);
     }
+    post(ev);
 }
 
 static void log_stacks(const char *when)
@@ -218,6 +224,7 @@ static void net_link_task(void *arg)
             backoff(&ladder, "daemon");
             continue;
         }
+        net_refusal_reset(&s_refusals);
         post(NET_EV_LINK_UP);
         s_links++;
         ESP_LOGI(TAG, "link up #%u handshake_ms=%d boot_ms=%d", s_links, (int)((esp_timer_get_time() - t0_us) / 1000),
@@ -244,16 +251,46 @@ static void zero(void *p, size_t n)
     while (n--) *v++ = 0;
 }
 
+// Hand-off between net_link_start() (the caller, app_main) and net_init_task. Two parties touch `b`, so it carries a count: each calls
+// boot_release() when it is done with `b`, and the one that brings the count to zero frees it. Nobody frees `b` otherwise, nobody notifies a task
+// handle (the caller may be gone), and the caller waits on a semaphore that lives in `b` itself.
+//
+//   phase  WAITING    the caller is waiting for net_init
+//          COMMITTED  net_init passed its point of no return (the caller can no longer give up, and net_init will start net_link)
+//          ABANDONED  the caller timed out first; net_init finds this at the same point and undoes everything it made
 typedef struct {
     config_net_t cfg;
-    TaskHandle_t waiter;
+    SemaphoreHandle_t done;     // given once by net_init when it has set `ok`
+    atomic_int phase;
+    atomic_int refs;
     bool ok;
 } boot_t;
+enum { PHASE_WAITING = 0, PHASE_COMMITTED = 1, PHASE_ABANDONED = 2 };
+
+static void boot_release(boot_t *b)
+{
+    if (atomic_fetch_sub(&b->refs, 1) != 1) return;   // the other party still holds it
+    zero(&b->cfg, sizeof b->cfg);
+    if (b->done) vSemaphoreDelete(b->done);
+    free(b);
+}
+
+// Take down whatever net_init made, in the order it made it: the link state, the transport the reader would use, the radio, the TLS wrapper.
+// Only valid while no net_link task exists and cable_link has not been given the transport.
+static void undo(const cable_xport_t *tls, bool radio)
+{
+    post(NET_EV_STOP);
+    atomic_store(&s_tls, NULL);
+    if (radio) nwifi_stop();
+    if (tls) cable_xport_tls_free(tls);
+}
 
 // The internal-stack half of start-up (see net_link.h). Ends by deleting itself.
 static void net_init_task(void *arg)
 {
     boot_t *b = arg;
+    const cable_xport_t *tls = NULL;
+    bool radio = false;
     b->ok = false;
     do {
         if (!cable_xport_tcp_set_peer(b->cfg.host, b->cfg.port)) {
@@ -265,17 +302,20 @@ static void net_init_task(void *arg)
             ESP_LOGE(TAG, "no MAC for the TLS identity");
             break;
         }
-        const cable_xport_t *tls = cable_xport_tls_wrap(cable_xport_tcp(), identity, b->cfg.key, CFG_NET_KEY_LEN);   // copies the key
+        tls = cable_xport_tls_wrap(cable_xport_tcp(), identity, b->cfg.key, CFG_NET_KEY_LEN);   // copies the key
+        zero(b->cfg.key, sizeof b->cfg.key);
         if (!tls) {
             ESP_LOGE(TAG, "no memory for the TLS wrapper");
             break;
         }
-        zero(b->cfg.key, sizeof b->cfg.key);
-        if (!nwifi_start(b->cfg.ssid, b->cfg.pass, post)) {   // copies the password into the driver and scrubs its own copy
-            cable_xport_tls_free(tls);
+        if (!nwifi_start(b->cfg.ssid, b->cfg.pass, post)) break;   // copies the password into the driver, and takes the radio down again on failure
+        radio = true;
+        zero(b->cfg.pass, sizeof b->cfg.pass);
+        int expected = PHASE_WAITING;
+        if (!atomic_compare_exchange_strong(&b->phase, &expected, PHASE_COMMITTED)) {
+            ESP_LOGW(TAG, "start-up was given up on while the radio came up: stopping it");   // the caller is gone and is in USB mode
             break;
         }
-        zero(b->cfg.pass, sizeof b->cfg.pass);
         atomic_store(&s_tls, tls);
         post(NET_EV_START);
         ram_telemetry_checkpoint("wifi_started");
@@ -286,16 +326,16 @@ static void net_init_task(void *arg)
         const BaseType_t task_ok = xTaskCreate(net_link_task, "net_link", NET_LINK_STACK, NULL, 4, NULL);
 #endif
         if (task_ok != pdPASS) {
-            ESP_LOGE(TAG, "net_link task create failed");
-            post(NET_EV_STOP);   // the radio stays up with nobody driving it; the caller falls back to USB, and the next boot starts clean
+            ESP_LOGE(TAG, "net_link task create failed: taking the radio down, USB mode");
             break;
         }
         b->ok = true;
     } while (0);
+    if (!b->ok) undo(tls, radio);   // the caller (or nobody, if it gave up) falls back to USB mode; nothing of Wi-Fi mode is left running
     zero(&b->cfg, sizeof b->cfg);
     ESP_LOGI(TAG, "net_init done ok=%d stack free_min=%u B", (int)b->ok, (unsigned)uxTaskGetStackHighWaterMark(NULL));
-    TaskHandle_t waiter = b->waiter;
-    xTaskNotifyGive(waiter);   // b stays valid until the waiter has read b->ok
+    xSemaphoreGive(b->done);   // the caller may be gone; `done` lives in `b`, which this task still holds
+    boot_release(b);
     vTaskDelete(NULL);
 }
 
@@ -315,18 +355,38 @@ bool net_link_start(void)
     }
     b->cfg = cfg;
     zero(&cfg, sizeof cfg);
-    b->waiter = xTaskGetCurrentTaskHandle();
+    b->done = xSemaphoreCreateBinary();
+    atomic_init(&b->phase, PHASE_WAITING);
+    atomic_init(&b->refs, 2);   // this caller and net_init_task
+    if (!b->done) {
+        ESP_LOGE(TAG, "no memory to start Wi-Fi mode: USB mode");
+        atomic_store(&b->refs, 1);
+        boot_release(b);
+        return false;
+    }
     ESP_LOGI(TAG, "Wi-Fi mode (wl_mode = 1): starting the radio");
     // Internal stack, on purpose: esp_wifi_start may write the PHY calibration to NVS (wifi_sta.h).
     if (xTaskCreate(net_init_task, "net_init", NET_INIT_STACK, b, 5, NULL) != pdPASS) {
-        zero(b, sizeof *b);
-        free(b);
         ESP_LOGE(TAG, "net_init task create failed: USB mode");
+        atomic_store(&b->refs, 1);   // no second party exists
+        boot_release(b);
         return false;
     }
-    const bool finished = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20000)) > 0;
+    bool finished = xSemaphoreTake(b->done, pdMS_TO_TICKS(20000)) == pdTRUE;
+    if (!finished) {
+        int expected = PHASE_WAITING;
+        if (atomic_compare_exchange_strong(&b->phase, &expected, PHASE_ABANDONED)) {
+            // net_init is still bringing the radio up. From here `b` is net_init's: it sees ABANDONED at its point of no return, takes the radio and
+            // the TLS wrapper down again, and frees `b` (the count reaches zero when it releases). We never touch `b` again.
+            ESP_LOGE(TAG, "Wi-Fi mode did not start in time: USB mode (net_init will stop the radio)");
+            boot_release(b);
+            return false;
+        }
+        // net_init had already passed its point of no return: all that is left for it is creating a task, so waiting for it is bounded.
+        finished = xSemaphoreTake(b->done, portMAX_DELAY) == pdTRUE;
+    }
     const bool ok = finished && b->ok;
-    if (finished) free(b);   // a task that never finished still owns it
+    boot_release(b);
     if (!ok) ESP_LOGE(TAG, "Wi-Fi mode did not start: USB mode");
     return ok;
 }
