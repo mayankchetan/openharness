@@ -1,7 +1,7 @@
 // The fleet's second source: dials that come in over Wi-Fi (netDials.ts), beside the ones on USB.
 // Real TLS-PSK dials on loopback, real sessions, the same host stub the USB fleet spec uses.
 import { randomBytes } from 'node:crypto'
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -144,6 +144,30 @@ describe('Wi-Fi dials in the fleet', () => {
     // and its log is in the per-dial folder, with the link named
     await vi.waitFor(() => expect(readdirSync(s.logs)).toEqual(['usb-B8-1F-3F-CA-E5-58']))
     expect(s.host.log).toHaveBeenCalledWith(expect.stringMatching(/open on wifi:127\.0\.0\.1:\d+ \[wifi B8:1F:3F:CA:E5:58\]/))
+  })
+
+  it('writes the key nowhere: not the daemon log, not the listener log, not the dial log file', async () => {
+    const s = await provisioned()
+    const dial = await s.dial(A, s.keyA)
+    dial.hello()
+    await dial.next('agents.end')
+    await s.fleet.turnStarted('a', 'Working')
+    await dial.next('turn.started')
+    dial.close()
+    await vi.waitFor(() => expect(s.fleet.isConnected).toBe(false))
+    await s.fleet.stop()
+    const files = readdirSync(s.logs, { recursive: true, withFileTypes: true }).filter((f) => f.isFile())
+    expect(files.length).toBeGreaterThan(0)
+    const text = [
+      ...vi.mocked(s.host.log).mock.calls.map((c) => String(c[0])),
+      ...s.netLog,
+      ...files.map((f) => readFileSync(join(f.parentPath, f.name), 'utf8')),
+    ].join(' | ')
+    expect(text.length).toBeGreaterThan(100)
+    for (const key of [s.keyA, s.keyB]) {
+      expect(text).not.toContain(key.toString('hex'))
+      expect(text).not.toContain(key.toString('base64'))
+    }
   })
 
   it('a dial that reconnects is picked up again by the same entry', async () => {
