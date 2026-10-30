@@ -8,6 +8,13 @@
 //             CableSession opens, and keeps the bytes the dial sent before the session asked.
 //   NetPort   that CablePort, over a TLS socket.
 //
+// Threat model. In scope: accidental LAN noise (a misbehaving host, a retry loop, a printer's discovery), scanners and port
+// probes, and peers with a wrong or unknown key. None of them may lock out the provisioned dial, and none gets a banner or
+// a byte of cable traffic before it has proved the dial's key. Out of scope: an active attacker on the LAN who aliases or
+// spoofs IP addresses (it can already deny service by ARP spoofing or deauthentication, and no per-address rule here
+// helps against it). So there are no /24 caps and no global accept-rate limits: they would cost an honest dial more than
+// they cost noise. Authentication, not the address rules below, is what keeps a stranger out.
+//
 // The socket opens only when the keystore (dialKeys.ts) holds at least one dial: with no provisioned dial there is no
 // open port. It closes again when the last key is removed. Nothing here is ever written to the dial's link before it has
 // proved its key, so a scanner gets no banner. No mDNS: the dial stores the daemon's address when it is provisioned.
@@ -15,13 +22,14 @@
 // Limits on unauthenticated peers (spec 4.2). They exist so that LAN noise can never lock out the dial that is provisioned:
 //   - a socket that has not finished the handshake 3 s after accept is destroyed;
 //   - at most 16 sockets wait in the pool, and at most 4 of them from one unknown address (a 5th connect from it is
-//     destroyed at accept and counts as a failure for that address);
+//     destroyed at accept and counts as a failure for that address) or 2 from one known address (the extra connect is
+//     destroyed at accept and is NOT a failure: a known address is never banned, but it cannot hold the pool either);
 //   - when the pool is full a newcomer takes the place of the OLDEST socket of the unknown address that holds the MOST
-//     pending sockets, so one address cannot push a slow dial out of the pool with a flood of its own. A pending socket of a
-//     known address (below) is never evicted for a newcomer from an unknown one; when every waiting socket is a known
-//     address's, a known newcomer evicts the oldest, and an unknown newcomer is the one refused. An eviction counts as a
-//     failure for the evicted socket's address when that address held more than one pending socket, so a flooder earns
-//     the ban below by its own churn;
+//     pending sockets, so one address cannot push a slow dial out of the pool with a flood of its own. When only known
+//     addresses wait, the newcomer takes the oldest socket of a known address that holds 2 (which leaves it the 1 a dial
+//     needs); if none holds 2, a known newcomer evicts the oldest and an unknown one is the one refused. An eviction counts
+//     as a failure for the evicted socket's address when that address held 3 or more pending sockets, so a flooder earns
+//     the ban below by its own churn and an address with 2 is never charged;
 //   - an address that authenticated in the last 7 days (the keystore's lastAddr / lastSeen) is never throttled;
 //   - any other address that fails 20 handshakes within 60 s is destroyed at accept for 30 s (never more than 60 s);
 //   - one authenticated socket per identity: a new one, which has proved the key, replaces the old.
@@ -39,6 +47,10 @@ export const NET_HANDSHAKE_DEADLINE_MS = 3_000
 export const NET_PENDING_MAX = 16
 /** Of those, from one unknown address. */
 export const NET_PENDING_PER_ADDR = 4
+/** Of those, from one known address. */
+export const NET_PENDING_PER_KNOWN_ADDR = 2
+/** An address that holds this many pending sockets is charged a failure when one of them is evicted. */
+export const NET_EVICTION_CHARGE_AT = 3
 /** Failed handshakes from one unknown address, within NET_FAIL_WINDOW_MS, that start a ban. */
 export const NET_FAIL_LIMIT = 20
 export const NET_FAIL_WINDOW_MS = 60_000
@@ -161,7 +173,7 @@ interface Pending {
 }
 
 export class NetDials {
-  readonly stats = { accepted: 0, refusedPeer: 0, throttled: 0, failed: 0, evicted: 0, evictionFailures: 0, capped: 0, revoked: 0, authenticated: 0, replaced: 0, overLimit: 0 }
+  readonly stats = { accepted: 0, refusedPeer: 0, throttled: 0, failed: 0, evicted: 0, evictionFailures: 0, capped: 0, knownCapped: 0, revoked: 0, authenticated: 0, replaced: 0, overLimit: 0 }
   readonly #opts: NetDialsOptions
   readonly #throttle: AddressThrottle
   readonly #pending = new Set<Pending>()
@@ -308,6 +320,12 @@ export class NetDials {
       return
     }
     const known = this.#opts.keys.isKnownAddr(peer)
+    // A known address is never banned, so its share is held down instead, and what it cannot hold is not a failure.
+    if (known && this.#pendingFrom(peer) >= NET_PENDING_PER_KNOWN_ADDR) {
+      this.stats.knownCapped++
+      raw.destroy()
+      return
+    }
     // One unknown address cannot hold more than its share of the pool.
     if (!known && this.#pendingFrom(peer) >= NET_PENDING_PER_ADDR) {
       this.stats.capped++
@@ -372,21 +390,29 @@ export class NetDials {
    * socket is oldest). Known addresses' sockets are not offered, except to a known newcomer when nothing else waits.
    */
   #victim(newcomerKnown: boolean): Pending | undefined {
-    const byAddr = new Map<string, Pending[]>()
+    const unknown = new Map<string, Pending[]>()
+    const known = new Map<string, Pending[]>()
     for (const entry of this.#pending) {
-      if (this.#opts.keys.isKnownAddr(entry.peer)) continue
-      const list = byAddr.get(entry.peer) ?? []
+      const groups = this.#opts.keys.isKnownAddr(entry.peer) ? known : unknown
+      const list = groups.get(entry.peer) ?? []
       list.push(entry)
-      byAddr.set(entry.peer, list)
+      groups.set(entry.peer, list)
     }
-    let best: Pending[] | undefined
-    for (const list of byAddr.values()) if (!best || list.length > best.length) best = list
-    if (best) return best[0]
+    const biggest = (groups: Map<string, Pending[]>, atLeast: number): Pending[] | undefined => {
+      let best: Pending[] | undefined
+      for (const list of groups.values()) if (list.length >= atLeast && (!best || list.length > best.length)) best = list
+      return best
+    }
+    const crowded = biggest(unknown, 1)
+    if (crowded) return crowded[0]
+    // Only known addresses wait: one that holds two gives up its oldest and keeps the one a dial needs.
+    const spare = biggest(known, 2)
+    if (spare) return spare[0]
     return newcomerKnown ? (this.#pending.values().next().value as Pending) : undefined
   }
 
   #evict(victim: Pending): void {
-    const crowded = this.#pendingFrom(victim.peer) > 1
+    const crowded = this.#pendingFrom(victim.peer) >= NET_EVICTION_CHARGE_AT
     this.stats.evicted++
     this.#drop(victim, 'pool full')
     if (crowded) {
@@ -417,17 +443,22 @@ export class NetDials {
       return
     }
     // The key may have been removed or replaced while the handshake ran: a revoked dial does not get in on it.
-    const current = this.#opts.keys.get(id)
     const used = entry.keyUsed
     entry.keyUsed = undefined
-    const revoked = !current || !used || !current.equals(used)
-    current?.fill(0)
-    used?.fill(0)
-    if (revoked) {
+    const stillTheKey = (): boolean => {
+      const current = this.#opts.keys.get(id)
+      const same = !!current && !!used && current.equals(used)
+      current?.fill(0)
+      return same
+    }
+    const revoke = (): void => {
+      used?.fill(0)
       this.stats.revoked++
       this.#log(`cable: Wi-Fi dial ${id} from ${entry.peer} refused — its key was removed or replaced during the handshake`)
-      entry.tls.destroy()
-      entry.raw.destroy()
+      this.#drop(entry, 'revoked')
+    }
+    if (!stillTheKey()) {
+      revoke()
       return
     }
     if (!this.#auth.has(id) && this.#auth.size >= NET_AUTH_MAX) {
@@ -448,6 +479,12 @@ export class NetDials {
     } catch (error) {
       this.#log(`cable: Wi-Fi dial ${id}: cannot record its address (${(error as NodeJS.ErrnoException).code ?? 'write failed'})`)
     }
+    // Recording the address can read the keystore file again (a second writer's change), and that may have removed this dial.
+    if (entry.tls.destroyed || !stillTheKey()) {
+      revoke()
+      return
+    }
+    used?.fill(0)
     this.#log(`cable: Wi-Fi dial ${id} authenticated from ${entry.peer}`)
     let taken: void | boolean
     try {

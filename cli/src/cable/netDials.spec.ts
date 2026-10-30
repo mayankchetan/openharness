@@ -3,7 +3,8 @@
 // Other "hosts" are other loopback addresses (127.0.0.2 and up): a client binds one with `localAddress`. Slow cases use
 // fake timers for the 3 s handshake deadline and an injected clock for the 60 s / 30 s / 7 day rules, so the suite is fast.
 import { randomBytes } from 'node:crypto'
-import { mkdtempSync, rmSync } from 'node:fs'
+import * as fs from 'node:fs'
+import { mkdtempSync, rmSync, utimesSync } from 'node:fs'
 import * as net from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -21,6 +22,7 @@ import {
   NET_HANDSHAKE_DEADLINE_MS,
   NET_PENDING_MAX,
   NET_PENDING_PER_ADDR,
+  NET_PENDING_PER_KNOWN_ADDR,
   NetDials,
   NetSlot,
   isPrivatePeer,
@@ -654,9 +656,9 @@ describe('NetDials: the pending pool under a flood', () => {
     const r = await listening(rig({}, [[A, key]]))
     r.keys.touch(A, '127.0.0.3')
     const slow = await slowDial(r, A, key, '127.0.0.3')
-    // the known address holds the most of anyone (a known address has no per-address cap), so only its exemption saves it
-    const alsoKnown = Array.from({ length: 5 }, () => rawClient(r, '127.0.0.3'))
-    await until(() => r.dials.pending === 6)
+    // a known address holds two at most; its second socket is spare, and the flood still must not take either
+    const alsoKnown = Array.from({ length: 1 }, () => rawClient(r, '127.0.0.3'))
+    await until(() => r.dials.pending === 2)
     const noise = addrs(8, 4).flatMap((a) => Array.from({ length: NET_PENDING_PER_ADDR }, () => rawClient(r, a)))
     await until(() => r.dials.stats.accepted >= 1 + 32)
     await holdOneSecond()
@@ -670,18 +672,80 @@ describe('NetDials: the pending pool under a flood', () => {
     expect(noise.length).toBe(32)
   })
 
-  it('an unknown newcomer is turned away when only known addresses wait; a known newcomer evicts the oldest', async () => {
+  /** n dials, each at its own known address 127.0.0.(from + i). */
+  function knownDials(r: Rig, n: number, from = 10): string[] {
+    return Array.from({ length: n }, (_, i) => {
+      const id = `B8:1F:3F:CA:E6:${(0x10 + i).toString(16).toUpperCase()}`
+      r.keys.set(id, randomBytes(32))
+      r.keys.touch(id, `127.0.0.${from + i}`)
+      return `127.0.0.${from + i}`
+    })
+  }
+
+  it('an unknown newcomer is turned away when only lone known sockets wait; a known newcomer evicts the oldest', async () => {
     const r = await listening(rig({}, [[A, randomBytes(32)]]))
-    r.keys.touch(A, '127.0.0.3')
-    const known = Array.from({ length: NET_PENDING_MAX }, () => rawClient(r, '127.0.0.3'))
+    const addrsKnown = knownDials(r, NET_PENDING_MAX)
+    const known = addrsKnown.map((a) => rawClient(r, a))
     await until(() => r.dials.pending === NET_PENDING_MAX, 'pool full of known')
     const stranger = rawClient(r, '127.0.0.2')
     await until(stranger.closed, 'the unknown newcomer is the one refused')
     expect(known.some((k) => k.closed())).toBe(false)
-    const one = rawClient(r, '127.0.0.3')
+    // the 17th known address, or a known one reconnecting: it takes the oldest
+    r.keys.set(B, randomBytes(32))
+    r.keys.touch(B, '127.0.0.99')
+    const one = rawClient(r, '127.0.0.99')
     await until(() => known[0].closed(), 'a known newcomer evicts the oldest')
     expect(known[1].closed()).toBe(false)
     expect(one.closed()).toBe(false)
+  })
+
+  it('one known address holds at most 2 pending slots; the rest are destroyed at accept, are no failure and earn no ban', async () => {
+    const key = randomBytes(32)
+    const r = await listening(rig({}, [[A, key]]))
+    r.keys.touch(A, '127.0.0.3')
+    const attempts = Array.from({ length: 16 }, () => rawClient(r, '127.0.0.3'))
+    await until(() => r.dials.stats.accepted >= 16, 'all attempts seen')
+    await until(() => attempts.filter((a) => a.closed()).length === 14, '14 destroyed at accept')
+    expect(r.dials.pending).toBe(NET_PENDING_PER_KNOWN_ADDR)
+    expect(r.dials.stats.knownCapped).toBe(14)
+    expect(r.dials.stats.failed).toBe(0)
+    expect(r.dials.stats.throttled).toBe(0)
+    // more attempts: still no ban for the known address
+    for (let i = 0; i < 40; i++) rawClient(r, '127.0.0.3')
+    await until(() => r.dials.stats.accepted >= 56)
+    expect(r.dials.stats.throttled).toBe(0)
+    // no failure was charged to it, so no ban was ever started (the ban line would say so, known address or not)
+    expect(r.logs.some((l) => /failed \d+ handshakes/.test(l))).toBe(false)
+    // and a dial at a new address gets in
+    const dial = await connect(r, A, key, '127.0.0.2')
+    dial.on('error', () => {})
+    cleanup.push(() => dial.destroy())
+    await until(() => r.conns.length === 1, 'the dial at the new address connected')
+  })
+
+  it('an unknown newcomer takes the oldest socket of a known address that holds 2, and that address keeps one', async () => {
+    const r = await listening(rig({}, [[A, randomBytes(32)]]))
+    const addrsKnown = knownDials(r, 8)
+    const held = addrsKnown.map((a) => [rawClient(r, a), rawClient(r, a)])
+    await until(() => r.dials.pending === NET_PENDING_MAX, 'pool full: 8 known addresses with 2 each')
+    const stranger = rawClient(r, '127.0.0.2')
+    await until(() => held[0][0].closed(), 'the oldest socket of the first known pair goes')
+    expect(held[0][1].closed()).toBe(false)
+    expect(held.slice(1).flat().some((c) => c.closed())).toBe(false)
+    expect(stranger.closed()).toBe(false)
+    expect(r.dials.stats.evictionFailures).toBe(0)
+  })
+
+  it('an unknown address holding 2 pending sockets is never charged for losing one', async () => {
+    const r = await listening(rig({}, [[A, randomBytes(32)]]))
+    const addrsHeld = addrs(8)
+    const held = addrsHeld.map((a) => [rawClient(r, a), rawClient(r, a)])
+    await until(() => r.dials.pending === NET_PENDING_MAX, 'pool full: 8 addresses with 2 each')
+    const newcomer = rawClient(r, '127.0.0.20')
+    await until(() => held[0][0].closed(), 'one of the first pair goes')
+    expect(r.dials.stats.evicted).toBe(1)
+    expect(r.dials.stats.evictionFailures).toBe(0)
+    expect(newcomer.closed()).toBe(false)
   })
 
   it('a full pool gives way at the address holding the most, oldest socket first, and counts it against that address', async () => {
@@ -796,6 +860,24 @@ describe('NetDials: a key that changes while a handshake runs', () => {
   })
 })
 
+describe('NetDials: a keystore read while the address is recorded', () => {
+  it('does not hand over a dial that a second writer removed from the file, though its handshake had finished', async () => {
+    const key = randomBytes(32)
+    const r = await listening(rig({}, [[A, key], [B, randomBytes(32)]]))
+    // another writer takes A out of the file; this process has not looked yet
+    const other = new DialKeys(r.keys.file)
+    other.remove(A)
+    const later = new Date(Date.now() + 5_000)
+    utimesSync(r.keys.file, later, later)
+    const s = await connect(r, A, key).catch(() => null)
+    s?.on('error', () => {})
+    await until(() => r.dials.stats.revoked >= 1, 'revoked after the reload')
+    expect(r.conns).toHaveLength(0)
+    expect(r.dials.authenticated).toBe(0)
+    expect(r.keys.has(A)).toBe(false)
+  })
+})
+
 describe('NetDials: a link nobody takes, and a port that cannot open', () => {
   it('destroys the socket when onDial throws, and says so once', async () => {
     const key = randomBytes(32)
@@ -845,5 +927,35 @@ describe('NetDials: a link nobody takes, and a port that cannot open', () => {
     await r.dials.settled()
     expect(r.logs.filter((l) => /cannot listen on port/.test(l))).toHaveLength(1)
     expect(r.logs.some((l) => /listening/.test(l))).toBe(false)
+  })
+})
+
+describe('NetDials: a keystore that could not be read', () => {
+  it('opens the port when the file can be read again, with no new key set', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'net-dials-'))
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }))
+    const file = join(dir, DIAL_KEY_FILE)
+    new DialKeys(file).set(A, randomBytes(32))
+    let failing = true
+    const keys = new DialKeys(file, {
+      fs: {
+        ...fs,
+        readFileSync: ((...args: Parameters<typeof fs.readFileSync>) => {
+          if (failing) throw Object.assign(new Error('denied'), { code: 'EACCES' })
+          return fs.readFileSync(...args)
+        }) as typeof fs.readFileSync,
+      },
+    })
+    cleanup.push(() => keys.close())
+    const logs: string[] = []
+    const dials = new NetDials({ keys, port: 0, bind: '127.0.0.1', log: (l) => logs.push(l), onDial: () => {} })
+    cleanup.push(() => dials.stop())
+    dials.start()
+    await dials.settled()
+    expect(dials.listening).toBe(false)
+    failing = false
+    expect(keys.reload()).toBe(true)
+    await dials.settled()
+    expect(dials.listening).toBe(true)
   })
 })

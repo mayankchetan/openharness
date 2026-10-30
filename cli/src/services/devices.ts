@@ -444,11 +444,13 @@ export function startDevices(core: CoreApi, ports: CorePorts, deps: DevicesDeps)
   // The Wi-Fi dials come in beside the USB ones, whether or not the serial ports are left alone. The socket opens only when
   // the keystore has a dial, so with none provisioned nothing listens. A removed key closes that dial's link and row.
   let netDials: NetDials | null = null
+  let netKeys: DialKeys | null = null
   const net = deps.net === 'env'
     ? { keysFile: join(env.HARNESS_DEVICES_DIR, DIAL_KEY_FILE), port: env.CABLE_NET_PORT, bind: env.CABLE_NET_BIND, enabled: env.CABLE_NET_ENABLE }
     : deps.net
   if (net) {
     const keys = ('keys' in net ? net.keys : undefined) ?? new DialKeys(net.keysFile, { log: (line) => log(`[cable] ${line}`) })
+    netKeys = keys
     keys.onChange((change) => { if (change.kind === 'remove') cable.forgetNet(change.id) })
     netDials = new NetDials({
       keys, port: net.port, bind: net.bind, enabled: net.enabled,
@@ -576,6 +578,7 @@ export function startDevices(core: CoreApi, ports: CorePorts, deps: DevicesDeps)
     stop: async () => {
       for (const agentId of [...replies.keys()]) endReplies(agentId, false)   // no timer may fire into a stopped cable
       await netDials?.stop()
+      netKeys?.close()
       await cable.stop()
       fleet?.stop()
       shutdownVoiceRouter()

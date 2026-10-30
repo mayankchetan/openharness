@@ -1254,6 +1254,7 @@ describe('the Wi-Fi dials', () => {
   it('open no port while no dial is provisioned, then hand a dial that proves its key to the fleet, and close with it', async () => {
     const { keys, key, net } = await netFor()
     const { FakeNetDial } = await import('../cable/__fixtures__/fakeNetDial.js')
+    const closed = vi.spyOn(keys, 'close')
     const { port } = start({ net })
     await vi.waitFor(() => expect(logs.filter((l) => /Wi-Fi/.test(l))).toEqual([]))
     await expect(FakeNetDial.connect({ port: net.port, id: ID, psk: key })).rejects.toBeTruthy()
@@ -1267,6 +1268,7 @@ describe('the Wi-Fi dials', () => {
     expect(calls('forgetNet')).toEqual([[ID]])
     await vi.waitFor(() => expect(dial.closed).toBe(true))
     await port.stop()
+    expect(closed).toHaveBeenCalledTimes(1)
     await expect(FakeNetDial.connect({ port: net.port, id: ID, psk: key })).rejects.toBeTruthy()
   })
 

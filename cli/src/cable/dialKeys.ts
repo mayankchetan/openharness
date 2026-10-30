@@ -23,14 +23,18 @@
 //
 // A file that cannot be READ (a permission error, a disk error: anything but "not there") makes the store unreadable: it
 // refuses to write, because a write from an empty memory would replace every key on disk with nothing. It tries the file
-// again at each write and as `reload()`, and writes again when that works. A file that reads but is not JSON is moved aside
-// as `.bad` and the store starts empty.
+// again at each write, as `reload()`, and by itself every 60 s (an unref'd timer, stopped by `close()`), and writes again when
+// that works; the listeners are told of every key that came back, so the Wi-Fi port can open. A file that reads but is not
+// JSON is moved aside as `.bad` and the store starts empty.
+//
+// Leftover temp files (`dial-net.json.<pid>.<random>.tmp`, from a crash between the write and the rename) are removed: all
+// of them when the store is created (no write of this process can be running then), and any older than 60 s at a later read.
 //
 // The key is never logged, never part of an error message, and the class keeps it in a `#private` field so that printing or
 // serialising the store shows nothing. `get` hands out a copy.
 import { randomBytes } from 'node:crypto'
 import * as nodeFs from 'node:fs'
-import { dirname } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 import { PSK_LENGTH, normalizePskIdentity } from './tlsPsk.js'
 
@@ -42,10 +46,16 @@ export const KNOWN_ADDR_MS = 7 * 24 * 60 * 60 * 1000
 /** A repeat connection from the same address inside this is not written to disk: `lastSeen` only has to be good to a day. */
 const TOUCH_MIN_MS = 60_000
 
+/** How often an unreadable store looks at its file again, by itself. */
+const RETRY_MS = 60_000
+
+/** A leftover temp file this old is from a write that is not running. */
+const STALE_TEMP_MS = 60_000
+
 const MAC = /^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$/
 
 /** The file operations used; a test swaps one to fail a write. */
-export type KeyFs = Pick<typeof nodeFs, 'mkdirSync' | 'readFileSync' | 'statSync' | 'openSync' | 'writeSync' | 'fsyncSync' | 'closeSync' | 'renameSync' | 'unlinkSync' | 'chmodSync'>
+export type KeyFs = Pick<typeof nodeFs, 'mkdirSync' | 'readFileSync' | 'readdirSync' | 'statSync' | 'openSync' | 'writeSync' | 'fsyncSync' | 'closeSync' | 'renameSync' | 'unlinkSync' | 'chmodSync'>
 
 export interface DialKeysOptions {
   fs?: KeyFs
@@ -80,6 +90,8 @@ export class DialKeys {
   #dials = new Map<string, Stored>()
   #stamp: Stamp | null = null
   #unreadable = false
+  #retry: ReturnType<typeof setInterval> | null = null
+  #closed = false
   readonly #listeners = new Set<(change: DialKeyChange) => void>()
   readonly #fs: KeyFs
   readonly #now: () => number
@@ -89,7 +101,16 @@ export class DialKeys {
     this.#fs = options.fs ?? nodeFs
     this.#now = options.now ?? Date.now
     this.#log = options.log ?? (() => {})
-    this.#load()
+    this.#readFile()
+    this.#sweepTemp(true)
+    this.#watchUnreadable()
+  }
+
+  /** Stop looking at an unreadable file by itself. The store goes on working as it is. */
+  close(): void {
+    this.#closed = true
+    if (this.#retry) clearInterval(this.#retry)
+    this.#retry = null
   }
 
   /** How many dials have a key. */
@@ -124,7 +145,7 @@ export class DialKeys {
     return !this.#unreadable
   }
 
-  /** Read the file again. True when that worked. */
+  /** Read the file again. True when that worked. Listeners hear of every key that differs from before. */
   reload(): boolean {
     this.#load()
     return !this.#unreadable
@@ -220,16 +241,53 @@ export class DialKeys {
     if (this.#unreadable) this.#load()
     if (this.#unreadable) throw new Error('the dial keystore cannot be read, so it is not written')
     if (this.#changedOnDisk()) {
-      const before = this.#dials
       this.#load()
       if (this.#unreadable) throw new Error('the dial keystore cannot be read, so it is not written')
-      // Keys another writer changed are news to the listener (a removed key closes that dial's link).
-      for (const id of new Set([...before.keys(), ...this.#dials.keys()])) {
-        const was = before.get(id)
-        const is = this.#dials.get(id)
-        if (!is) this.#tell({ id, kind: 'remove' })
-        else if (!was || !was.key.equals(is.key)) this.#tell({ id, kind: 'set' })
+    }
+  }
+
+  /** Read the file, then tell the listeners of every key that is not what it was (another writer's change, or a recovery). */
+  #load(): void {
+    const before = this.#dials
+    this.#readFile()
+    this.#sweepTemp(false)
+    this.#watchUnreadable()
+    for (const id of new Set([...before.keys(), ...this.#dials.keys()])) {
+      const was = before.get(id)
+      const is = this.#dials.get(id)
+      if (!is) this.#tell({ id, kind: 'remove' })
+      else if (!was || !was.key.equals(is.key)) this.#tell({ id, kind: 'set' })
+    }
+  }
+
+  /** While the file cannot be read, look again every minute; stop when it can. */
+  #watchUnreadable(): void {
+    if (this.#unreadable && !this.#retry && !this.#closed) {
+      this.#retry = setInterval(() => this.#load(), RETRY_MS)
+      this.#retry.unref?.()
+    } else if ((!this.#unreadable || this.#closed) && this.#retry) {
+      clearInterval(this.#retry)
+      this.#retry = null
+    }
+  }
+
+  /** Remove temp files a crashed write left behind: all of them (at start) or those older than a minute. */
+  #sweepTemp(all: boolean): void {
+    const fs = this.#fs
+    const dir = dirname(this.file)
+    const prefix = `${basename(this.file)}.`
+    try {
+      for (const name of fs.readdirSync(dir)) {
+        if (!name.startsWith(prefix) || !name.endsWith('.tmp')) continue
+        const path = join(dir, name)
+        try {
+          if (all || Date.now() - fs.statSync(path).mtimeMs > STALE_TEMP_MS) fs.unlinkSync(path)
+        } catch {
+          // gone already, or not ours to remove
+        }
       }
+    } catch {
+      // no folder yet
     }
   }
 
@@ -296,7 +354,7 @@ export class DialKeys {
     }
   }
 
-  #load(): void {
+  #readFile(): void {
     let text: string
     let stamp: Stamp | null
     try {

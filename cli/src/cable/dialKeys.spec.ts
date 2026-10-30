@@ -430,3 +430,128 @@ describe('DialKeys: writers and failures', () => {
     expect(new DialKeys(file).ids().sort()).toEqual([A, B])
   })
 })
+
+describe('DialKeys: leftovers, recovery and the retry', () => {
+  const fileIn = () => join(tmp(), DIAL_KEY_FILE)
+  const names = (file: string) => readdirSync(join(file, '..')).sort()
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  /** A keystore whose file cannot be read until `fix()` is called. */
+  function broken(file: string, log?: (line: string) => void) {
+    let failing = true
+    const keys = new DialKeys(file, {
+      log,
+      fs: {
+        ...fs,
+        readFileSync: ((...args: Parameters<typeof fs.readFileSync>) => {
+          if (failing) throw Object.assign(new Error('denied'), { code: 'EACCES' })
+          return fs.readFileSync(...args)
+        }) as typeof fs.readFileSync,
+      },
+    })
+    return { keys, fix: () => void (failing = false) }
+  }
+
+  it('removes every leftover temp file at start, and nothing else', () => {
+    const file = fileIn()
+    new DialKeys(file).set(A, randomBytes(32))
+    const dir = join(file, '..')
+    writeFileSync(join(dir, `${DIAL_KEY_FILE}.4242.deadbeef.tmp`), 'half')
+    writeFileSync(join(dir, `${DIAL_KEY_FILE}.bad`), 'kept')
+    writeFileSync(join(dir, 'other.tmp'), 'kept')
+    new DialKeys(file)
+    expect(names(file)).toEqual([DIAL_KEY_FILE, `${DIAL_KEY_FILE}.bad`, 'other.tmp'])
+  })
+
+  it('at a later read removes only the temp files older than a minute', () => {
+    const file = fileIn()
+    const keys = new DialKeys(file)
+    keys.set(A, randomBytes(32))
+    const dir = join(file, '..')
+    const stale = join(dir, `${DIAL_KEY_FILE}.1.aaaaaaaa.tmp`)
+    const fresh = join(dir, `${DIAL_KEY_FILE}.2.bbbbbbbb.tmp`)
+    writeFileSync(stale, 'x')
+    writeFileSync(fresh, 'y')
+    const old = new Date(Date.now() - 120_000)
+    utimesSync(stale, old, old)
+    keys.reload()
+    expect(names(file)).toEqual([DIAL_KEY_FILE, `${DIAL_KEY_FILE}.2.bbbbbbbb.tmp`])
+  })
+
+  it('tells its listeners the keys that come back when an unreadable file can be read again', () => {
+    const file = fileIn()
+    new DialKeys(file).set(A, randomBytes(32))
+    const { keys, fix } = broken(file)
+    const seen: string[] = []
+    keys.onChange((c) => seen.push(`${c.kind}:${c.id}`))
+    expect(keys.reload()).toBe(false)
+    expect(seen).toEqual([])
+    fix()
+    expect(keys.reload()).toBe(true)
+    expect(seen).toEqual([`set:${A}`])
+  })
+
+  it('looks at an unreadable file again every 60 s by itself, tells the listeners, and then stops', () => {
+    vi.useFakeTimers()
+    const file = fileIn()
+    new DialKeys(file).set(A, randomBytes(32))
+    const { keys, fix } = broken(file)
+    const seen: string[] = []
+    keys.onChange((c) => seen.push(`${c.kind}:${c.id}`))
+    expect(vi.getTimerCount()).toBe(1)
+    vi.advanceTimersByTime(60_000)
+    expect(keys.readable).toBe(false)
+    expect(vi.getTimerCount()).toBe(1)
+    fix()
+    vi.advanceTimersByTime(60_000)
+    expect(keys.readable).toBe(true)
+    expect(seen).toEqual([`set:${A}`])
+    expect(vi.getTimerCount()).toBe(0)
+    keys.close()
+  })
+
+  it('arms nothing for a readable file, and its timer does not hold the process open', () => {
+    const file = fileIn()
+    const made: Array<ReturnType<typeof setInterval>> = []
+    const real = globalThis.setInterval
+    vi.spyOn(globalThis, 'setInterval').mockImplementation(((...args: Parameters<typeof setInterval>) => {
+      const timer = real(...args)
+      made.push(timer)
+      return timer
+    }) as typeof setInterval)
+    new DialKeys(file).set(A, randomBytes(32))
+    expect(made).toHaveLength(0)
+    const { keys } = broken(file)
+    expect(made).toHaveLength(1)
+    expect(made[0].hasRef()).toBe(false)
+    keys.close()
+  })
+
+  it('close() stops the retry for good', () => {
+    vi.useFakeTimers()
+    const file = fileIn()
+    new DialKeys(file).set(A, randomBytes(32))
+    let reads = 0
+    const keys = new DialKeys(file, {
+      fs: {
+        ...fs,
+        readFileSync: ((..._args: Parameters<typeof fs.readFileSync>) => {
+          reads++
+          throw Object.assign(new Error('denied'), { code: 'EACCES' })
+        }) as typeof fs.readFileSync,
+      },
+    })
+    expect(vi.getTimerCount()).toBe(1)
+    keys.close()
+    expect(vi.getTimerCount()).toBe(0)
+    const before = reads
+    vi.advanceTimersByTime(300_000)
+    expect(reads).toBe(before)
+    // a later failed read does not arm it again
+    keys.reload()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
