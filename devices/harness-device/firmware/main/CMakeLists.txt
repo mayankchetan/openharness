@@ -28,6 +28,8 @@ set(BOARD_SRCS
     "cable_link.c"
     "cable_xport_usb.c"
     "cable_xport_tls.c"
+    "net_state.c"
+    "log_ring.c"
     "cable_client.c"
     "cable_machines.c"
     "cable_scroll.c"
