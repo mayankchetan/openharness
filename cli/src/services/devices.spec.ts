@@ -58,6 +58,8 @@ vi.mock('../cable/cableFleet.js', async (real) => {
     summary = recorder('summary')
     turnError = recorder('turnError')
     petsChanged = recorder('petsChanged')
+    adoptNet = recorder('adoptNet')
+    forgetNet = recorder('forgetNet')
     wants = true
     connected = true
     get isConnected() { return this.connected }
@@ -154,7 +156,7 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-function start(over: { core?: CoreApi; faults?: string[]; cableDisabled?: boolean; testDialPort?: string; readUsage?: DevicesDeps['readUsage']; now?: () => number; decideTier?: DevicesDeps['decideTier'] | null } = {}) {
+function start(over: { core?: CoreApi; faults?: string[]; cableDisabled?: boolean; net?: DevicesDeps['net']; testDialPort?: string; readUsage?: DevicesDeps['readUsage']; now?: () => number; decideTier?: DevicesDeps['decideTier'] | null } = {}) {
   const core = over.core ?? fakeCore({ dataDir })
   const ports: CorePorts = emptyPorts()
   const onExit = vi.fn()
@@ -165,6 +167,7 @@ function start(over: { core?: CoreApi; faults?: string[]; cableDisabled?: boolea
     dialSerials: ['E2E'],
     testDialPort: over.testDialPort,
     cableDisabled: over.cableDisabled,
+    net: over.net,
     readUsage: over.readUsage,
     now: over.now,
     decideTier: over.decideTier === null ? undefined : over.decideTier ?? (async () => ({ tier: 'alert', by: 'test', detail: '', ms: 0 })),
@@ -1220,5 +1223,68 @@ describe('the dial debug request', () => {
       expect(await requests.dial_debug({ op: 'tap', x: 'a', y: 2 }, owner)).toMatchObject({ ok: false, kind: 'device' })
       expect(seen.cable.debug).not.toHaveBeenCalled()
     })
+  })
+})
+
+describe('the Wi-Fi dials', () => {
+  const ID = 'B8:1F:3F:CA:E5:58'
+  const freePort = async (): Promise<number> => {
+    const net = await import('node:net')
+    return new Promise((resolve) => {
+      const probe = net.createServer()
+      probe.listen(0, '127.0.0.1', () => {
+        const port = (probe.address() as import('node:net').AddressInfo).port
+        probe.close(() => resolve(port))
+      })
+    })
+  }
+  const netFor = async (enabled = true) => {
+    const { DIAL_KEY_FILE, DialKeys } = await import('../cable/dialKeys.js')
+    const { randomBytes } = await import('node:crypto')
+    const keysFile = join(dataDir, 'devices', DIAL_KEY_FILE)
+    const keys = new DialKeys(keysFile)
+    return { keys, key: randomBytes(32), net: { keysFile, keys, port: await freePort(), bind: '127.0.0.1', enabled } }
+  }
+
+  it('are left out unless the process that runs the devices asks for them', () => {
+    start()
+    expect(logs.filter((l) => /Wi-Fi/.test(l))).toEqual([])
+  })
+
+  it('open no port while no dial is provisioned, then hand a dial that proves its key to the fleet, and close with it', async () => {
+    const { keys, key, net } = await netFor()
+    const { FakeNetDial } = await import('../cable/__fixtures__/fakeNetDial.js')
+    const { port } = start({ net })
+    await vi.waitFor(() => expect(logs.filter((l) => /Wi-Fi/.test(l))).toEqual([]))
+    await expect(FakeNetDial.connect({ port: net.port, id: ID, psk: key })).rejects.toBeTruthy()
+    keys.set(ID, key)
+    await vi.waitFor(() => expect(logs.some((l) => /Wi-Fi dials listening/.test(l))).toBe(true))
+    const dial = await FakeNetDial.connect({ port: net.port, id: ID, psk: key })
+    await vi.waitFor(() => expect(calls('adoptNet')).toHaveLength(1))
+    expect(calls('adoptNet')[0][0]).toMatchObject({ id: ID, peer: '127.0.0.1' })
+    // forgetting a dial is told to the fleet
+    keys.remove(ID)
+    expect(calls('forgetNet')).toEqual([[ID]])
+    await vi.waitFor(() => expect(dial.closed).toBe(true))
+    await port.stop()
+    await expect(FakeNetDial.connect({ port: net.port, id: ID, psk: key })).rejects.toBeTruthy()
+  })
+
+  it('stay shut when CABLE_NET_ENABLE is false', async () => {
+    const { keys, key, net } = await netFor(false)
+    keys.set(ID, key)
+    start({ net })
+    const { FakeNetDial } = await import('../cable/__fixtures__/fakeNetDial.js')
+    await expect(FakeNetDial.connect({ port: net.port, id: ID, psk: key })).rejects.toBeTruthy()
+    expect(logs.filter((l) => /listening/.test(l))).toEqual([])
+  })
+
+  it('come in with the serial ports left alone', async () => {
+    const { keys, key, net } = await netFor()
+    keys.set(ID, key)
+    const { port } = start({ net, cableDisabled: true })
+    await vi.waitFor(() => expect(logs.some((l) => /Wi-Fi dials listening/.test(l))).toBe(true))
+    expect(calls('start')).toHaveLength(0)
+    await port.stop()
   })
 })

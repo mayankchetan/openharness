@@ -3163,7 +3163,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     serviceHost.start('devices', (core, started) => inline!.startDevices(core, started, {
       logsDir: env.HARNESS_LOGS_DIR, testDialPort: harnessd.HARNESSD_TEST_DIAL_PORT,
       dialSerials: process.env.HARNESS_DIAL_SERIALS?.split(',').map((serial) => serial.trim()).filter(Boolean),
-      cableDisabled: env.CABLE_DISABLE, faults: testFaults(harnessd.HARNESSD_TEST_FAULTS),
+      cableDisabled: env.CABLE_DISABLE, net: 'env', faults: testFaults(harnessd.HARNESSD_TEST_FAULTS),
     }), coreApi, DEVICES_FALLBACKS, DEVICES_REQUESTS)
     // Everything the windows said while the devices were being built, and what the machine runs.
     if (ports.devices) devicesLink.started(ports.devices)

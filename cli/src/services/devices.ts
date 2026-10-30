@@ -25,6 +25,8 @@ import { isLocalOnly } from '../lib/cardUpdate.js'
 import { TurnStats, type TurnStatsFields } from '../cable/turnStats.js'
 import { cableEventFor, cableStepFor, cableQuestionCloseFor, cableQuestionFor, DaemonCableHost } from '../cable/cableHost.js'
 import { CableSession } from '../cable/cableSession.js'
+import { DIAL_KEY_FILE, DialKeys } from '../cable/dialKeys.js'
+import { NetDials } from '../cable/netDials.js'
 import { PetStore } from '../cable/pets/store.js'
 import { DialLog } from '../cable/dialLog.js'
 import { DialVerdicts } from '../cable/dialPortVerdicts.js'
@@ -56,6 +58,12 @@ export interface DevicesDeps {
   testDialPort?: string
   /** Leave the serial ports alone altogether (`CABLE_DISABLE`). */
   cableDisabled?: boolean
+  /**
+   * The Wi-Fi dials' listener (cable/netDials.ts). Left out, there is none: only the two callers that run the devices for
+   * real say `'env'` (`CABLE_NET_*`, and the keystore under `HARNESS_DEVICES_DIR`), so a test never reads the person's
+   * keystore or opens a port.
+   */
+  net?: 'env' | { keysFile: string; port: number; bind: string; enabled: boolean; /** The keystore, when the caller holds it (tests); else read from `keysFile`. */ keys?: DialKeys }
   /** `HARNESSD_TEST_FAULTS`: parts to fail, for the end-to-end suite. */
   faults?: ReadonlySet<string>
   log?: (line: string) => void
@@ -433,6 +441,22 @@ export function startDevices(core: CoreApi, ports: CorePorts, deps: DevicesDeps)
 
   if (deps.cableDisabled) log('[cable] disabled (CABLE_DISABLE=true) — the serial port is left alone')
   else cable.start()
+  // The Wi-Fi dials come in beside the USB ones, whether or not the serial ports are left alone. The socket opens only when
+  // the keystore has a dial, so with none provisioned nothing listens. A removed key closes that dial's link and row.
+  let netDials: NetDials | null = null
+  const net = deps.net === 'env'
+    ? { keysFile: join(env.HARNESS_DEVICES_DIR, DIAL_KEY_FILE), port: env.CABLE_NET_PORT, bind: env.CABLE_NET_BIND, enabled: env.CABLE_NET_ENABLE }
+    : deps.net
+  if (net) {
+    const keys = ('keys' in net ? net.keys : undefined) ?? new DialKeys(net.keysFile, { log: (line) => log(`[cable] ${line}`) })
+    keys.onChange((change) => { if (change.kind === 'remove') cable.forgetNet(change.id) })
+    netDials = new NetDials({
+      keys, port: net.port, bind: net.bind, enabled: net.enabled,
+      log: (line) => log(`[cable] ${line}`),
+      onDial: (connection) => part.call('dial', () => cable.adoptNet(connection)),
+    })
+    netDials.start()
+  }
   ;(deps.onExit ?? ((run) => { process.once('exit', run) }))(() => shutdownVoiceRouter())
 
   const port: DevicesPort = {
@@ -550,6 +574,7 @@ export function startDevices(core: CoreApi, ports: CorePorts, deps: DevicesDeps)
     // The serial ports first: a port left held makes esptool fail in a way that reads like dead hardware.
     stop: async () => {
       for (const agentId of [...replies.keys()]) endReplies(agentId, false)   // no timer may fire into a stopped cable
+      await netDials?.stop()
       await cable.stop()
       fleet?.stop()
       shutdownVoiceRouter()
