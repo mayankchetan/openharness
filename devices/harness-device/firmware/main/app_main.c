@@ -37,6 +37,9 @@
 #include "power_off.h"
 #include "power_sleep.h"
 #include "ram_telemetry.h"
+#ifdef DEVICE_VOX_PROBE
+#include "vox_probe.h"
+#endif
 #include "task_util.h"
 #ifdef DEVICE_UI_METRICS
 #include "ui/habitat/uim.h"
@@ -350,6 +353,9 @@ void app_main(void)
     battery_log_start();   // after the cable link, so a dump reaches the daemon's dial log
 #endif
     ram_telemetry_checkpoint("app_ready");
+#ifdef DEVICE_VOX_PROBE
+    vox_start();   // 100 voice turns over the real path, 30 s after the cable session is up (vox_probe.c); never a daily image
+#endif
 #ifdef DEVICE_SLEEP_PROFILE
     sleep_profile_app_ready();
     sleep_profile_start();

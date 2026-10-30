@@ -52,6 +52,9 @@ cc -std=c11 -Wall -Wextra -Werror -O1 \
 python3 "$here/test_cable_transport.py"
 # IMA ADPCM voice blocks (frame type 0x07): encoder and decoder against the shared vectors, sanitizers on.
 python3 "$here/test_adpcm_ima.py"
+# The ADPCM sender (W4): wiring of the flags and fields, and the VOX probe's review gates. The sender loop itself runs in test_audio_stream.py.
+python3 "$here/test_adpcm_wiring.py"
+python3 "$here/test_vox_gate.py"
 
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -o "$out/test_cable_json_guard" "$here/test_cable_json_guard.c" "$here/../main/cable_json_guard.c"

@@ -74,7 +74,17 @@ const char *cable_fw_version(void);
 // foreign, never as "probably ours". Absence has to mean no.
 #define CABLE_PRODUCT "harness"
 
-#define CABLE_PROTO_VERSION 3   // 3: + question.close (a question answered on another client)
+#define CABLE_PROTO_VERSION 4   // 3: + question.close (a question answered on another client); 4: + ADPCM voice (frame type 0x07, voice.begin.codec)
+
+// ADPCM voice over the cable (task W4; docs/specs/cable-wifi-link.md section 2). Off unless the build says
+// -DDEVICE_VOICE_ADPCM_USB=1: then the dial advertises hello.voiceCodec "adpcm-v1", sends voice.begin.codec "adpcm" when the daemon's
+// welcome has voice.adpcm, and the voice sender encodes. With the flag off none of that is compiled: the dial sends PCM and its
+// hello is the one it always sent (apart from `proto`). CABLE_VOICE_ADPCM_BUILT is the one switch the code tests; the Wi-Fi mode
+// (W12) widens its definition, it does not add a second one.
+#ifndef DEVICE_VOICE_ADPCM_USB
+#define DEVICE_VOICE_ADPCM_USB 0
+#endif
+#define CABLE_VOICE_ADPCM_BUILT DEVICE_VOICE_ADPCM_USB
 
 // Most agents the dial holds at once — the size of the list this file hands the UI.
 //
@@ -319,6 +329,15 @@ bool cable_client_voice_begin(const char *agent_id, const char *cmd, const char 
 
 // One PCM chunk as a 0x02 frame. Returns false when the host is not reading, which ends the turn.
 bool cable_client_voice_pcm(const uint8_t *pcm, size_t len);
+
+// One ADPCM block as a 0x07 frame (the 5-byte prefix and the WAV IMA block, adpcm_ima.h). Same return as the PCM call. Defined only
+// when CABLE_VOICE_ADPCM_BUILT; the sender calls these only inside that guard.
+bool cable_client_voice_adpcm(const uint8_t *payload, size_t len);
+// True when the voice.begin just sent opened an ADPCM turn (the codec is chosen once per turn, in voice.begin, and the sender
+// asks afterwards so both always agree).
+bool cable_client_voice_is_adpcm(void);
+// The codec rule right now (cable_voice_adpcm_chosen): the daemon's welcome has voice.adpcm and this transport may use it.
+bool cable_client_voice_adpcm_wanted(void);
 
 void cable_client_voice_end(void);
 void cable_client_voice_abort(const char *why);

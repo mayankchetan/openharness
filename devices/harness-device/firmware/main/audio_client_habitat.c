@@ -5,6 +5,13 @@
 #include "voice_buffer.h"
 #include "config_store.h"
 #include "ram_telemetry.h"
+#if CABLE_VOICE_ADPCM_BUILT
+#include "adpcm_ima.h"
+#include "esp_attr.h"
+#endif
+#ifdef DEVICE_VOX_PROBE
+#include "vox_probe.h"
+#endif
 #include "task_util.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
@@ -102,6 +109,82 @@ static void capture(void *unused)
     }
 }
 
+#if CABLE_VOICE_ADPCM_BUILT
+// The ADPCM sender (task W4): the same drain as the PCM loop in send_audio, but in blocks of 505 samples (1,010 B of PCM). Each block is encoded
+// and sent as one 0x07 frame; the step index is carried from block to block, a lost frame costs 505 samples and nothing more. The PCM is copied out
+// of the ring into the block buffer and released at once, so the ring frees space as fast as the PCM loop would. Failures set abort_requested,
+// like the PCM loop (send_audio then sends voice.abort). The last block of a turn is short, or full when the turn ends on a block boundary,
+// and carries ADPCM_FLAG_LAST; an empty turn sends no block (voice.end alone, as with 0 bytes of PCM).
+static void send_adpcm(uint32_t *delivered, uint32_t *send_max_us, uint32_t *encode_us_max, uint32_t *blocks)
+{
+    // Static, in PSRAM (EXT_RAM_BSS_ATTR): 1,010 B of PCM and 261 B of payload would take a quarter of voice_send's 5,120 B stack, and its measured
+    // headroom under load is 2,764 B. One sender runs at a time (the `active` gate in start_context), so one buffer is enough. PSRAM is
+    // never read by DMA here: cable_link_send copies the payload into its own frame buffer before it returns.
+    static EXT_RAM_BSS_ATTR struct {
+        int16_t pcm[ADPCM_BLOCK_SAMPLES];
+        uint8_t out[ADPCM_PAYLOAD_MAX];
+    } blk;
+    uint8_t index = 0;   // the step index of the next block; a turn starts at 0
+    uint16_t seq = 0;    // 0 at voice.begin; 33 minutes of blocks fit in 16 bits, the turn cap is 10
+    size_t filled = 0;   // bytes of PCM in blk.pcm
+    for (;;) {
+        if (atomic_load(&abort_requested))
+            return;
+        const uint8_t *data;
+        size_t n = voice_buffer_peek(&buffer, &data, sizeof blk.pcm - filled);
+        if (n) {
+            memcpy((uint8_t *)blk.pcm + filled, data, n);
+            voice_buffer_consume(&buffer, n);
+            filled += n;
+        }
+        bool last = false;
+        if (!n) {
+            if (!atomic_load_explicit(&capture_done, memory_order_acquire)) {
+                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+                continue;
+            }
+            // Acquire done before the final head check: do not lose the producer's last chunk.
+            if (voice_buffer_peek(&buffer, &data, 1))
+                continue;
+            last = true;
+        }
+        if (!last && filled < sizeof blk.pcm)
+            continue;
+        const unsigned samples = (unsigned)(filled / 2);   // an odd trailing byte cannot happen (the capture writes whole samples) and is dropped
+        if (!samples)
+            return;
+        // A full block that happens to end the turn is flagged too: the capture is done and the ring is empty.
+        const uint8_t flags = (last || (atomic_load_explicit(&capture_done, memory_order_acquire) && !voice_buffer_used(&buffer)))
+                                  ? ADPCM_FLAG_LAST
+                                  : 0;
+        int64_t before = esp_timer_get_time();
+        int len = adpcm_encode_block(blk.pcm, samples, &index, seq, flags, blk.out, sizeof blk.out);
+        uint32_t elapsed = (uint32_t)(esp_timer_get_time() - before);
+        if (elapsed > *encode_us_max)
+            *encode_us_max = elapsed;
+        if (len <= 0) {
+            atomic_store(&abort_requested, true);
+            return;
+        }
+        before = esp_timer_get_time();
+        bool ok = audio_stream_adpcm(blk.out, (size_t)len);
+        elapsed = (uint32_t)(esp_timer_get_time() - before);
+        if (elapsed > *send_max_us)
+            *send_max_us = elapsed;
+        if (!ok) {
+            atomic_store(&abort_requested, true);
+            return;
+        }
+        *delivered += (uint32_t)samples * 2;
+        (*blocks)++;
+        seq++;
+        filled = 0;
+        if (last)
+            return;
+    }
+}
+#endif
+
 static void send_audio(void *unused)
 {
     (void)unused;
@@ -119,6 +202,14 @@ static void send_audio(void *unused)
         if (!audio_stream_begin(agent[0] ? agent : NULL, cmd, lang, AUDIO_SAMPLE_RATE))
             atomic_store(&abort_requested, true);
         uint32_t delivered = 0, send_max_us = 0;
+#if CABLE_VOICE_ADPCM_BUILT
+        // The codec was chosen in voice.begin (just sent); an aborted begin leaves nothing to ask.
+        uint32_t encode_us_max = 0, adpcm_blocks = 0;
+        const bool adpcm = !atomic_load(&abort_requested) && audio_stream_is_adpcm();
+        if (adpcm)
+            send_adpcm(&delivered, &send_max_us, &encode_us_max, &adpcm_blocks);
+        else
+#endif
         for (;;) {
             if (atomic_load(&abort_requested))
                 break;
@@ -163,6 +254,21 @@ static void send_audio(void *unused)
                  atomic_load(&abort_requested), atomic_load(&heard),
                  (unsigned)uxTaskGetStackHighWaterMark(capture_task),
                  (unsigned)uxTaskGetStackHighWaterMark(NULL));
+#if CABLE_VOICE_ADPCM_BUILT
+        if (adpcm)
+            ESP_LOGI(TAG, "codec=adpcm blocks=%lu encode_us_max=%lu", (unsigned long)adpcm_blocks, (unsigned long)encode_us_max);
+#endif
+#ifdef DEVICE_VOX_PROBE
+#if CABLE_VOICE_ADPCM_BUILT
+        vox_on_sent(produced, delivered, high_water, read_max_us, send_max_us, atomic_load(&abort_requested),
+                    audio_capture_overruns(), (unsigned)uxTaskGetStackHighWaterMark(capture_task),
+                    (unsigned)uxTaskGetStackHighWaterMark(NULL), adpcm, adpcm_blocks, encode_us_max);
+#else
+        vox_on_sent(produced, delivered, high_water, read_max_us, send_max_us, atomic_load(&abort_requested),
+                    audio_capture_overruns(), (unsigned)uxTaskGetStackHighWaterMark(capture_task),
+                    (unsigned)uxTaskGetStackHighWaterMark(NULL), false, 0, 0);
+#endif
+#endif
         // The next gesture cannot reuse metadata or the ring until capture and finalization
         // finished.
         atomic_store_explicit(&active, false, memory_order_release);

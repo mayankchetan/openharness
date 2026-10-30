@@ -1,6 +1,7 @@
 #include "cable_features.h"
 #include "cJSON.h"
 #include <assert.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -58,5 +59,19 @@ int main(void)
     assert(cJSON_AddItemToArray(array,cJSON_CreateString("form")));
     assert(cable_features_parse(root)==0);
     cJSON_Delete(root);
-    puts("host features: PASS (legacy default, 64 combinations, voice.adpcm, unknown/type/size bounds, no allocations)");
+    // The ADPCM codec choice (W4). The dial offers ADPCM in its hello only when it would use it, and uses it only when the
+    // daemon welcomed voice.adpcm AND (the transport is not USB OR the USB build flag is on).
+    for (unsigned usb = 0; usb < 2; usb++)
+        for (unsigned flag = 0; flag < 2; flag++) {
+            const bool allowed = !usb || flag;
+            assert(cable_voice_adpcm_allowed(usb, flag) == allowed);
+            assert(cable_voice_adpcm_chosen(CABLE_FEATURE_ADPCM, usb, flag) == allowed);
+            assert(!cable_voice_adpcm_chosen(0, usb, flag));
+            assert(!cable_voice_adpcm_chosen(~CABLE_FEATURE_ADPCM, usb, flag));
+            assert(cable_voice_adpcm_chosen(~0u, usb, flag) == allowed);
+        }
+    assert(!cable_voice_adpcm_chosen(CABLE_FEATURE_ADPCM, true, false));   // USB, flag off: PCM exactly as before
+    assert(cable_voice_adpcm_chosen(CABLE_FEATURE_ADPCM, true, true));     // USB, flag on: gate G1
+    assert(cable_voice_adpcm_chosen(CABLE_FEATURE_ADPCM, false, false));   // Wi-Fi: ADPCM without the flag
+    puts("host features: PASS (legacy default, 64 combinations, voice.adpcm, codec choice rule, unknown/type/size bounds, no allocations)");
 }

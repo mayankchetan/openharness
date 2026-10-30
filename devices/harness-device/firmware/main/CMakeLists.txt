@@ -31,6 +31,7 @@ set(BOARD_SRCS
     "cable_scroll.c"
     "cable_json_guard.c"
     "cable_features.c"
+    "adpcm_ima.c"
     "last_words.c"
     "fw_update.c"
     "pet_store.c"
@@ -165,6 +166,27 @@ endif()
 
 if(DEVICE_PERF_BENCH)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_PERF_BENCH=1)
+endif()
+
+# ADPCM voice over USB (task W4), -DDEVICE_VOICE_ADPCM_USB=1, default OFF. The dial advertises hello.voiceCodec "adpcm-v1", and when the daemon's
+# welcome has voice.adpcm it sends each voice turn as IMA ADPCM blocks (frame type 0x07, adpcm_ima.c) instead of PCM. This exists so bench gate G1
+# can measure the encoder (encode_us_max, WER) over the cable before Wi-Fi exists. With the flag off no ADPCM code is compiled into the sender, the
+# hello or voice.begin: the dial sends PCM exactly as before. adpcm_ima.c is always in the source list (the linker drops it when nothing calls it).
+if(DEVICE_VOICE_ADPCM_USB)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_VOICE_ADPCM_USB=1)
+endif()
+
+# VOX probe (vox_probe.c): -DDEVICE_VOX_PROBE=1, default OFF, never a daily image. 30 s after the cable session is up it runs 100 voice turns of
+# 4 s each through the real voice path (capture, ring, [encoder], cable, daemon STT, reply) and logs one "VOX n=" line per turn with codec=,
+# blocks=, encode_us_max=, the ring peak, stack marks and the reply latency, plus a summary every 10 turns. The words go to the first agent of the
+# tab, so use a throwaway tab; -DDEVICE_VOX_REVIEW=1 finishes each turn with a review request (a draft, nothing is typed) and stops on any other
+# reply (vox_gate.h). Bench method: workbench briefs/research/2026-10-28-profiling-images.md section 8.
+if(DEVICE_VOX_PROBE)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_VOX_PROBE=1)
+    target_sources(${COMPONENT_LIB} PRIVATE "vox_probe.c")
+    if(DEVICE_VOX_REVIEW)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_VOX_REVIEW=1)
+    endif()
 endif()
 
 # RAM diet 2 telemetry: one RAM_REGIONS line per internal heap region (free, largest, min_free) at the boot tags

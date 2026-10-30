@@ -1,4 +1,5 @@
 #pragma once
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef struct cJSON cJSON;
@@ -21,6 +22,18 @@ enum {
     // voiceCodec "adpcm-v1"; the dial still chooses per turn, and on USB it keeps sending PCM unless built otherwise.
     CABLE_FEATURE_ADPCM = 1u << 8,
 };
+
+// Which voice codec a turn uses (task W4; docs/specs/cable-wifi-link.md section 2.5). Pure and IDF-free so the host test pins the
+// rule. `transport_is_usb`: the cable is the USB link (the only link today; Wi-Fi comes later). `usb_flag`: the build flag
+// DEVICE_VOICE_ADPCM_USB, which lets gate G1 run ADPCM over USB before any Wi-Fi exists.
+//   allowed: this dial may use ADPCM on this transport. It is what the hello advertises (voiceCodec "adpcm-v1"), so a
+//            daemon never offers voice.adpcm to a dial that would ignore it.
+//   chosen : the daemon's welcome has voice.adpcm AND the dial may use it. voice.begin.codec = "adpcm" only then.
+static inline bool cable_voice_adpcm_allowed(bool transport_is_usb, bool usb_flag) { return !transport_is_usb || usb_flag; }
+static inline bool cable_voice_adpcm_chosen(uint32_t features, bool transport_is_usb, bool usb_flag)
+{
+    return (features & CABLE_FEATURE_ADPCM) && cable_voice_adpcm_allowed(transport_is_usb, usb_flag);
+}
 
 // Optional welcome field. Older daemons omit it and retain the core voice,
 // pane, tab, scroll, machine and model controls. Unknown names are ignored.

@@ -28,6 +28,9 @@
 #include "pet_store.h"
 #include "power_sleep.h"
 #include "ram_telemetry.h"
+#ifdef DEVICE_VOX_PROBE
+#include "vox_probe.h"
+#endif
 #include "task_util.h"
 #include "board/board.h"
 #include "freertos/FreeRTOS.h"
@@ -319,6 +322,12 @@ static void handle_companion_celebrate(const cJSON *p)
     cJSON *root=msg("companion.event");
     msg_bool(&root,"ok",ok);if (token) msg_string(&root,"token",token);send_json(root);
 }
+#if CABLE_VOICE_ADPCM_BUILT
+// The only link today is the USB cable. The Wi-Fi mode (W11) turns this into a question to the transport.
+static bool voice_transport_is_usb(void) { return true; }
+static atomic_bool s_voice_adpcm;   // set by cable_client_voice_begin for the turn it opened
+#endif
+
 static void send_hello(void)
 {
     cJSON *root = msg("hello");
@@ -327,6 +336,11 @@ static void send_hello(void)
     // Named before anything else about this dial is believed. See CABLE_PRODUCT.
     msg_string(&root, "product", CABLE_PRODUCT);
     msg_number(&root, "proto", CABLE_PROTO_VERSION);
+#if CABLE_VOICE_ADPCM_BUILT
+    // Offered only when this dial would use it: a daemon that sees "adpcm-v1" answers with voice.adpcm.
+    if (cable_voice_adpcm_allowed(voice_transport_is_usb(), DEVICE_VOICE_ADPCM_USB != 0))
+        msg_string(&root, "voiceCodec", "adpcm-v1");
+#endif
     // The Swarms (handle_supertab) and their Super Tab waits (handle_question). Without the second the daemon holds
     // a wait back from this dial, which once had to: a wait is never an answer screen here.
     msg_string(&root, "swarmCard", "v1");
@@ -633,6 +647,12 @@ bool cable_client_voice_begin(const char *agent_id, const char *cmd, const char 
     if (cmd && cmd[0]) msg_string(&root, "cmd", cmd);
     msg_string(&root, "lang", lang && lang[0] ? lang : "en");
     msg_number(&root, "sr", sample_rate);
+#if CABLE_VOICE_ADPCM_BUILT
+    // PCM is the absence of the field. The sender reads the answer back with cable_client_voice_is_adpcm().
+    const bool adpcm = cable_client_voice_adpcm_wanted();
+    if (adpcm) msg_string(&root, "codec", "adpcm");
+    atomic_store(&s_voice_adpcm, adpcm);
+#endif
     char upload_id[24];
     audio_client_copy_upload_id(upload_id, sizeof(upload_id));
     msg_string(&root, "uploadId", upload_id);
@@ -736,6 +756,18 @@ bool cable_client_voice_pcm(const uint8_t *pcm, size_t len)
 {
     return cable_link_send(CABLE_TYPE_PCM, pcm, len);
 }
+
+#if CABLE_VOICE_ADPCM_BUILT
+bool cable_client_voice_adpcm(const uint8_t *payload, size_t len)
+{
+    return cable_link_send(CABLE_TYPE_ADPCM, payload, len);
+}
+bool cable_client_voice_is_adpcm(void) { return atomic_load(&s_voice_adpcm); }
+bool cable_client_voice_adpcm_wanted(void)
+{
+    return cable_voice_adpcm_chosen(atomic_load(&s_features), voice_transport_is_usb(), DEVICE_VOICE_ADPCM_USB != 0);
+}
+#endif
 
 void cable_client_draft(const char *id,const char *op,uint32_t request,uint32_t revision,int delta)
 {
@@ -1522,6 +1554,12 @@ static void handle_message(const cJSON *root)
     if (strcmp(t, "question") == 0) { handle_question(p, agent_id); return; }
     if (strcmp(t, "question.close") == 0) { handle_question_close(p, agent_id); return; }
 
+#ifdef DEVICE_VOX_PROBE
+    if (!strcmp(t, "voice.transcript") || !strcmp(t, "voice.error") || !strcmp(t, "voice.draft")) {
+        const char *vox_up = str_of(p, "uploadId");
+        if (vox_up && audio_client_upload_matches(vox_up)) vox_on_reply(t, str_of(p, "message"));
+    }
+#endif
     if (strcmp(t,"draft.state")==0) { ui_draft_state(p);return; }
     if (strcmp(t,"voice.draft")==0) {
         const char *upload_id=str_of(p,"uploadId");

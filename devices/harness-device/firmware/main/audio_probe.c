@@ -39,6 +39,20 @@ bool audio_stream_pcm(const uint8_t *pcm, size_t size)
     sent += (uint32_t)size;
     return true;
 }
+#if CABLE_VOICE_ADPCM_BUILT
+// The bench probe sends nothing while probing, so a probe turn is never an ADPCM turn; outside a probe the real calls.
+bool audio_stream_adpcm(const uint8_t *payload, size_t size)
+{
+    if (!atomic_load(&probing))
+        return cable_client_voice_adpcm(payload, size);
+    sent += (uint32_t)size;
+    return true;
+}
+bool audio_stream_is_adpcm(void)
+{
+    return !atomic_load(&probing) && cable_client_voice_is_adpcm();
+}
+#endif
 void audio_stream_end(void)
 {
     if (!atomic_load(&probing))

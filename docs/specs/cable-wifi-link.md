@@ -113,8 +113,9 @@ for sample; section 2.6 says what ffmpeg is used for.
 | USB | PCM by default. ADPCM over USB only behind the firmware build flag `DEVICE_VOICE_ADPCM_USB` (task W4) |
 
 The daemon decodes ADPCM on whatever transport the dial uses; it has no "Wi-Fi only" rule. The dial decides.
-`CABLE_PROTO_VERSION` is 4 on the daemon (3 before this change; the firmware's value moves to 4 with the firmware
-sender, task W4). Firmware feature bit `CABLE_FEATURE_ADPCM = 1u << 8`; frame type `CABLE_TYPE_ADPCM = 0x07`.
+`CABLE_PROTO_VERSION` is 4 on both sides (3 before this change; the daemon moved in task W3, the firmware with its
+sender in task W4). A firmware built without `DEVICE_VOICE_ADPCM_USB` sends no `hello.voiceCodec` (it advertises the codec
+only where it would use it), so a daemon never offers it `voice.adpcm`. Firmware feature bit `CABLE_FEATURE_ADPCM = 1u << 8`; frame type `CABLE_TYPE_ADPCM = 0x07`.
 
 Daemon behavior for one turn:
 
