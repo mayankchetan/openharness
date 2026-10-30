@@ -13,6 +13,18 @@
 // The dial is always the TLS client. The handshake runs inside open(), after the inner transport is open and up, with a
 // 5 s deadline; on any failure open() closes the inner transport and returns false.
 //
+// Preconditions.
+//   * Not for USB. open() refuses an inner transport of kind CABLE_XPORT_USB (USB stays plain by design) and returns false.
+//   * Randomness. Wi-Fi or the BLE controller must be running before open(): the ESP hardware RNG is a true random source
+//     only while a radio is on, and the handshake draws its random numbers and the ECDHE key from it.
+//   * Stack. open() runs the handshake and read() runs ssl_read on the calling task, so both tasks need a stack sized for
+//     mbedTLS. About 8 KB is the working figure from the bench; it is NOT measured for this wrapper. W11 measures the
+//     high-water mark on the target after a real handshake and sets the stacks from it.
+//   * Lifetime. The caller stops and joins every task that calls read() or write() before cable_xport_tls_free(). There is
+//     no reference count: free() while a call is inside the wrapper is a use after free.
+//   * No session tickets: a resumed session would skip the PSK exchange, so the client never offers one.
+//   * open() again without close() frees the old TLS state and closes the inner transport first.
+//
 // Concurrency. One mbedtls_ssl_context is never used by two tasks at once: one mutex covers every ssl_read, ssl_write and
 // handshake step. read() waits for data in slices of 10 ms and drops the mutex between slices, so a waiting reader never
 // starves a writer (and a reader yields when a writer is queued). The inner transport is called only from under that mutex.

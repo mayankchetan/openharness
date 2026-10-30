@@ -67,6 +67,7 @@ PSK_EXPECTED = {
     'CONFIG_MBEDTLS_KEY_EXCHANGE_PSK': 'n',
     'CONFIG_MBEDTLS_KEY_EXCHANGE_DHE_PSK': 'n',
     'CONFIG_MBEDTLS_KEY_EXCHANGE_RSA_PSK': 'n',
+    'CONFIG_MBEDTLS_CLIENT_SSL_SESSION_TICKETS': 'n',
 }
 for symbol, value in PSK_EXPECTED.items():
     assert defaults.get(symbol) == value, f"{symbol}: defaults say {defaults.get(symbol)!r}, expected {value!r}"

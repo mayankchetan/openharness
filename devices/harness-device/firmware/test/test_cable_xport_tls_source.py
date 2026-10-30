@@ -2,7 +2,7 @@
 
   * no ESP_LOG* call takes the key, the identity or anything named like them (error paths log mbedTLS codes only);
   * the ciphersuite list is exactly the two ECDHE-PSK CBC suites and is installed with mbedtls_ssl_conf_ciphersuites;
-  * TLS 1.2 is pinned at both ends;
+  * TLS 1.2 is pinned at both ends, session tickets are disabled, a USB inner transport is refused;
   * the PSK goes in with mbedtls_ssl_conf_psk (mbedTLS copies it), no certificate API is used, and esp-tls is not.
 The behaviour is tested in test_cable_xport_tls.c (built by test_cable_xport_tls.py against the IDF mbedTLS sources).
 """
@@ -19,7 +19,12 @@ assert statements, 'the wrapper logs its error codes'
 for statement in statements:
     stripped = re.sub(r'"(?:[^"\\]|\\.)*"', '""', statement)   # the format text is free; the arguments must not be key material
     assert not re.search(r'\bpsk\w*\b|\bkey\w*\b|\bident\w*\b', stripped), f'a log call takes key or identity material: {statement}'
-    assert '(unsigned)-r' in statement or 'inner' in statement, f'a log call carries something other than an error code: {statement}'
+    # what may follow the format text: an mbedTLS error code, the inner transport's name, or nothing
+    args = re.sub(r'\s+', '', stripped)
+    rest = re.sub(r'^ESP_LOG[EWIDV]\(TAG,""', '', args)
+    for allowed in ('(unsigned)-r', 't->inner->name', 'retryable(r)?"":""', ',', ');'):
+        rest = rest.replace(allowed, '')
+    assert rest == '', f'a log call carries something other than an error code: {statement}'
 
 # 2. suites
 assert 'mbedtls_ssl_conf_ciphersuites(' in code
@@ -33,6 +38,8 @@ assert re.search(r'\b0,\s*$', suites.group(1).strip()), 'the list ends with 0'
 assert re.search(r'mbedtls_ssl_conf_min_tls_version\([^)]*MBEDTLS_SSL_VERSION_TLS1_2\)', code)
 assert re.search(r'mbedtls_ssl_conf_max_tls_version\([^)]*MBEDTLS_SSL_VERSION_TLS1_2\)', code)
 assert 'TLS1_3' not in code
+assert re.search(r'mbedtls_ssl_conf_session_tickets\([^)]*MBEDTLS_SSL_SESSION_TICKETS_DISABLED\)', code), 'session tickets are switched off'
+assert re.search(r'inner->kind == CABLE_XPORT_USB\)\s*\{[^}]*return false', code), 'open() refuses a USB inner transport'
 
 # 4. PSK only, mbedTLS direct
 assert 'mbedtls_ssl_conf_psk(' in code

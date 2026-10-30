@@ -10,6 +10,7 @@
 #endif
 #include <assert.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -87,6 +88,14 @@ int __wrap_mbedtls_ssl_write(mbedtls_ssl_context *ssl, const unsigned char *buf,
         if (calls && i < MAX_CALLS) calls[i] = (write_call_t){ buf, len, r };
     }
     return r;
+}
+
+static atomic_int client_frees;   // mbedtls_ssl_free calls made by client-side threads
+void __real_mbedtls_ssl_free(mbedtls_ssl_context *ssl);
+void __wrap_mbedtls_ssl_free(mbedtls_ssl_context *ssl)
+{
+    if (!t_is_server) atomic_fetch_add(&client_frees, 1);
+    __real_mbedtls_ssl_free(ssl);
 }
 
 // ── the wire: two byte queues ────────────────────────────────────────────────────────────────────────
@@ -180,6 +189,7 @@ typedef struct {
     atomic_bool closed_by_wrapper;
     atomic_int write_calls;
     atomic_int open_calls;
+    atomic_int close_calls;
 } end_t;
 
 static bool end_open(const cable_xport_t *x) { end_t *e = x->ctx; atomic_fetch_add(&e->open_calls, 1); atomic_store(&e->closed_by_wrapper, false); atomic_store(&e->up, true); return true; }
@@ -187,6 +197,7 @@ static bool end_open(const cable_xport_t *x) { end_t *e = x->ctx; atomic_fetch_a
 static void end_close(const cable_xport_t *x)
 {
     end_t *e = x->ctx;
+    atomic_fetch_add(&e->close_calls, 1);
     atomic_store(&e->closed_by_wrapper, true);
     atomic_store(&e->up, false);
     q_close(e->rx);
@@ -235,6 +246,7 @@ static void link_init(link_t *l, cable_xport_kind_t kind)
     atomic_init(&e->closed_by_wrapper, false);
     atomic_init(&e->write_calls, 0);
     atomic_init(&e->open_calls, 0);
+    atomic_init(&e->close_calls, 0);
     e->x = (cable_xport_t){ .name = "fake", .kind = kind, .open = end_open, .close = end_close, .read = end_read,
                             .write = end_write, .is_up = end_is_up, .ctx = e };
 }
@@ -274,6 +286,8 @@ typedef struct {
     char version[16];
     char suite[80];
     atomic_size_t rx_bytes;
+    uint8_t hello[1024];        // the first bytes the client sent (its ClientHello)
+    atomic_size_t hello_len;
 } server_t;
 
 static int srv_send(void *p, const unsigned char *buf, size_t len)
@@ -298,7 +312,15 @@ static int srv_recv(void *p, unsigned char *buf, size_t len)
     for (;;) {
         if (atomic_load(&s->stop)) return MBEDTLS_ERR_NET_CONN_RESET;
         int n = q_read(s->rx, buf, len, 50, 0);
-        if (n > 0) return n;
+        if (n > 0) {
+            size_t have = atomic_load(&s->hello_len);
+            if (have < sizeof(s->hello)) {
+                size_t take = (size_t)n < sizeof(s->hello) - have ? (size_t)n : sizeof(s->hello) - have;
+                memcpy(s->hello + have, buf, take);
+                atomic_store(&s->hello_len, have + take);
+            }
+            return n;
+        }
         if (n < 0) return MBEDTLS_ERR_NET_CONN_RESET;
     }
 }
@@ -406,6 +428,7 @@ static void server_start(server_t *s, link_t *l, int mode)
     atomic_init(&s->finished, false);
     atomic_init(&s->hs_rc, 1);
     atomic_init(&s->rx_bytes, 0);
+    atomic_init(&s->hello_len, 0);
 }
 
 static void server_run(server_t *s) { CHECK(pthread_create(&s->th, NULL, server_main, s) == 0); }
@@ -487,7 +510,43 @@ static const cable_xport_t *wrap(link_t *l, const uint8_t *key)
     return t;
 }
 
+// ── ClientHello inspection ─────────────────────────────────────────────────────────────────────────
+
+// 1 if the ClientHello in `h` carries extension `type`, 0 if it parses and does not, -1 if it does not parse
+static int hello_has_ext(const uint8_t *h, size_t n, uint16_t type)
+{
+    size_t p = 0;
+#define NEED(k) do { if (p + (k) > n) return -1; } while (0)
+    NEED(9);
+    if (h[0] != 22 || h[5] != 1) return -1;
+    p = 9 + 2 + 32;                       // record header, handshake header, version, random
+    NEED(1); p += 1 + h[p];               // session id
+    NEED(2); p += 2 + ((h[p] << 8) | h[p + 1]);   // cipher suites
+    NEED(1); p += 1 + h[p];               // compression
+    NEED(2);
+    size_t end = p + 2 + ((h[p] << 8) | h[p + 1]);
+    p += 2;
+    if (end > n) return -1;
+    while (p + 4 <= end) {
+        uint16_t t = (uint16_t)((h[p] << 8) | h[p + 1]);
+        size_t len = (size_t)((h[p + 2] << 8) | h[p + 3]);
+        if (t == type) return 1;
+        p += 4 + len;
+    }
+    return 0;
+#undef NEED
+}
+
+static void check_hello(server_t *s)
+{
+    size_t n = atomic_load(&s->hello_len);
+    CHECK(hello_has_ext(s->hello, n, 0x000a) == 1);   // supported_groups: the parser really sees the extensions
+    CHECK(hello_has_ext(s->hello, n, 0x0023) == 0);   // session_ticket: not offered
+}
+
 // ── tests ──────────────────────────────────────────────────────────────────────────────────────────
+
+void (*host_tls_delay_hook)(void);
 
 static void test_wrap_arguments(void)
 {
@@ -545,6 +604,7 @@ static void run_echo(const char *name, int max_read, int max_write, uint32_t fra
     CHECK(d.corrupt_frames == 0 && d.discarded_bytes == 0);
     CHECK(strcmp(s.version, "TLSv1.2") == 0);
     CHECK(strcmp(s.suite, "TLS-ECDHE-PSK-WITH-AES-128-CBC-SHA256") == 0);   // 0xC037 first
+    check_hello(&s);
     CHECK(atomic_load(&s.hs_rc) == 0);
 
     t->close(t);
@@ -1008,6 +1068,119 @@ static void test_reopen(void)
     puts("ok close and open again, three sessions on one wrapper");
 }
 
+static void test_usb_refused(void)
+{
+    link_t *l = calloc(1, sizeof(*l));
+    link_init(l, CABLE_XPORT_USB);   // USB stays plain by design
+    const cable_xport_t *t = wrap(l, KEY_A);
+    log_clear();
+    CHECK(!t->open(t));
+    CHECK(atomic_load(&l->client.open_calls) == 0);   // the inner transport was never touched
+    CHECK(!t->is_up(t));
+    pthread_mutex_lock(&log_m);
+    CHECK(strstr(log_buf, "refused") != NULL);
+    pthread_mutex_unlock(&log_m);
+    cable_xport_tls_free(t);
+    free(l);
+    puts("ok a USB inner transport is refused without being opened");
+}
+
+static void test_open_without_close(void)
+{
+    link_t *l = calloc(1, sizeof(*l));
+    link_init(l, CABLE_XPORT_WIFI);
+    server_t s;
+    server_start(&s, l, SRV_ECHO);
+    server_run(&s);
+    const cable_xport_t *t = wrap(l, KEY_A);
+    CHECK(t->open(t));
+    CHECK(atomic_load(&l->client.close_calls) == 0);
+    atomic_store(&client_frees, 0);
+    // open() again with no close(): the old TLS state is freed (the leak check of the run would flag it) and the inner
+    // transport is closed first; here the peer is gone with it, so the new handshake fails cleanly.
+    CHECK(!t->open(t));
+    CHECK(atomic_load(&l->client.open_calls) == 2);
+    CHECK(atomic_load(&l->client.close_calls) >= 1);
+    CHECK(atomic_load(&client_frees) >= 2);   // the first session's ssl_context, then the failed second one
+    CHECK(!t->is_up(t));
+    server_join(&s);
+    cable_xport_tls_free(t);
+    free(l);
+    puts("ok open() twice without close() frees the first session");
+}
+
+// A write that outlives its session: parked inside its retry window, while the link is closed, opened again and a second writer
+// is mid-record in the new session. The old writer must leave the new writer's write_pending flag alone.
+static sem_t gate_hit, gate_go;
+static _Thread_local int t_park;
+
+static void park_hook(void)
+{
+    if (t_park) {
+        t_park = 0;
+        sem_post(&gate_hit);
+        sem_wait(&gate_go);
+    }
+}
+
+static void *parking_writer(void *p)
+{
+    t_park = 1;
+    return stalled_writer(p);
+}
+
+static void test_stale_writer_keeps_new_session_flag(void)
+{
+    sem_init(&gate_hit, 0, 0);
+    sem_init(&gate_go, 0, 0);
+    link_t *l = calloc(1, sizeof(*l));
+    link_init(l, CABLE_XPORT_WIFI);
+    server_t s1;
+    server_start(&s1, l, SRV_SINK);
+    server_run(&s1);
+    const cable_xport_t *t = wrap(l, KEY_A);
+    CHECK(t->open(t));
+    atomic_store(&l->client.stall_all, true);
+    host_tls_delay_hook = park_hook;
+
+    duo_t a = { .t = t, .rc = 12345 };
+    pthread_t ta, tb;
+    CHECK(pthread_create(&ta, NULL, parking_writer, &a) == 0);
+    sem_wait(&gate_hit);   // A has a record in flight, the mutex is free, A is parked
+
+    t->close(t);           // session 1 ends under it
+    server_join(&s1);
+    link_reset(l);
+    server_t s2;
+    server_start(&s2, l, SRV_SINK);
+    server_run(&s2);
+    CHECK(t->open(t));     // session 2
+    atomic_store(&l->client.stall_all, true);
+    duo_t b = { .t = t, .rc = 12345 };
+    CHECK(pthread_create(&tb, NULL, stalled_writer, &b) == 0);
+    usleep(100000);        // B is mid-record in session 2
+
+    sem_post(&gate_go);    // A wakes up in a session that is over
+    pthread_join(ta, NULL);
+    CHECK(a.rc < 0);
+
+    uint8_t one[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    int64_t t0 = ms_now();
+    int w = t->write(t, one, sizeof(one), 100);
+    int64_t ms = ms_now() - t0;
+    CHECK(w == 0);         // B's record is still in flight: refused, not mixed into it
+    CHECK(ms < 500);
+    atomic_store(&l->client.stall_all, false);
+    pthread_join(tb, NULL);
+    CHECK(b.rc > 0);       // B finished its own frame
+    host_tls_delay_hook = NULL;   // cleared only when no writer can be reading it
+    t->close(t);
+    server_join(&s2);
+    cable_xport_tls_free(t);
+    free(l);
+    printf("ok a stale writer leaves the new session's write_pending alone (third write returned 0 in %lld ms)\n", (long long)ms);
+}
+
 static void test_poll_and_idle(void)
 {
     link_t *l = calloc(1, sizeof(*l));
@@ -1171,6 +1344,9 @@ int main(int argc, char **argv)
     test_reads_continue_during_write_stall();
     test_peer_close();
     test_reopen();
+    test_usb_refused();
+    test_open_without_close();
+    test_stale_writer_keeps_new_session_flag();
     test_poll_and_idle();
     test_handshake_deadline();
     test_no_key_in_logs();

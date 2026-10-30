@@ -45,6 +45,7 @@
 #define MBEDTLS_DHM_C
 #define MBEDTLS_GCM_C
 #define MBEDTLS_SHA1_C
+#define MBEDTLS_SSL_SESSION_TICKETS   // compiled in here so the test can see the wrapper switch the client ticket extension off
 #endif
 #define MBEDTLS_SSL_ENCRYPT_THEN_MAC
 #define MBEDTLS_SSL_EXTENDED_MASTER_SECRET

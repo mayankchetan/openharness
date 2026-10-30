@@ -135,9 +135,18 @@ static bool tls_handshake(tls_t *t)
 static bool tls_open(const cable_xport_t *x)
 {
     tls_t *t = x->ctx;
+    // USB stays plain by design, and the RNG precondition (cable_xport_tls.h) is about the radios: refuse before touching anything.
+    if (t->inner->kind == CABLE_XPORT_USB) {
+        ESP_LOGW(TAG, "refused: the USB transport is not wrapped in TLS");
+        return false;
+    }
     xSemaphoreTake(t->lock, portMAX_DELAY);
     bool ok = false;
     atomic_store(&t->up, false);
+    if (t->ssl_ready) {   // open() again without close(): free the old session and close the inner transport first
+        release_session(t);
+        close_inner(t);
+    }
     t->inner_closed = false;
     t->write_pending = false;
     t->session++;
@@ -247,6 +256,8 @@ static int tls_read(const cable_xport_t *x, uint8_t *buf, size_t cap, int wait_m
                 return read_dead(wait_ms);
             }
             xSemaphoreGive(t->lock);
+        } else if (now_us() < end) {
+            vTaskDelay(1);   // the mutex was busy and time remains: do not spin
         }
         if (now_us() >= end) return 0;
         // A writer is queued for the mutex: let it have it before this reader takes it again.
@@ -299,7 +310,7 @@ static int tls_write(const cable_xport_t *x, const uint8_t *buf, size_t len, int
             xSemaphoreTake(t->lock, portMAX_DELAY);
             atomic_fetch_sub(&t->writers_waiting, 1);
             if (!atomic_load(&t->up) || !t->ssl_ready || t->session != session) {   // the link ended while the mutex was free
-                t->write_pending = false;
+                if (t->session == session) t->write_pending = false;   // in a newer session the flag belongs to its writer
                 xSemaphoreGive(t->lock);
                 return -1;
             }
@@ -346,6 +357,11 @@ const cable_xport_t *cable_xport_tls_wrap(const cable_xport_t *inner, const char
         // TLS 1.2 only: both ends of the range are pinned, whatever the build enables.
         mbedtls_ssl_conf_min_tls_version(&t->conf, MBEDTLS_SSL_VERSION_TLS1_2);
         mbedtls_ssl_conf_max_tls_version(&t->conf, MBEDTLS_SSL_VERSION_TLS1_2);
+#if defined(MBEDTLS_SSL_SESSION_TICKETS)
+        // No session tickets: a resumed session would skip the PSK exchange. The product build has them compiled out
+        // (CONFIG_MBEDTLS_CLIENT_SSL_SESSION_TICKETS=n); this keeps any build that has them from offering one.
+        mbedtls_ssl_conf_session_tickets(&t->conf, MBEDTLS_SSL_SESSION_TICKETS_DISABLED);
+#endif
         mbedtls_ssl_conf_ciphersuites(&t->conf, s_suites);
         // mbedTLS copies the key and the identity.
         r = mbedtls_ssl_conf_psk(&t->conf, psk, psk_len, (const unsigned char *)identity, strlen(identity));
