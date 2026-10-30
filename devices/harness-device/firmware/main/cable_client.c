@@ -1422,6 +1422,33 @@ static void handle_pet_map(const cJSON *p)
 // else, and are never logged, replied or kept: the reply carries booleans, the SSID, the address and the mode; a refusal names the
 // FIELD (err:"pass"), never a value; the strings of the request are overwritten once used. Every ESP_LOG line of this firmware is
 // framed into the daemon's dial log, so a logged password would sit in a file: lengths only (config_store.c logs them).
+//
+// WHO WRITES NVS. Not this task. The cable_link reader's stack is in PSRAM (task_util.h) and must not run a flash write, the same
+// rule power_off_request follows. The reader parses and VALIDATES a request (config_net_check*, no NVS access), copies it into the one
+// static slot below, overwrites its own copies, and starts `net_store` (internal stack). That task writes, sends the net.state reply,
+// overwrites the slot and ends. One request at a time: a write that arrives while another runs is answered err:"busy" and changes
+// nothing. net.get only reads NVS, which the reader may do (config_load_voicelang does).
+typedef struct {
+    long    id;
+    char    op;                        // 's'et, 'c'lear, 'm'ode, 'k'ey, 'h'ost
+    char    ssid[CFG_NET_SSID_MAX + 1];
+    char    pass[CFG_NET_PASS_MAX + 1];
+    char    host[CFG_NET_HOST_MAX + 1];
+    long    port;
+    long    mode;
+    uint8_t key[CFG_NET_KEY_LEN];
+} net_request_t;
+static EXT_RAM_BSS_ATTR net_request_t s_net_req;   // PSRAM: read by net_store, never by DMA or an ISR
+static atomic_bool                    s_net_busy;
+
+#define NET_STORE_STACK 4096   // internal; the NVS writers of power_off.c run in the same size. The high-water mark is logged once per run.
+
+static void net_zero(void *p, size_t n)
+{
+    volatile uint8_t *v = (volatile uint8_t *)p;
+    while (n--) *v++ = 0;
+}
+
 static void net_scrub(char *s)
 {
     volatile char *v = (volatile char *)s;
@@ -1445,10 +1472,9 @@ static long net_whole(const cJSON *p, const char *key)
 }
 
 /** The answer to any net.*: the request's id, whether it worked, and (unless `state` is false) what the dial holds. No password and no key, ever. */
-static void net_reply(const cJSON *p, bool ok, const char *err, bool state)
+static void net_reply(long id, bool ok, const char *err, bool state)
 {
     cJSON *root = msg("net.state");
-    const long id = net_whole(p, "id");
     if (id > 0 && id <= 65535) msg_number(&root, "id", (double)id);
     msg_bool(&root, "ok", ok);
     if (err) msg_string(&root, "err", err);
@@ -1465,39 +1491,86 @@ static void net_reply(const cJSON *p, bool ok, const char *err, bool state)
     send_json(root);
 }
 
+/** The task that writes: one request from the slot, then the reply, then the slot is overwritten and the task ends. */
+static void net_store_task(void *arg)
+{
+    (void)arg;
+    const net_request_t *r = &s_net_req;
+    const long id = r->id;
+    config_net_err_t err = CFG_NET_OK;
+    switch (r->op) {
+    case 's': err = config_net_set(r->ssid, r->pass, r->host, r->port, r->key, r->mode); break;
+    case 'c': err = config_net_clear(); break;
+    case 'm': err = config_net_set_mode(r->mode); break;
+    case 'k': err = config_net_set_key(r->key); break;
+    default:  err = config_net_set_host(r->host, r->port); break;
+    }
+    net_zero(&s_net_req, sizeof s_net_req);
+    net_reply(id, err == CFG_NET_OK, err == CFG_NET_OK ? NULL : config_net_err_name(err), true);
+    ESP_LOGI(TAG, "net_store: stack high-water %u B free of %d", (unsigned)uxTaskGetStackHighWaterMark(NULL), NET_STORE_STACK);
+    atomic_store(&s_net_busy, false);
+    vTaskDelete(NULL);
+}
+
 static void handle_net(const char *t, const cJSON *p)
 {
+    const long id = net_whole(p, "id");
     // The cable is the authorisation. Over any other link the dial answers nothing it was asked, and says why.
-    if (cable_link_transport() != CABLE_XPORT_USB) { net_reply(p, false, "transport", false); return; }
-    if (!cable_client_supports(CABLE_FEATURE_NET)) { net_reply(p, false, "feature", false); return; }
+    if (cable_link_transport() != CABLE_XPORT_USB) { net_reply(id, false, "transport", false); return; }
+    if (!cable_client_supports(CABLE_FEATURE_NET)) { net_reply(id, false, "feature", false); return; }
     const char *op = t + 4;   // "net." was matched by the caller
+    if (!strcmp(op, "get")) { net_reply(id, true, NULL, true); return; }
+    // Everything below only checks; nothing here touches NVS for writing.
+    char kind = 0;
     config_net_err_t err = CFG_NET_OK;
-    uint8_t key[CFG_NET_KEY_LEN];
-    bool known = true;
-    if (!strcmp(op, "get")) {
-        // nothing to do: the reply is the state
-    } else if (!strcmp(op, "set")) {
+    uint8_t key[CFG_NET_KEY_LEN] = {0};
+    const char *ssid = net_text(p, "ssid"), *pass = net_text(p, "pass"), *host = net_text(p, "host");
+    const long port = net_whole(p, "port"), mode = net_whole(p, "mode");
+    if (!strcmp(op, "set")) {
+        kind = 's';
         const bool key_ok = config_net_key_decode(net_text(p, "key"), key);
-        err = config_net_set(net_text(p, "ssid"), net_text(p, "pass"), net_text(p, "host"), net_whole(p, "port"), key_ok ? key : NULL, net_whole(p, "mode"));
+        err = config_net_check(ssid, pass, host, port, key_ok ? key : NULL, mode);
     } else if (!strcmp(op, "clear")) {
-        err = config_net_clear();
+        kind = 'c';
     } else if (!strcmp(op, "mode")) {
-        err = config_net_set_mode(net_whole(p, "mode"));
+        kind = 'm';
+        err = config_net_check_mode(mode);
     } else if (!strcmp(op, "key")) {
-        const bool key_ok = config_net_key_decode(net_text(p, "key"), key);
-        err = config_net_set_key(key_ok ? key : NULL);
+        kind = 'k';
+        err = config_net_key_decode(net_text(p, "key"), key) ? CFG_NET_OK : CFG_NET_E_KEY;
     } else if (!strcmp(op, "host")) {
-        err = config_net_set_host(net_text(p, "host"), net_whole(p, "port"));
+        kind = 'h';
+        err = config_net_check_host(host, port);
     } else {
-        known = false;
         s_unknown++;
     }
-    // Once used, the secrets of the request are overwritten where they sit in the parsed message.
-    net_scrub((char *)net_text(p, "pass"));
+    const char *refusal = !kind ? "op" : err != CFG_NET_OK ? config_net_err_name(err) : NULL;
+    // One request at a time: a second write is turned away, and changes nothing.
+    if (!refusal && atomic_exchange(&s_net_busy, true)) refusal = "busy";
+    if (!refusal) {
+        net_zero(&s_net_req, sizeof s_net_req);
+        s_net_req.id = id;
+        s_net_req.op = kind;
+        s_net_req.port = port;
+        s_net_req.mode = mode;
+        memcpy(s_net_req.key, key, sizeof key);
+        if (ssid && kind == 's') memcpy(s_net_req.ssid, ssid, strlen(ssid) + 1);
+        if (pass && kind == 's') memcpy(s_net_req.pass, pass, strlen(pass) + 1);
+        if (host && (kind == 's' || kind == 'h')) memcpy(s_net_req.host, host, strlen(host) + 1);
+    }
+    // Once copied or refused, the secrets of the request are overwritten where they sit in the parsed message and on this stack.
+    net_scrub((char *)pass);
     net_scrub((char *)net_text(p, "key"));
-    memset(key, 0, sizeof key);
-    if (!known) { net_reply(p, false, "op", true); return; }
-    net_reply(p, err == CFG_NET_OK, err == CFG_NET_OK ? NULL : config_net_err_name(err), true);
+    net_zero(key, sizeof key);
+    if (!refusal) {
+        // Internal stack (xTaskCreate, not task_create_psram): this task writes NVS.
+        if (xTaskCreate(net_store_task, "net_store", NET_STORE_STACK, NULL, 4, NULL) != pdPASS) {
+            net_zero(&s_net_req, sizeof s_net_req);
+            atomic_store(&s_net_busy, false);
+            refusal = "storage";
+        } else return;   // net_store sends the reply
+    }
+    net_reply(id, false, refusal, strcmp(refusal, "busy") != 0);
 }
 
 static void handle_message(const cJSON *root)

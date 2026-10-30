@@ -371,7 +371,7 @@ void config_net_info(config_net_info_t *out)
 /** A key that is not there is not an error to erase. */
 static bool erased(esp_err_t err) { return err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND; }
 
-static config_net_err_t net_check(const char *ssid, const char *pass, const char *host, long port, const uint8_t *key, long mode)
+config_net_err_t config_net_check(const char *ssid, const char *pass, const char *host, long port, const uint8_t *key, long mode)
 {
     if (!text_ok(ssid, 1, CFG_NET_SSID_MAX)) return CFG_NET_E_SSID;
     if (!pass || (pass[0] != 0 && !text_ok(pass, 8, CFG_NET_PASS_MAX))) return CFG_NET_E_PASS;
@@ -382,9 +382,13 @@ static config_net_err_t net_check(const char *ssid, const char *pass, const char
     return CFG_NET_OK;
 }
 
+config_net_err_t config_net_check_host(const char *host, long port) { return host_port_check(host, port); }
+
+config_net_err_t config_net_check_mode(long mode) { return (mode == 0 || mode == 1) ? CFG_NET_OK : CFG_NET_E_MODE; }
+
 config_net_err_t config_net_set(const char *ssid, const char *pass, const char *host, long port, const uint8_t *key, long mode)
 {
-    const config_net_err_t err = net_check(ssid, pass, host, port, key, mode);
+    const config_net_err_t err = config_net_check(ssid, pass, host, port, key, mode);
     ESP_LOGI(TAG, "net set: ssid_len=%u pass_len=%u host_len=%u -> %s",
              (unsigned)bounded_len(ssid, 64), (unsigned)bounded_len(pass, 128), (unsigned)bounded_len(host, 32), config_net_err_name(err));
     if (err != CFG_NET_OK) return err;

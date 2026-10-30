@@ -54,9 +54,9 @@ static const char *TAG = "cable";
 // board's own earlier firmware overflowed an 8 KiB stack and shipped devices that could not update themselves.
 //
 // With the OTA path compiled out (DEVICE_NO_OTA, the product default) the reader's stack is in PSRAM (TASK_STACK_PSRAM_READER,
-// task_util.h): the flash calls it reaches are NVS reads, and the writes of the Wi-Fi settings (net.set and its kin, cable_client.c
-// handle_net): ordinary NVS writes, the class that passed the XiP probe from a PSRAM stack for habitat_actions (task_util.h). With
-// OTA built in it must stay internal, because esp_ota_begin asserts on a PSRAM stack.
+// task_util.h): the only flash call it reaches is an NVS read. The writes of the Wi-Fi settings (net.set and its kin) are NOT made
+// here: handle_net hands them to the short-lived net_store task, which has an internal stack (cable_client.c). With OTA built in
+// the reader must stay internal, because esp_ota_begin asserts on a PSRAM stack.
 #define READER_STACK 6144
 
 // One log line's worth of formatted text. Anything longer is truncated rather than split: a log line is

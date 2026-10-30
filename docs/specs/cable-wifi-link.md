@@ -212,7 +212,7 @@ The one answer, dial to daemon:
 - `ok` is whether the dial did it. `saved` is whether it holds a whole configuration (its commit marker is set); when it does,
   `ssid`, `host`, `port` and `mode` say what it holds. None of them is a secret. The password and the key are never in an answer.
 - `err` names the first bad FIELD, in the order `ssid`, `pass`, `host`, `port`, `key`, `mode`, or a reason: `not_provisioned`,
-  `storage` (NVS would not take a write), `op` (a `net.` message this firmware does not have), `transport`, `feature`. Never a value.
+  `storage` (NVS would not take a write, or the writing task could not start), `busy` (another write is still running; nothing changed), `op` (a `net.` message this firmware does not have), `transport`, `feature`. Never a value.
   A `transport` or `feature` refusal carries no state at all.
 
 Validation, the same on the dial (`config_net_set`) and in the daemon (`cli/src/lib/dialNetRules.ts`): SSID 1 to 32 bytes and a
@@ -225,6 +225,10 @@ when the USB cable is unplugged, 0 = USB only), and `wl_ver = 1`, the commit mar
 - A set removes `wl_ver` first, writes the other keys, and writes `wl_ver` last. A clear removes `wl_ver` first. A dial with no
   `wl_ver`, a marker of another version, or any key missing or invalid treats Wi-Fi as unprovisioned.
 - `config_clear_all` (factory reset) takes every key of the namespace, these included.
+
+Who writes. The cable reader task has its stack in PSRAM and does not write flash. It parses and checks a write (`set`, `clear`, `mode`, `key`,
+`host`), copies it into one static slot, and starts the `net_store` task (internal stack, 4,096 B), which writes NVS, sends the `net.state`
+reply, overwrites the slot and ends. One write at a time: a second one is answered `busy`. `get` only reads and is answered at once.
 
 Logging. The firmware logs lengths only (`ssid_len`, `pass_len`, `host_len`), because every ESP_LOG line is framed into the
 daemon's dial log. The daemon logs the op, the id and the outcome of a request, nothing of its fields. The daemon's local route

@@ -35,10 +35,10 @@ BaseType_t task_create_psram(TaskFunction_t fn, const char *name, uint32_t stack
 #define TASK_STACK_PSRAM_FLASH_OPS 1
 #endif
 // The cable_link reader (6,144 B). Its only flash user was the OTA path, so once that is compiled out (DEVICE_NO_OTA, plan
-// C17) it is a task like the three above: it reads the USB port and parses frames; the NVS calls it reaches are a read
-// (config_load_voicelang via ui_settings_read) and, since W10, the writes of the Wi-Fi settings (handle_net: a few set+commit
-// calls, as habitat_actions makes; to be confirmed on the bench with the reader's stack high-water mark). Never on with OTA:
-// cable_link.c turns that into a compile error.
+// C17) it is a task like the three above: it reads the USB port and parses frames; the one NVS call it reaches is a read
+// (config_load_voicelang via ui_settings_read). The Wi-Fi settings' writes (net.set and its kin) are handed to the net_store task
+// with an internal stack (cable_client.c handle_net), as power_off_request does. Never on with OTA: cable_link.c turns that into a
+// compile error.
 #ifndef TASK_STACK_PSRAM_READER
 #ifdef DEVICE_NO_OTA
 #define TASK_STACK_PSRAM_READER 1

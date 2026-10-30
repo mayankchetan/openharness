@@ -30,10 +30,37 @@ handle_net = function('handle_net')
 net_reply = function('net_reply')
 net_block = CLIENT[CLIENT.index("THE DIAL'S WI-FI SETTINGS"):CLIENT.index('static void handle_message(')]
 
+net_store = function('net_store_task')
+
 # 1. Off the cable, nothing is touched: the transport check is the first thing handle_net does, before any config_net_ call.
 assert 'cable_link_transport() != CABLE_XPORT_USB' in handle_net
 assert handle_net.index('cable_link_transport() != CABLE_XPORT_USB') < handle_net.index('config_net_')
 assert handle_net.index('cable_client_supports(CABLE_FEATURE_NET)') < handle_net.index('config_net_')
+
+# 1b. THE READER WRITES NO NVS. The cable_link reader's stack is in PSRAM and must not run a flash write (power_off_request follows the
+# same rule). handle_net only reads and checks: it calls no nvs_ function and no config_net_ writer, and hands every write to the
+# net_store task, which has an internal stack (xTaskCreate, not task_create_psram).
+assert not re.search(r'\bnvs_\w+', net_block)
+allowed_in_handle_net = {'config_net_key_decode', 'config_net_check', 'config_net_check_host', 'config_net_check_mode', 'config_net_err_name', 'config_net_err_t'}
+assert set(re.findall(r'\bconfig_net_\w+', handle_net)) <= allowed_in_handle_net, set(re.findall(r'\bconfig_net_\w+', handle_net))
+writers = {'config_net_set', 'config_net_set_key', 'config_net_set_host', 'config_net_set_mode', 'config_net_clear'}
+for name in writers:
+    assert not re.search(r'\b' + name + r'\(', handle_net), name
+    assert re.search(r'\b' + name + r'\(', net_store), name
+# the writers are called from net_store_task and from nowhere else in cable_client.c
+for name in writers:
+    assert len(re.findall(r'\b' + name + r'\(', CLIENT)) == 1, name
+assert re.search(r'xTaskCreate\(net_store_task, "net_store", NET_STORE_STACK, NULL, \d, NULL\) != pdPASS', handle_net)
+net_code = re.sub(r'//[^\n]*', '', net_block)
+assert 'task_create_psram' not in net_code and 'WithCaps' not in net_code
+assert re.search(r'#define NET_STORE_STACK 4096\b', net_block)
+# one request at a time, claimed before the slot is touched; released only by the task (or the failed start)
+assert handle_net.index('atomic_exchange(&s_net_busy, true)') < handle_net.index('s_net_req.id = id')
+assert net_store.rindex('atomic_store(&s_net_busy, false)') > net_store.index('net_reply(')
+# the slot is overwritten before the reply goes out and the task ends itself
+assert net_store.index('net_zero(&s_net_req') < net_store.index('net_reply(') < net_store.index('vTaskDelete(NULL)')
+# the stack high-water mark is logged once per run
+assert net_store.count('uxTaskGetStackHighWaterMark(NULL)') == 1
 
 # 2. handle_net is reached from one place, handle_message, which only ever sees a frame that passed the JSON guard.
 assert len(re.findall(r'\bhandle_net\(', CLIENT)) == 2   # the definition and the one call
@@ -53,7 +80,8 @@ def log_calls(text):
 
 
 wifi_store = STORE[STORE.index('--- Wi-Fi settings'):STORE.index('bool config_clear_all(void)')]
-assert not log_calls(net_block), 'handle_net logs nothing itself; config_store.c logs lengths'
+net_logs = log_calls(net_block)
+assert len(net_logs) == 1 and 'stack high-water' in net_logs[0] and '%s' not in net_logs[0], 'only net_store logs, once, a number'
 logs = log_calls(wifi_store)
 assert len(logs) >= 5
 for call in logs:
@@ -67,8 +95,9 @@ for call in logs:
     assert fmt.count('%s') == fixed_words, call
 
 # 5. The strings of the request are overwritten once used.
-assert 'net_scrub((char *)net_text(p, "pass"))' in handle_net
+assert 'net_scrub((char *)pass)' in handle_net
 assert 'net_scrub((char *)net_text(p, "key"))' in handle_net
+assert 'net_zero(key, sizeof key)' in handle_net   # the reader's own copy of the key
 
 # 6. The hello offers net on the cable only.
 assert re.search(r'if \(cable_link_transport\(\) == CABLE_XPORT_USB\) msg_string\(&root, "net", "v1"\);', CLIENT)
@@ -122,9 +151,48 @@ extern void host_nvs_fail_after(int mutations);
 extern int host_nvs_count(void);
 extern int host_nvs_has(const char *key);
 extern const void *host_nvs_raw(const char *key);
+extern int host_nvs_mutations(void);
+
+#define EXT_RAM_BSS_ATTR
+#define pdPASS ((BaseType_t)1)
+#define ESP_LOGI(tag, ...) host_log_info(tag, __VA_ARGS__)
+typedef int BaseType_t;
+typedef void *TaskHandle_t;
+typedef void (*TaskFunction_t)(void *);
+static const char *TAG = "cable_client";
+// FreeRTOS, reduced to what net_store needs: a task runs inline when it is created (the default), or is held until the test runs it.
+static unsigned tasks_created, task_stack, task_prio;
+static char task_name[16];
+static bool defer_tasks, fail_create, task_ended;
+static TaskFunction_t pending_fn;
+static BaseType_t xTaskCreate(TaskFunction_t fn, const char *name, unsigned stack, void *arg, unsigned prio, TaskHandle_t *handle)
+{
+    (void)arg; (void)handle;
+    if (fail_create) return 0;
+    tasks_created++;
+    snprintf(task_name, sizeof task_name, "%s", name);
+    task_stack = stack;
+    task_prio = prio;
+    if (defer_tasks) { assert(!pending_fn); pending_fn = fn; return pdPASS; }
+    fn(NULL);
+    return pdPASS;
+}
+static void vTaskDelete(void *handle) { assert(!handle); task_ended = true; }
+static unsigned uxTaskGetStackHighWaterMark(void *handle) { assert(!handle); return 1234; }
+static void run_pending_task(void)
+{
+    assert(pending_fn);
+    TaskFunction_t fn = pending_fn;
+    pending_fn = NULL;
+    fn(NULL);
+}
 '''
+code += re.search(r'#define NET_STORE_STACK[^\n]*\n', CLIENT)[0]
+code += re.search(r'typedef struct \{[^}]*\} net_request_t;\n', CLIENT)[0]
+code += re.search(r'static EXT_RAM_BSS_ATTR net_request_t s_net_req;[^\n]*\n', CLIENT)[0]
+code += re.search(r'static atomic_bool\s+s_net_busy;\n', CLIENT)[0]
 for name in ['cable_client_supports', 'send_json', 'msg', 'msg_check', 'msg_string', 'msg_number', 'msg_bool',
-             'net_scrub', 'net_text', 'net_whole', 'net_reply', 'handle_net']:
+             'net_zero', 'net_scrub', 'net_text', 'net_whole', 'net_reply', 'net_store_task', 'handle_net']:
     code += function(name)
 code += r'''
 #define SSID "home-net"
@@ -167,6 +235,11 @@ static void fresh(void)
     atomic_store(&s_features, CABLE_FEATURE_NET);
     s_transport = CABLE_XPORT_USB;
     s_log[0] = 0;
+    defer_tasks = fail_create = task_ended = false;
+    pending_fn = NULL;
+    tasks_created = 0;
+    memset(&s_net_req, 0, sizeof s_net_req);
+    atomic_store(&s_net_busy, false);
 }
 static int wl_held(void)
 {
@@ -339,6 +412,120 @@ static void test_a_failing_store(void)
     refused("{\"t\":\"net.clear\"}", "storage");
 }
 
+static bool slot_is_clear(void)
+{
+    static const net_request_t zero;
+    return !memcmp(&s_net_req, &zero, sizeof zero);
+}
+/** Hand a message to the handler without expecting a reply yet (the write is queued as a task). */
+static void fire(const char *json)
+{
+    cJSON *root = cJSON_Parse(json);
+    assert(root);
+    handle_net(cJSON_GetObjectItemCaseSensitive(root, "t")->valuestring, root);
+    cJSON_Delete(root);
+}
+
+static void test_writes_run_in_the_store_task(void)
+{
+    fresh();
+    defer_tasks = true;
+    sends = 0;
+    fire(SET);
+    // The reader did the checking and the copying, and no more: nothing is written, nothing is answered, one task is waiting.
+    assert(tasks_created == 1 && pending_fn && sends == 0);
+    assert(!strcmp(task_name, "net_store") && task_stack == 4096);
+    assert(host_nvs_mutations() == 0 && host_nvs_count() == 0);
+    assert(!slot_is_clear() && !strcmp(s_net_req.pass, PASS) && s_net_req.op == 's' && s_net_req.id == 7);
+    // A second write is turned away while the first waits: busy, and changes nothing. Its reply has no state.
+    sends = 0;
+    fire("{\"t\":\"net.clear\",\"id\":8}");
+    assert(sends == 1 && tasks_created == 1);
+    cJSON *r = cJSON_Parse(wire);
+    assert(!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "ok")) && !strcmp(err_of(r), "busy") && cJSON_GetObjectItemCaseSensitive(r, "id")->valueint == 8);
+    assert(!saved_of(r) && !cJSON_GetObjectItemCaseSensitive(r, "ssid"));
+    cJSON_Delete(r);
+    const char *more[] = {SET, "{\"t\":\"net.mode\",\"mode\":0}", "{\"t\":\"net.key\",\"key\":\"" KEY2_B64 "\"}", "{\"t\":\"net.host\",\"host\":\"10.0.0.2\",\"port\":19000}"};
+    for (unsigned i = 0; i < sizeof more / sizeof more[0]; i++) {
+        sends = 0;
+        fire(more[i]);
+        assert(sends == 1 && tasks_created == 1);
+        r = cJSON_Parse(wire);
+        assert(!strcmp(err_of(r), "busy"));
+        cJSON_Delete(r);
+    }
+    // the first request's slot is untouched by all that, and so is NVS
+    assert(!strcmp(s_net_req.pass, PASS) && s_net_req.op == 's' && host_nvs_count() == 0);
+    // net.get is a read and is still answered; a refusal of a bad request too
+    sends = 0;
+    fire("{\"t\":\"net.get\",\"id\":9}");
+    assert(sends == 1 && tasks_created == 1);
+    // the task runs: it writes, answers, clears the slot, ends, and frees the way for the next
+    sends = 0;
+    run_pending_task();
+    assert(sends == 1 && task_ended);
+    r = cJSON_Parse(wire);
+    assert(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "ok")) && saved_of(r) && cJSON_GetObjectItemCaseSensitive(r, "id")->valueint == 7);
+    cJSON_Delete(r);
+    assert(slot_is_clear() && wl_held() == 7);
+    assert(strstr(s_log, "net_store: stack high-water 1234 B free of 4096"));
+    config_net_t n;
+    assert(config_net_load(&n) && !strcmp(n.pass, PASS));
+    sends = 0;
+    fire("{\"t\":\"net.mode\",\"mode\":0}");
+    assert(tasks_created == 2 && sends == 0);
+    run_pending_task();
+    assert(sends == 1 && config_net_load(&n) && n.mode == 0 && slot_is_clear());
+}
+
+static void test_every_write_is_a_task_and_nothing_else_is(void)
+{
+    fresh();
+    assert(ok_of(ask(SET)) && tasks_created == 1);
+    unsigned before = tasks_created;
+    const char *writes[] = {
+        "{\"t\":\"net.mode\",\"mode\":1}", "{\"t\":\"net.key\",\"key\":\"" KEY2_B64 "\"}",
+        "{\"t\":\"net.host\",\"host\":\"10.0.0.2\",\"port\":19000}", SET, "{\"t\":\"net.clear\"}",
+    };
+    for (unsigned i = 0; i < sizeof writes / sizeof writes[0]; i++) {
+        assert(ok_of(ask(writes[i])));
+        assert(tasks_created == before + i + 1);
+        assert(slot_is_clear() && !atomic_load(&s_net_busy));
+    }
+    // reads, refusals and unknown ops start no task
+    before = tasks_created;
+    ask("{\"t\":\"net.get\"}");
+    refused("{\"t\":\"net.mode\",\"mode\":5}", "mode");
+    refused("{\"t\":\"net.key\",\"key\":\"nope\"}", "key");
+    refused("{\"t\":\"net.host\",\"host\":\"x\",\"port\":19000}", "host");
+    refused("{\"t\":\"net.set\",\"ssid\":\"\"}", "ssid");
+    refused("{\"t\":\"net.zzz\"}", "op");
+    s_transport = CABLE_XPORT_WIFI;
+    refused(SET, "transport");
+    s_transport = CABLE_XPORT_USB;
+    atomic_store(&s_features, 0);
+    refused(SET, "feature");
+    atomic_store(&s_features, CABLE_FEATURE_NET);
+    assert(tasks_created == before && slot_is_clear() && !atomic_load(&s_net_busy));
+    // a refusal leaves the line free: the next good request goes through
+    assert(ok_of(ask(SET)) && tasks_created == before + 1);
+    // the not-provisioned refusals come from the task (they need NVS), and release the line too
+    fresh();
+    refused("{\"t\":\"net.mode\",\"mode\":1}", "not_provisioned");
+    assert(slot_is_clear() && !atomic_load(&s_net_busy));
+    assert(ok_of(ask(SET)));
+}
+
+static void test_a_task_that_cannot_start(void)
+{
+    fresh();
+    fail_create = true;
+    refused(SET, "storage");
+    assert(slot_is_clear() && !atomic_load(&s_net_busy) && host_nvs_count() == 0);
+    fail_create = false;
+    assert(ok_of(ask(SET)));
+}
+
 static void test_json_guard(void)
 {
     // the guard stands in front of the parser (cable_client.c checks this order in the source); a net.set that is nested too
@@ -387,6 +574,9 @@ int main(void)
     test_off_the_cable_nothing_is_touched();
     test_without_the_feature_nothing_is_touched();
     test_a_failing_store();
+    test_writes_run_in_the_store_task();
+    test_every_write_is_a_task_and_nothing_else_is();
+    test_a_task_that_cannot_start();
     test_json_guard();
     test_nothing_is_logged();
     cJSON_Delete(reply);

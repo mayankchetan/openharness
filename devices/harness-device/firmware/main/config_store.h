@@ -109,6 +109,12 @@ void config_net_info(config_net_info_t *out);
 // The standard base64 of exactly 32 bytes (44 characters, one "=", no other padding, no whitespace, no url-safe letters, trailing bits zero).
 bool config_net_key_decode(const char *b64, uint8_t out[CFG_NET_KEY_LEN]);
 
+// The checks alone, with no NVS access: the cable reader (a PSRAM stack, which must not write flash) validates a request with these before
+// it hands the write to the net_store task. config_net_set and the setters below run the same checks again.
+config_net_err_t config_net_check(const char *ssid, const char *pass, const char *host, long port, const uint8_t *key, long mode);
+config_net_err_t config_net_check_host(const char *host, long port);
+config_net_err_t config_net_check_mode(long mode);
+
 // Check every field, then write all of them, wl_ver last. `port` and `mode` are -1 when the message had none. A refusal names the
 // FIRST bad field in the order ssid, pass, host, port, key, mode and writes nothing.
 config_net_err_t config_net_set(const char *ssid, const char *pass, const char *host, long port, const uint8_t *key, long mode);
