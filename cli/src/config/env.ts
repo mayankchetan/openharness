@@ -412,6 +412,16 @@ const fields = {
   // (the default), the routes do not exist and answer 404 as any unknown route does; on, they still want the local
   // credential like every other route. See devices/harness-device/firmware/docs/DEBUG_COMMANDS.md.
   CABLE_DEBUG_API: flag('false'),
+  // The dial over Wi-Fi (cable/netDials.ts, docs/specs/cable-wifi-link.md section 6.2): a TLS-PSK listener for dials that
+  // were provisioned over USB. Dark until the first dial has a key: with 'true' (the default) the socket still opens only
+  // when the keystore (`<HARNESS_DEVICES_DIR>/dial-net.json`) holds at least one dial, so no provisioned dial means no open
+  // port. 'false' never opens it.
+  CABLE_NET_ENABLE: flag('true'),
+  // The TCP port the dials connect to. 18473 and 18474 are the daemon's and the team's.
+  CABLE_NET_PORT: number('18480'),
+  // The address the listener binds. All IPv4 interfaces by default; set one address to pin it. Only private, link-local and
+  // loopback peers are accepted either way, and every peer must still prove the dial's key.
+  CABLE_NET_BIND: text('0.0.0.0'),
 } satisfies Record<string, EnvField<unknown>>
 
 export type Env = EnvOf<typeof fields>
