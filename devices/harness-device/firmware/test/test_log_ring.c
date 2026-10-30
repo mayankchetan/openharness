@@ -37,13 +37,13 @@ static void test_basic(void)
     log_ring_init(&r, storage, sizeof storage);
     char s[LOG_RING_LINE_MAX + 1];
     CHECK(pop_str(&r, s) == 0 && log_ring_used(&r) == 0);   // empty
-    CHECK(log_ring_push(&r, (const uint8_t *)"hello", 5) && log_ring_used(&r) == 2 + 5);
+    CHECK(log_ring_push(&r, (const uint8_t *)"hello", 5) && log_ring_used(&r) == LOG_RING_HDR + 5);
     CHECK(log_ring_push(&r, (const uint8_t *)"x", 1));
     CHECK(pop_str(&r, s) == 5 && !strcmp(s, "hello"));
     CHECK(pop_str(&r, s) == 1 && !strcmp(s, "x"));
     CHECK(pop_str(&r, s) == 0 && log_ring_used(&r) == 0 && log_ring_overwritten(&r) == 0);
     CHECK(!log_ring_push(&r, (const uint8_t *)"", 0) && !log_ring_push(&r, NULL, 3));   // nothing to say is not a line
-    // Drop-oldest, exact: a 9-byte line takes 11 bytes with its length, so five fit in 64. Push eight: lines 0 to 2 go, 3 to 7 stay, in order.
+    // Drop-oldest, exact: a 9-byte line takes 12 bytes with its header, so five fit in 64. Push eight: lines 0 to 2 go, 3 to 7 stay, in order.
     for (int i = 0; i < 8; i++) {
         char line[16];
         snprintf(line, sizeof line, "line-%04d", i);   // 9 chars
@@ -80,10 +80,10 @@ static void test_limits(void)
     CHECK(log_ring_pop(&r, out, sizeof out) == LOG_RING_LINE_MAX && out[0] == 'z' && out[LOG_RING_LINE_MAX - 1] == 'z');
     // A consumer buffer that is too small gets nothing and the line stays queued.
     CHECK(log_ring_push(&r, (const uint8_t *)"abc", 3));
-    CHECK(log_ring_pop(&r, out, 2) == 0 && log_ring_used(&r) == 5);
+    CHECK(log_ring_pop(&r, out, 2) == 0 && log_ring_used(&r) == LOG_RING_HDR + 3);
     CHECK(log_ring_pop(&r, out, sizeof out) == 3);
     // A ring smaller than one entry refuses everything and never touches memory.
-    uint8_t tiny[2];
+    uint8_t tiny[LOG_RING_HDR];   // one byte short of an entry for a one-byte line
     log_ring_init(&r, tiny, sizeof tiny);
     CHECK(!log_ring_push(&r, (const uint8_t *)"a", 1) && log_ring_pop(&r, out, sizeof out) == 0);
     // A line that cannot fit even in an empty ring is refused and counted; the older lines are not sacrificed for it.
@@ -115,6 +115,54 @@ static void test_limits(void)
     CHECK(last == 99999 && popped + log_ring_overwritten(&r) == 100000);
 }
 
+// ── a slot in flight: copies happen outside the lock, so the ring must not recycle a slot someone is still using ──────
+
+static void test_in_flight(void)
+{
+    uint8_t storage[64];
+    uint8_t out[LOG_RING_LINE_MAX];
+    log_ring_t r;
+    log_ring_init(&r, storage, sizeof storage);
+    // Producer A has reserved its slot and is still copying when four more producers fill the ring and one more arrives.
+    log_ring_slot_t a;
+    CHECK(log_ring_reserve(&r, 9, &a));
+    char line[16];
+    for (int i = 0; i < 4; i++) {
+        snprintf(line, sizeof line, "later-%03d", i);
+        CHECK(log_ring_push(&r, (const uint8_t *)line, 9));   // 12 bytes each: A and four more fill 60 of 64
+    }
+    CHECK(log_ring_overwritten(&r) == 0);
+    // The ring is full and its oldest entry is A, not yet committed: a new line cannot drop it, so it is refused and counted; nothing is overwritten.
+    CHECK(!log_ring_push(&r, (const uint8_t *)"too-much-for-the-ring", 21) && log_ring_rejected(&r) == 1 && log_ring_overwritten(&r) == 0);
+    CHECK(log_ring_pop(&r, out, sizeof out) == 0);   // and nothing is readable until the oldest is committed
+    log_ring_write(&r, &a, (const uint8_t *)"aaaaaaaaa");
+    log_ring_commit(&r, &a);
+    // Now A is the oldest committed entry: a new line drops it (drop-oldest), and the survivors are intact and in order.
+    CHECK(log_ring_push(&r, (const uint8_t *)"newest-001", 10) && log_ring_overwritten(&r) == 1);
+    for (int i = 0; i < 4; i++) {
+        snprintf(line, sizeof line, "later-%03d", i);
+        CHECK(log_ring_pop(&r, out, sizeof out) == 9 && !memcmp(out, line, 9));
+    }
+    CHECK(log_ring_pop(&r, out, sizeof out) == 10 && !memcmp(out, "newest-001", 10) && log_ring_pop(&r, out, sizeof out) == 0);
+
+    // The reader's side: while the consumer is copying the oldest line out, a producer cannot recycle it.
+    log_ring_init(&r, storage, sizeof storage);
+    for (int i = 0; i < 5; i++) {
+        snprintf(line, sizeof line, "fill-%04d", i);
+        CHECK(log_ring_push(&r, (const uint8_t *)line, 9));
+    }
+    log_ring_slot_t c, other;
+    CHECK(log_ring_claim(&r, sizeof out, &c) && c.len == 9);
+    CHECK(!log_ring_claim(&r, sizeof out, &other));   // one reader at a time: the oldest is already claimed
+    CHECK(!log_ring_push(&r, (const uint8_t *)"six", 3) && log_ring_rejected(&r) == 1 && log_ring_overwritten(&r) == 0);
+    uint8_t got[9];
+    log_ring_read(&r, &c, got);
+    CHECK(!memcmp(got, "fill-0000", 9));
+    log_ring_release(&r, &c);
+    CHECK(log_ring_push(&r, (const uint8_t *)"six", 3) && log_ring_overwritten(&r) == 0);   // space is back, nothing had to be dropped
+    CHECK(log_ring_pop(&r, out, sizeof out) == 9 && !memcmp(out, "fill-0001", 9));
+}
+
 // ── four producers, one consumer ───────────────────────────────────────────────────────────────────
 
 #define PRODUCERS 4
@@ -122,7 +170,7 @@ static void test_limits(void)
 
 static log_ring_t ring;
 static atomic_int producers_done;
-static atomic_bool failed;
+static atomic_uint refused;   // pushes that returned false: only when the oldest entry was in flight and the ring was full
 
 typedef struct { uint8_t who; uint32_t seq; uint8_t len; uint8_t sum; } hdr_t;   // 7 bytes; the rest is filler derived from seq
 
@@ -142,7 +190,7 @@ static void *produce(void *arg)
         uint8_t sum = 0;
         for (unsigned i = 7; i < total; i++) { line[i] = filler(seq, i); sum = (uint8_t)(sum + line[i]); }
         line[6] = sum;
-        if (!log_ring_push(&ring, line, total)) atomic_store(&failed, true);
+        if (!log_ring_push(&ring, line, total)) atomic_fetch_add(&refused, 1);
         if (!(rng & 255)) sched_yield();
     }
     atomic_fetch_add(&producers_done, 1);
@@ -198,7 +246,7 @@ static void run_threads(uint32_t cap, int mode)   // mode 0: fast consumer, 1: s
     memset(storage, 0xA5, cap + 16);
     log_ring_init(&ring, storage + 8, cap);
     atomic_store(&producers_done, 0);
-    atomic_store(&failed, false);
+    atomic_store(&refused, 0);
     popped_total = 0;
     memset(seen, 0, sizeof seen);
     memset(last_seq, 0, sizeof last_seq);
@@ -209,14 +257,14 @@ static void run_threads(uint32_t cap, int mode)   // mode 0: fast consumer, 1: s
     if (mode == 2) assert(!pthread_create(&c, NULL, consume, NULL));
     assert(!pthread_join(c, NULL));
     const uint64_t pushed = (uint64_t)PRODUCERS * LINES_EACH;
-    CHECK(!atomic_load(&failed) && log_ring_rejected(&ring) == 0);
+    CHECK(log_ring_rejected(&ring) == atomic_load(&refused));   // the ring and the producers agree on how many pushes were turned away
     // Every line is either delivered intact or counted as dropped: nothing vanishes, nothing is delivered twice.
-    CHECK(popped_total + log_ring_overwritten(&ring) == pushed);
+    CHECK(popped_total + log_ring_overwritten(&ring) + log_ring_rejected(&ring) == pushed);
     CHECK(log_ring_used(&ring) == 0);
     for (int i = 0; i < 8; i++) CHECK(storage[i] == 0xA5 && storage[cap + 8 + i] == 0xA5);
     if (mode == 2) CHECK(log_ring_overwritten(&ring) > 0 && popped_total > 0);   // nobody was draining: it dropped, and did not stop the producers
-    printf("  ring %u B, consumer %s: %llu delivered, %u dropped\n", cap, mode == 0 ? "fast" : mode == 1 ? "slow" : "late",
-           (unsigned long long)popped_total, log_ring_overwritten(&ring));
+    printf("  ring %u B, consumer %s: %llu delivered, %u dropped, %u turned away\n", cap, mode == 0 ? "fast" : mode == 1 ? "slow" : "late",
+           (unsigned long long)popped_total, log_ring_overwritten(&ring), log_ring_rejected(&ring));
     free(storage);
 }
 
@@ -224,6 +272,7 @@ int main(void)
 {
     test_basic();
     test_limits();
+    test_in_flight();
     run_threads(8192, 0);
     run_threads(8192, 1);
     run_threads(8192, 2);

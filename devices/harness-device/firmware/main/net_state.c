@@ -15,7 +15,7 @@ static const uint8_t NEXT[NET_STATE_COUNT][NET_EV_COUNT] = {
     /* JOINING            */ { J,    O,   J,        J,     J,      N,         D,       D,       A,          U,      J },
     /* NO_IP              */ { N,    O,   J,        J,     N,      N,         N,       N,       N,          N,      N },
     /* DAEMON_UNREACHABLE */ { D,    O,   J,        D,     N,      D,         D,       D,       A,          U,      D },
-    /* AUTH_FAILED        */ { A,    O,   J,        A,     N,      A,         D,       A,       A,          U,      A },
+    /* AUTH_FAILED        */ { A,    O,   J,        A,     N,      A,         D,       D,       A,          U,      A },
     /* UP                 */ { U,    O,   J,        U,     N,      U,         D,       D,       A,          U,      J },
 };
 #undef O
@@ -52,7 +52,7 @@ const char *net_state_caption(net_state_t state)
     case NET_JOINING:            return "Joining Wi-Fi";
     case NET_NO_IP:              return "Wi-Fi: no address";
     case NET_DAEMON_UNREACHABLE: return "Daemon not reachable";
-    case NET_AUTH_FAILED:        return "Key refused: use cable";
+    case NET_AUTH_FAILED:        return "Key refused: reset dial";   // W14 brings back the USB recovery (the probe); until then a factory reset is the way
     case NET_OFF:
     case NET_UP:
     case NET_STATE_COUNT:        break;
@@ -89,3 +89,17 @@ uint32_t net_backoff_next_ms(net_backoff_t *b, bool refused, uint32_t random_wor
 }
 
 bool net_backoff_link_earned_reset(uint32_t up_ms) { return up_ms >= 10000; }
+
+// ── refusals in a row ───────────────────────────────────────────────────────────────────────────────
+
+void net_refusal_reset(net_refusal_t *r) { r->refusals = 0; }
+
+net_event_t net_handshake_event(net_refusal_t *r, bool refused)
+{
+    if (!refused) {
+        r->refusals = 0;
+        return NET_EV_TLS_FAIL;
+    }
+    if (r->refusals < NET_REFUSALS_TO_AUTH_FAILED) r->refusals++;   // saturates: a long run of refusals stays a refusal
+    return r->refusals >= NET_REFUSALS_TO_AUTH_FAILED ? NET_EV_TLS_REFUSED : NET_EV_TLS_FAIL;
+}

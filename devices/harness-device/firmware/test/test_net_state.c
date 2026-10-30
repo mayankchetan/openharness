@@ -20,7 +20,7 @@ static const char *const EXPECT[NET_STATE_COUNT] = {
     /* JOIN */ "JOJJJNDDAUJ",
     /* NOIP */ "NOJJNNNNNNN",
     /* DAEM */ "DOJDNDDDAUD",
-    /* AUTH */ "AOJANADAAUA",
+    /* AUTH */ "AOJANADDAUA",
     /* UP   */ "UOJUNUDDAUJ",
 };
 
@@ -82,7 +82,7 @@ static void test_names_and_captions(void)
     }
     CHECK(n == 4);
     // The two states a person can act on say what to do about it: the cable fixes the second.
-    CHECK(strstr(net_state_caption(NET_AUTH_FAILED), "Key") != NULL);
+    CHECK(!strcmp(net_state_caption(NET_AUTH_FAILED), "Key refused: reset dial"));   // the USB recovery path comes back with W14
 }
 
 static void test_ladder(void)
@@ -141,8 +141,45 @@ static void test_sequence(void)
           && net_backoff_link_earned_reset(3600000));
 }
 
+static void test_refusal_count(void)
+{
+    // One refusal is not a verdict: a daemon restart, a noisy handshake or a reset all look alike on the first try. Three in a row are.
+    net_refusal_t r;
+    net_refusal_reset(&r);
+    CHECK(NET_REFUSALS_TO_AUTH_FAILED == 3);
+    CHECK(net_handshake_event(&r, true) == NET_EV_TLS_FAIL);
+    CHECK(net_handshake_event(&r, true) == NET_EV_TLS_FAIL);
+    CHECK(net_handshake_event(&r, true) == NET_EV_TLS_REFUSED);
+    CHECK(net_handshake_event(&r, true) == NET_EV_TLS_REFUSED);   // and it stays promoted while the daemon keeps saying no
+    // Any other outcome breaks the run: a failure that is not an alert, or a reset by the caller (a link came up, TCP failed).
+    CHECK(net_handshake_event(&r, false) == NET_EV_TLS_FAIL);
+    CHECK(net_handshake_event(&r, true) == NET_EV_TLS_FAIL && net_handshake_event(&r, true) == NET_EV_TLS_FAIL);
+    net_refusal_reset(&r);
+    CHECK(net_handshake_event(&r, true) == NET_EV_TLS_FAIL && net_handshake_event(&r, true) == NET_EV_TLS_FAIL);
+    net_refusal_reset(&r);
+    CHECK(net_handshake_event(&r, true) == NET_EV_TLS_FAIL);
+    CHECK(net_handshake_event(&r, false) == NET_EV_TLS_FAIL);
+    CHECK(net_handshake_event(&r, true) == NET_EV_TLS_FAIL && net_handshake_event(&r, true) == NET_EV_TLS_FAIL);   // 1, break, 2: not three in a row
+    for (int i = 0; i < 1000; i++) (void)net_handshake_event(&r, true);   // the counter saturates instead of wrapping to "not refused"
+    CHECK(net_handshake_event(&r, true) == NET_EV_TLS_REFUSED);
+    // The machine: three refusals take JOINING to AUTH_FAILED; the first two leave it on the ordinary path (DAEMON_UNREACHABLE, 60 s cap).
+    net_refusal_reset(&r);
+    net_state_t s = NET_JOINING;
+    s = net_state_next(s, net_handshake_event(&r, true));
+    CHECK(s == NET_DAEMON_UNREACHABLE);
+    s = net_state_next(s, net_handshake_event(&r, true));
+    CHECK(s == NET_DAEMON_UNREACHABLE);
+    s = net_state_next(s, net_handshake_event(&r, true));
+    CHECK(s == NET_AUTH_FAILED);
+    // A handshake that fails without an alert afterwards drops back to the ordinary ladder; a good one clears everything.
+    s = net_state_next(s, net_handshake_event(&r, false));
+    CHECK(s == NET_DAEMON_UNREACHABLE);
+    CHECK(net_backoff_base_ms(6, false) == 60000 && net_backoff_base_ms(50, false) == 60000);   // the ordinary ladder never passes 60 s
+}
+
 int main(void)
 {
+    test_refusal_count();
     test_table();
     test_names_and_captions();
     test_ladder();

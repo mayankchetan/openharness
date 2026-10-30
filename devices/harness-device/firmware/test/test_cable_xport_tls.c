@@ -1299,7 +1299,7 @@ static int run_connect(char **argv)
     CHECK(t != NULL);
     int64_t t0 = ms_now();
     if (!t->open(t)) {
-        printf("REFUSED after %lld ms\n", (long long)(ms_now() - t0));
+        printf("REFUSED after %lld ms, mbedTLS code -0x%04X\n", (long long)(ms_now() - t0), (unsigned)-cable_xport_tls_last_error(t));
         cable_xport_tls_free(t);
         return 3;
     }
