@@ -13,6 +13,7 @@
 #include "cable_debug.h"
 #endif
 #include "cable_machines.h"
+#include "config_store.h"
 #include "device_mac.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
@@ -342,6 +343,8 @@ static void send_hello(void)
     if (cable_voice_adpcm_allowed(voice_transport_is_usb(), DEVICE_VOICE_ADPCM_USB != 0))
         msg_string(&root, "voiceCodec", "adpcm-v1");
 #endif
+    // This dial keeps Wi-Fi settings (handle_net) and takes them over the cable only: the daemon then lists "net" in its welcome.
+    if (cable_link_transport() == CABLE_XPORT_USB) msg_string(&root, "net", "v1");
     // The Swarms (handle_supertab) and their Super Tab waits (handle_question). Without the second the daemon holds
     // a wait back from this dial, which once had to: a wait is never an answer screen here.
     msg_string(&root, "swarmCard", "v1");
@@ -1414,6 +1417,89 @@ static void handle_pet_map(const cJSON *p)
     ui_pets_changed();
 }
 
+// ── THE DIAL'S WI-FI SETTINGS (docs/specs/cable-wifi-link.md section 3) ─────────────────────────────────
+// net.set / get / clear / mode / key / host, one reply each: net.state. The password and the key cross the USB cable and nothing
+// else, and are never logged, replied or kept: the reply carries booleans, the SSID, the address and the mode; a refusal names the
+// FIELD (err:"pass"), never a value; the strings of the request are overwritten once used. Every ESP_LOG line of this firmware is
+// framed into the daemon's dial log, so a logged password would sit in a file: lengths only (config_store.c logs them).
+static void net_scrub(char *s)
+{
+    volatile char *v = (volatile char *)s;
+    while (v && *v) *v++ = 0;
+}
+
+/** A string field of the request, or NULL when it is missing or is not a string. */
+static const char *net_text(const cJSON *p, const char *key)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(p, key);
+    return cJSON_IsString(item) && item->valuestring ? item->valuestring : NULL;
+}
+
+/** A whole-number field of the request, else -1 (which every check refuses). */
+static long net_whole(const cJSON *p, const char *key)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(p, key);
+    if (!cJSON_IsNumber(item) || !isfinite(item->valuedouble) || item->valuedouble < 0 || item->valuedouble > 1e6) return -1;
+    const long whole = (long)item->valuedouble;
+    return (double)whole == item->valuedouble ? whole : -1;
+}
+
+/** The answer to any net.*: the request's id, whether it worked, and (unless `state` is false) what the dial holds. No password and no key, ever. */
+static void net_reply(const cJSON *p, bool ok, const char *err, bool state)
+{
+    cJSON *root = msg("net.state");
+    const long id = net_whole(p, "id");
+    if (id > 0 && id <= 65535) msg_number(&root, "id", (double)id);
+    msg_bool(&root, "ok", ok);
+    if (err) msg_string(&root, "err", err);
+    config_net_info_t info;
+    if (state) config_net_info(&info);
+    else memset(&info, 0, sizeof info);
+    msg_bool(&root, "saved", info.saved);
+    if (info.saved) {
+        msg_string(&root, "ssid", info.ssid);
+        msg_string(&root, "host", info.host);
+        msg_number(&root, "port", info.port);
+        msg_number(&root, "mode", info.mode);
+    }
+    send_json(root);
+}
+
+static void handle_net(const char *t, const cJSON *p)
+{
+    // The cable is the authorisation. Over any other link the dial answers nothing it was asked, and says why.
+    if (cable_link_transport() != CABLE_XPORT_USB) { net_reply(p, false, "transport", false); return; }
+    if (!cable_client_supports(CABLE_FEATURE_NET)) { net_reply(p, false, "feature", false); return; }
+    const char *op = t + 4;   // "net." was matched by the caller
+    config_net_err_t err = CFG_NET_OK;
+    uint8_t key[CFG_NET_KEY_LEN];
+    bool known = true;
+    if (!strcmp(op, "get")) {
+        // nothing to do: the reply is the state
+    } else if (!strcmp(op, "set")) {
+        const bool key_ok = config_net_key_decode(net_text(p, "key"), key);
+        err = config_net_set(net_text(p, "ssid"), net_text(p, "pass"), net_text(p, "host"), net_whole(p, "port"), key_ok ? key : NULL, net_whole(p, "mode"));
+    } else if (!strcmp(op, "clear")) {
+        err = config_net_clear();
+    } else if (!strcmp(op, "mode")) {
+        err = config_net_set_mode(net_whole(p, "mode"));
+    } else if (!strcmp(op, "key")) {
+        const bool key_ok = config_net_key_decode(net_text(p, "key"), key);
+        err = config_net_set_key(key_ok ? key : NULL);
+    } else if (!strcmp(op, "host")) {
+        err = config_net_set_host(net_text(p, "host"), net_whole(p, "port"));
+    } else {
+        known = false;
+        s_unknown++;
+    }
+    // Once used, the secrets of the request are overwritten where they sit in the parsed message.
+    net_scrub((char *)net_text(p, "pass"));
+    net_scrub((char *)net_text(p, "key"));
+    memset(key, 0, sizeof key);
+    if (!known) { net_reply(p, false, "op", true); return; }
+    net_reply(p, err == CFG_NET_OK, err == CFG_NET_OK ? NULL : config_net_err_name(err), true);
+}
+
 static void handle_message(const cJSON *root)
 {
     const char *t = str_of(root, "t");
@@ -1456,6 +1542,7 @@ static void handle_message(const cJSON *root)
     }
     if (strcmp(t, "companion.set") == 0) { handle_companion_set(p); return; }
     if (strcmp(t, "companion.celebrate") == 0) { handle_companion_celebrate(p); return; }
+    if (strncmp(t, "net.", 4) == 0) { handle_net(t, p); return; }
     if (strcmp(t, "settings.set") == 0) { handle_settings_set(p); return; }
     if (strcmp(t, "models") == 0) { handle_models(p); return; }
     if (strcmp(t, "swarms") == 0) { handle_swarms(p); return; }

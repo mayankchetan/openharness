@@ -22,6 +22,7 @@ def function(name):
 
 code = r'''
 #include "cJSON.h"
+#include "cable_xport.h"
 #include "ui/habitat/supertab.h"
 #include <assert.h>
 #include <stdbool.h>
@@ -53,6 +54,8 @@ static size_t pet_store_held(char ids[][17],size_t max) { (void)ids;(void)max;re
 static int bat_pct=-1,bat_chg=-1;   // battery.c's cache: -1 until the PMIC poll has run (or there is no PMIC)
 static int battery_pct(void) { return bat_pct; }
 static int battery_chg(void) { return bat_chg; }
+static cable_xport_kind_t link_kind = CABLE_XPORT_USB;   // which wire the hello goes out on: net "v1" is offered on the cable only
+static cable_xport_kind_t cable_link_transport(void) { return link_kind; }
 
 static unsigned beeps, ids_calls, card_calls, recap_calls, focus_calls, wait_calls, close_calls, question_calls, qclose_calls;
 static bool beep_next;
@@ -114,6 +117,11 @@ int main(void) {
     bat_pct=-1;bat_chg=0;send_hello();   // percent unknown, state known: standby is not charging
     assert(!strstr(wire[3],"battery") && strstr(wire[3],"\"charging\":false"));
     bat_pct=bat_chg=-1;sends=1;
+    // The Wi-Fi settings (net.*) are offered on the cable and on no other link.
+    assert(!strcmp(field(wire[0],"net"),"v1"));
+    link_kind=CABLE_XPORT_WIFI;send_hello();
+    assert(sends==2 && !strstr(wire[1],"\"net\""));
+    link_kind=CABLE_XPORT_USB;sends=1;
 
     // supertabs: ids in order, the bad and the repeated skipped, at most 16.
     feed(handle_supertabs,"{\"ids\":[\"s1\",\"\",7,\"s2\",\"s1\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"]}");

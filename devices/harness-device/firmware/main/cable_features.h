@@ -21,6 +21,9 @@ enum {
     // The daemon decodes ADPCM voice blocks (frame type 0x07, adpcm_ima.h). Offered only to a dial whose hello said
     // voiceCodec "adpcm-v1"; the dial still chooses per turn, and on USB it keeps sending PCM unless built otherwise.
     CABLE_FEATURE_ADPCM = 1u << 8,
+    // The daemon keeps this dial's Wi-Fi settings and speaks net.set / get / clear / mode / key / host (docs/specs/cable-wifi-link.md section 3).
+    // Offered only over the USB cable, to a dial whose hello said net "v1". The dial answers none of them without it.
+    CABLE_FEATURE_NET = 1u << 9,
 };
 
 // Which voice codec a turn uses (task W4; docs/specs/cable-wifi-link.md section 2.5). Pure and IDF-free so the host test pins the

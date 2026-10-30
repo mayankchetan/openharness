@@ -4,9 +4,9 @@ Status: DRAFT. Source of truth for the wire format. The design reasoning is in t
 (`briefs/research/2026-10-29-wifi-mode-spec.md` in the workbench repository, sections 4, 5 and 7).
 This file holds only what an implementer on either side needs to be byte-exact.
 
-What is implemented now: section 2 (the ADPCM voice block) and its golden vectors. Sections 1 and 3
-describe work that is not written yet (tasks W7 to W11); they are here so that the three parts of the
-wire format are in one place.
+What is implemented now: section 2 (the ADPCM voice block) and its golden vectors, and section 3 (the provisioning
+messages over the USB cable, W9 and W10). Section 1 describes work that is not finished (W8, W11); it is here so that
+the parts of the wire format are in one place.
 
 Labels. "[U]" means "from general knowledge, not yet checked against a document or code". Each [U]
 names the task that settles it.
@@ -178,18 +178,64 @@ it decodes the right number of samples with the right step sequence. Because of 
 2.2, the test checks ffmpeg against a decoder that uses ffmpeg's rounding (exact equality), and against the vector
 samples within a small bound.
 
-## 3. Provisioning messages - not implemented yet (W9, W10)
+## 3. Provisioning messages (W9 daemon, W10 firmware)
 
-The USB cable is the authorisation. These messages are accepted only on a USB transport and are never echoed or logged.
+The USB cable is the authorisation. The dial answers a `net.*` message only on the USB transport, and the daemon sends one only
+on a port that says `usb`. Over any other link the dial replies `err:"transport"` with no state, and changes nothing. The password
+and the key never leave the cable, are never logged on either side, and are never sent back.
+
+Negotiation. The dial's `hello` carries `"net":"v1"` (on the cable only). A daemon that sees it lists `"net"` in `welcome.features`
+(on the cable only). The dial answers no `net.*` unless its last `welcome` listed `"net"` (`err:"feature"`), and the daemon sends
+none to a dial that did not say `net` (it answers the caller `unsupported` itself). The bit is `CABLE_FEATURE_NET` (1 << 9).
+
+Messages, daemon to dial. Every one may carry `id` (a whole number from 1 to 65535), which the answer repeats.
 
 ```
-daemon -> dial   {"t":"net.set","ssid":"...","pass":"...","host":"192.168.x.y","port":18480,"key":"<base64 of 32 bytes>","mode":1}
-dial -> daemon   {"t":"net.state","ok":true,"ssid":"...","saved":true}
+{"t":"net.set","id":n,"ssid":"...","pass":"...","host":"192.168.x.y","port":18480,"key":"<base64 of 32 bytes>","mode":1}
+{"t":"net.get","id":n}
+{"t":"net.clear","id":n}
+{"t":"net.mode","id":n,"mode":0}
+{"t":"net.key","id":n,"key":"<base64 of 32 bytes>"}         rotate: a new key for a dial that is already set
+{"t":"net.host","id":n,"host":"192.168.x.y","port":18480}   the daemon's address changed; same network, same key
 ```
 
-- Validation on the dial: SSID 1 to 32 bytes; password 0 or 8 to 63 bytes; host a dotted IPv4; port 1024 to 65535;
-  key decodes to exactly 32 bytes.
-- NVS namespace `pair`: `wl_ssid`, `wl_pass`, `wl_host`, `wl_port`, `wl_key`, then `wl_ver = 1` written last as the
-  commit marker. A dial with no `wl_ver` treats Wi-Fi as unprovisioned.
-- The firmware logs lengths only, never values. The daemon logs no payload.
-- The daemon stores the key only after `ok:true`. Default daemon port: 18480.
+`net.mode`, `net.key` and `net.host` need a whole configuration (`err:"not_provisioned"` otherwise). `net.set` replaces any
+configuration; a refusal or a power cut during it leaves the dial with none, never with half of two.
+
+The one answer, dial to daemon:
+
+```
+{"t":"net.state","id":n,"ok":true,"saved":true,"ssid":"...","host":"192.168.x.y","port":18480,"mode":1}
+{"t":"net.state","id":n,"ok":false,"err":"pass","saved":false}
+```
+
+- `ok` is whether the dial did it. `saved` is whether it holds a whole configuration (its commit marker is set); when it does,
+  `ssid`, `host`, `port` and `mode` say what it holds. None of them is a secret. The password and the key are never in an answer.
+- `err` names the first bad FIELD, in the order `ssid`, `pass`, `host`, `port`, `key`, `mode`, or a reason: `not_provisioned`,
+  `storage` (NVS would not take a write), `op` (a `net.` message this firmware does not have), `transport`, `feature`. Never a value.
+  A `transport` or `feature` refusal carries no state at all.
+
+Validation, the same on the dial (`config_net_set`) and in the daemon (`cli/src/lib/dialNetRules.ts`): SSID 1 to 32 bytes and a
+password of 0 or 8 to 63 bytes, neither with a control character; host a dotted IPv4 (four parts of 1 to 3 digits, none above 255,
+no leading zero); port 1024 to 65535 and a whole number; key the standard base64 of exactly 32 bytes (44 characters with one `=`,
+no whitespace, canonical trailing bits); mode 0 or 1. The daemon also refuses a host that is not a private (RFC 1918) address.
+
+NVS namespace `pair`: `wl_ssid`, `wl_pass`, `wl_host`, `wl_port` (u16), `wl_key` (blob, 32 bytes), `wl_mode` (u8: 1 = join Wi-Fi
+when the USB cable is unplugged, 0 = USB only), and `wl_ver = 1`, the commit marker.
+- A set removes `wl_ver` first, writes the other keys, and writes `wl_ver` last. A clear removes `wl_ver` first. A dial with no
+  `wl_ver`, a marker of another version, or any key missing or invalid treats Wi-Fi as unprovisioned.
+- `config_clear_all` (factory reset) takes every key of the namespace, these included.
+
+Logging. The firmware logs lengths only (`ssid_len`, `pass_len`, `host_len`), because every ESP_LOG line is framed into the
+daemon's dial log. The daemon logs the op, the id and the outcome of a request, nothing of its fields. The daemon's local route
+(`POST /api/dial/net/*`) logs only its path.
+
+Daemon side.
+- The daemon stores the key in `dial-net.json` only after `net.state` `ok:true`. A refusal or a 5 s timeout leaves the keystore
+  untouched. If the keystore will not write after the dial agreed, the dial is cleared again (or given its old key back on a rotate).
+- When this computer's LAN address changes while a dial is plugged in, the next attach reads `net.get` and, if the dial holds another
+  address, sends `net.host`. A dial that is already wireless has to be fixed over the cable.
+- Default daemon port: 18480 (`CABLE_NET_PORT`). No mDNS: the dial connects to the stored address.
+- `harness dial wifi set|show|forget|rotate|on|off|firewall`. The password is typed at a prompt that shows nothing, or read as one line
+  of stdin when stdin is not a terminal; it is never an argument and never read from the environment. `firewall` prints the Windows
+  firewall command (inbound TCP on the Wi-Fi port, private profile, local subnet) and does not run it.

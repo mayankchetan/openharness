@@ -35,7 +35,8 @@ assert 'default OFF' in cmake[cmake.index('# PMIC power-off'):cmake.index('if(DE
 assert '"store_gate.c"' in cmake, 'the gate is always built: the writers call it in every image'
 
 # ---- every NVS writer is bracketed by the gate ----
-assert config.count('open_rw(&h)') == 8 and config.count('close_rw(h)') == 8
+# 8 writers of the dial's own settings, and the 5 Wi-Fi settings writers (config_net_set, _set_key, _set_host, _set_mode, _clear)
+assert config.count('open_rw(&h)') == 13 and config.count('close_rw(h)') == 13
 assert config.count('nvs_open(NS, NVS_READWRITE') == 1, 'one raw read-write open: the helper'
 assert 'if (!store_gate_enter()) return ESP_ERR_INVALID_STATE;' in config
 blob_set = re.search(r'static bool blob_set\(.*?^\}', batlog, re.M | re.S)[0]

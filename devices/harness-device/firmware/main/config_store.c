@@ -209,6 +209,264 @@ void config_save_swipe_reversed(bool reversed)
 #define K_FACH   "fach"
 #define K_FDCH   "fdch"
 
+// --- Wi-Fi settings -----------------------------------------------------------------------------
+// docs/specs/cable-wifi-link.md section 3, and the marker rules in config_store.h. Nothing below logs a value: a line carries a
+// length or a field NAME. Every ESP_LOG line of this firmware is framed to the daemon's dial log (cable_link.c), so a password
+// logged here would be in a file.
+#define K_WL_SSID "wl_ssid"
+#define K_WL_PASS "wl_pass"
+#define K_WL_HOST "wl_host"
+#define K_WL_PORT "wl_port"
+#define K_WL_KEY  "wl_key"
+#define K_WL_MODE "wl_mode"
+#define K_WL_VER  "wl_ver"
+#define WL_VERSION 1
+
+const char *config_net_err_name(config_net_err_t err)
+{
+    switch (err) {
+    case CFG_NET_OK:               return "ok";
+    case CFG_NET_E_SSID:           return "ssid";
+    case CFG_NET_E_PASS:           return "pass";
+    case CFG_NET_E_HOST:           return "host";
+    case CFG_NET_E_PORT:           return "port";
+    case CFG_NET_E_KEY:            return "key";
+    case CFG_NET_E_MODE:           return "mode";
+    case CFG_NET_E_NOT_PROVISIONED: return "not_provisioned";
+    case CFG_NET_E_STORAGE:        return "storage";
+    }
+    return "storage";
+}
+
+static void scrub(void *p, size_t n)
+{
+    volatile uint8_t *v = (volatile uint8_t *)p;
+    while (n--) *v++ = 0;
+}
+
+/** The length of `s` up to `cap`: a longer string reads as cap + 1, so a bad one is never walked to its end. */
+static size_t bounded_len(const char *s, size_t cap)
+{
+    size_t n = 0;
+    while (s && n <= cap && s[n]) n++;
+    return n;
+}
+
+/** Between `min` and `max` bytes with no control byte (below 0x20, or DEL). Any other byte is allowed: a name may be UTF-8. */
+static bool text_ok(const char *s, size_t min, size_t max)
+{
+    if (!s) return false;
+    const size_t n = bounded_len(s, max);
+    if (n < min || n > max) return false;
+    for (size_t i = 0; i < n; i++) if ((unsigned char)s[i] < 0x20 || s[i] == 0x7f) return false;
+    return true;
+}
+
+/** Four decimal parts of 1 to 3 digits, none above 255, no leading zero but a lone "0", nothing else. */
+static bool ipv4_ok(const char *s)
+{
+    if (!s) return false;
+    int parts = 0;
+    const char *p = s;
+    for (;;) {
+        if (*p < '0' || *p > '9') return false;
+        const char first = *p;
+        int digits = 0, value = 0;
+        while (*p >= '0' && *p <= '9') {
+            value = value * 10 + (*p - '0');
+            if (++digits > 3) return false;
+            p++;
+        }
+        if ((digits > 1 && first == '0') || value > 255) return false;
+        parts++;
+        if (*p == '.') { if (parts == 4) return false; p++; continue; }
+        return *p == 0 && parts == 4;
+    }
+}
+
+static config_net_err_t host_port_check(const char *host, long port)
+{
+    if (!ipv4_ok(host)) return CFG_NET_E_HOST;
+    if (port < CFG_NET_PORT_MIN || port > 65535) return CFG_NET_E_PORT;
+    return CFG_NET_OK;
+}
+
+static int b64_value(char c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+bool config_net_key_decode(const char *b64, uint8_t out[CFG_NET_KEY_LEN])
+{
+    if (!b64 || bounded_len(b64, 44) != 44 || b64[43] != '=') return false;
+    uint8_t bytes[CFG_NET_KEY_LEN];
+    size_t o = 0;
+    for (size_t i = 0; i < 40; i += 4) {   // ten whole groups: 30 bytes
+        const int a = b64_value(b64[i]), b = b64_value(b64[i + 1]), c = b64_value(b64[i + 2]), d = b64_value(b64[i + 3]);
+        if ((a | b | c | d) < 0) return false;
+        bytes[o++] = (uint8_t)((a << 2) | (b >> 4));
+        bytes[o++] = (uint8_t)(((b & 15) << 4) | (c >> 2));
+        bytes[o++] = (uint8_t)(((c & 3) << 6) | d);
+    }
+    const int a = b64_value(b64[40]), b = b64_value(b64[41]), c = b64_value(b64[42]);
+    // the last group is two bytes and one "=", and its unused bits must be zero: one spelling per key
+    if ((a | b | c) < 0 || (c & 3)) return false;
+    bytes[o++] = (uint8_t)((a << 2) | (b >> 4));
+    bytes[o++] = (uint8_t)(((b & 15) << 4) | (c >> 2));
+    memcpy(out, bytes, CFG_NET_KEY_LEN);
+    scrub(bytes, sizeof bytes);
+    return true;
+}
+
+static bool wl_get_str(nvs_handle_t h, const char *key, char *dst, size_t cap)
+{
+    size_t len = cap;
+    memset(dst, 0, cap);
+    return nvs_get_str(h, key, dst, &len) == ESP_OK;
+}
+
+bool config_net_load(config_net_t *out)
+{
+    memset(out, 0, sizeof *out);
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return false;
+    uint8_t version = 0, mode = 0;
+    size_t key_len = sizeof out->key;
+    // The marker first, then every key: a marker with a key missing is not a configuration.
+    bool ok = nvs_get_u8(h, K_WL_VER, &version) == ESP_OK && version == WL_VERSION
+        && wl_get_str(h, K_WL_SSID, out->ssid, sizeof out->ssid)
+        && wl_get_str(h, K_WL_PASS, out->pass, sizeof out->pass)
+        && wl_get_str(h, K_WL_HOST, out->host, sizeof out->host)
+        && nvs_get_u16(h, K_WL_PORT, &out->port) == ESP_OK
+        && nvs_get_blob(h, K_WL_KEY, out->key, &key_len) == ESP_OK && key_len == sizeof out->key;
+    if (ok) nvs_get_u8(h, K_WL_MODE, &mode);   // absent reads as USB only
+    nvs_close(h);
+    ok = ok && text_ok(out->ssid, 1, CFG_NET_SSID_MAX)
+        && (out->pass[0] == 0 || text_ok(out->pass, 8, CFG_NET_PASS_MAX))
+        && host_port_check(out->host, out->port) == CFG_NET_OK;
+    out->mode = mode == 1 ? 1 : 0;
+    if (!ok) scrub(out, sizeof *out);
+    return ok;
+}
+
+void config_net_info(config_net_info_t *out)
+{
+    memset(out, 0, sizeof *out);
+    config_net_t whole;
+    if (config_net_load(&whole)) {
+        out->saved = true;
+        memcpy(out->ssid, whole.ssid, sizeof out->ssid);
+        memcpy(out->host, whole.host, sizeof out->host);
+        out->port = whole.port;
+        out->mode = whole.mode;
+    }
+    scrub(&whole, sizeof whole);
+}
+
+/** A key that is not there is not an error to erase. */
+static bool erased(esp_err_t err) { return err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND; }
+
+static config_net_err_t net_check(const char *ssid, const char *pass, const char *host, long port, const uint8_t *key, long mode)
+{
+    if (!text_ok(ssid, 1, CFG_NET_SSID_MAX)) return CFG_NET_E_SSID;
+    if (!pass || (pass[0] != 0 && !text_ok(pass, 8, CFG_NET_PASS_MAX))) return CFG_NET_E_PASS;
+    const config_net_err_t where = host_port_check(host, port);
+    if (where != CFG_NET_OK) return where;
+    if (!key) return CFG_NET_E_KEY;
+    if (mode != 0 && mode != 1) return CFG_NET_E_MODE;
+    return CFG_NET_OK;
+}
+
+config_net_err_t config_net_set(const char *ssid, const char *pass, const char *host, long port, const uint8_t *key, long mode)
+{
+    const config_net_err_t err = net_check(ssid, pass, host, port, key, mode);
+    ESP_LOGI(TAG, "net set: ssid_len=%u pass_len=%u host_len=%u -> %s",
+             (unsigned)bounded_len(ssid, 64), (unsigned)bounded_len(pass, 128), (unsigned)bounded_len(host, 32), config_net_err_name(err));
+    if (err != CFG_NET_OK) return err;
+    nvs_handle_t h;
+    if (open_rw(&h) != ESP_OK) return CFG_NET_E_STORAGE;
+    // The marker goes first, so a cut anywhere below leaves the dial unprovisioned, and comes back last.
+    bool ok = erased(nvs_erase_key(h, K_WL_VER)) && nvs_commit(h) == ESP_OK
+        && nvs_set_str(h, K_WL_SSID, ssid) == ESP_OK
+        && nvs_set_str(h, K_WL_PASS, pass) == ESP_OK
+        && nvs_set_str(h, K_WL_HOST, host) == ESP_OK
+        && nvs_set_u16(h, K_WL_PORT, (uint16_t)port) == ESP_OK
+        && nvs_set_blob(h, K_WL_KEY, key, CFG_NET_KEY_LEN) == ESP_OK
+        && nvs_set_u8(h, K_WL_MODE, (uint8_t)mode) == ESP_OK
+        && nvs_commit(h) == ESP_OK
+        && nvs_set_u8(h, K_WL_VER, WL_VERSION) == ESP_OK;
+    const bool marked = ok;
+    ok = ok && nvs_commit(h) == ESP_OK;
+    // The marker is set but the last commit failed: the settings are whole, yet the reply will say they are not. Take the marker
+    // back if the store allows, so that "refused" and "unprovisioned" mean the same thing.
+    if (marked && !ok && erased(nvs_erase_key(h, K_WL_VER))) nvs_commit(h);
+    close_rw(h);
+    return ok ? CFG_NET_OK : CFG_NET_E_STORAGE;
+}
+
+static bool provisioned(void)
+{
+    config_net_info_t info;
+    config_net_info(&info);
+    return info.saved;
+}
+
+config_net_err_t config_net_set_key(const uint8_t *key)
+{
+    if (!key) return CFG_NET_E_KEY;
+    if (!provisioned()) return CFG_NET_E_NOT_PROVISIONED;
+    nvs_handle_t h;
+    if (open_rw(&h) != ESP_OK) return CFG_NET_E_STORAGE;
+    const bool ok = nvs_set_blob(h, K_WL_KEY, key, CFG_NET_KEY_LEN) == ESP_OK && nvs_commit(h) == ESP_OK;
+    close_rw(h);
+    ESP_LOGI(TAG, "net key: %s", ok ? "replaced" : "FAILED");
+    return ok ? CFG_NET_OK : CFG_NET_E_STORAGE;
+}
+
+config_net_err_t config_net_set_host(const char *host, long port)
+{
+    const config_net_err_t err = host_port_check(host, port);
+    if (err != CFG_NET_OK) return err;
+    if (!provisioned()) return CFG_NET_E_NOT_PROVISIONED;
+    nvs_handle_t h;
+    if (open_rw(&h) != ESP_OK) return CFG_NET_E_STORAGE;
+    const bool ok = nvs_set_str(h, K_WL_HOST, host) == ESP_OK && nvs_set_u16(h, K_WL_PORT, (uint16_t)port) == ESP_OK && nvs_commit(h) == ESP_OK;
+    close_rw(h);
+    ESP_LOGI(TAG, "net host: host_len=%u %s", (unsigned)bounded_len(host, 32), ok ? "replaced" : "FAILED");
+    return ok ? CFG_NET_OK : CFG_NET_E_STORAGE;
+}
+
+config_net_err_t config_net_set_mode(long mode)
+{
+    if (mode != 0 && mode != 1) return CFG_NET_E_MODE;
+    if (!provisioned()) return CFG_NET_E_NOT_PROVISIONED;
+    nvs_handle_t h;
+    if (open_rw(&h) != ESP_OK) return CFG_NET_E_STORAGE;
+    const bool ok = nvs_set_u8(h, K_WL_MODE, (uint8_t)mode) == ESP_OK && nvs_commit(h) == ESP_OK;
+    close_rw(h);
+    ESP_LOGI(TAG, "net mode %d: %s", (int)mode, ok ? "ok" : "FAILED");
+    return ok ? CFG_NET_OK : CFG_NET_E_STORAGE;
+}
+
+config_net_err_t config_net_clear(void)
+{
+    nvs_handle_t h;
+    if (open_rw(&h) != ESP_OK) return CFG_NET_E_STORAGE;
+    // The marker first, for the same reason as in config_net_set.
+    bool ok = erased(nvs_erase_key(h, K_WL_VER)) && nvs_commit(h) == ESP_OK
+        && erased(nvs_erase_key(h, K_WL_SSID)) && erased(nvs_erase_key(h, K_WL_PASS)) && erased(nvs_erase_key(h, K_WL_HOST))
+        && erased(nvs_erase_key(h, K_WL_PORT)) && erased(nvs_erase_key(h, K_WL_KEY)) && erased(nvs_erase_key(h, K_WL_MODE))
+        && nvs_commit(h) == ESP_OK;
+    close_rw(h);
+    ESP_LOGW(TAG, "net clear: %s", ok ? "ok" : "FAILED");
+    return ok ? CFG_NET_OK : CFG_NET_E_STORAGE;
+}
+
 bool config_clear_all(void)
 {
     nvs_handle_t h;

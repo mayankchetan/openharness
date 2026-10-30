@@ -53,5 +53,71 @@ void config_save_scroll_reversed(bool reversed);
 bool config_load_swipe_reversed(void);
 void config_save_swipe_reversed(bool reversed);
 
-// Factory reset (BOOT held at power-on, or Settings → Reset): forget all of the above.
+// ── Wi-Fi settings (docs/specs/cable-wifi-link.md section 3) ──────────────────────────────────────────
+// The network to join, the address of the daemon's listener and the key (TLS-PSK) the dial proves to it, in NVS namespace "pair":
+// wl_ssid, wl_pass, wl_host, wl_port, wl_key and wl_mode, and wl_ver = 1, the COMMIT MARKER. They are given over the USB cable
+// only (cable_client.c refuses them on any other link) and never logged: a log line may carry a length, never a value.
+//
+// The marker rules, which the tests hold to (test_net_config.c):
+//   - a set removes wl_ver FIRST, writes the other keys, and writes wl_ver LAST. A power cut between two keys leaves wl_ver
+//     absent, so the dial is unprovisioned and never holds half of one network and half of another;
+//   - a clear removes wl_ver FIRST for the same reason;
+//   - config_net_load / config_net_info say "provisioned" only when wl_ver is 1 AND every key is present and valid;
+//   - config_clear_all (factory reset) takes every key of the namespace, these included.
+#define CFG_NET_SSID_MAX 32
+#define CFG_NET_PASS_MAX 63
+#define CFG_NET_HOST_MAX 15
+#define CFG_NET_KEY_LEN  32
+#define CFG_NET_PORT_MIN 1024
+
+// Why a request was refused. The names (config_net_err_name) are what net.state sends back as `err`: field names or reasons, never values.
+typedef enum {
+    CFG_NET_OK = 0,
+    CFG_NET_E_SSID,
+    CFG_NET_E_PASS,
+    CFG_NET_E_HOST,
+    CFG_NET_E_PORT,
+    CFG_NET_E_KEY,
+    CFG_NET_E_MODE,
+    CFG_NET_E_NOT_PROVISIONED,   // net.key / net.host / net.mode on a dial that holds no whole configuration
+    CFG_NET_E_STORAGE,           // NVS would not take a write
+} config_net_err_t;
+
+const char *config_net_err_name(config_net_err_t err);
+
+// Everything, secrets included: for the net task that joins the network (W11), nothing else. False unless the dial is provisioned.
+typedef struct {
+    char    ssid[CFG_NET_SSID_MAX + 1];
+    char    pass[CFG_NET_PASS_MAX + 1];
+    char    host[CFG_NET_HOST_MAX + 1];
+    uint16_t port;
+    uint8_t key[CFG_NET_KEY_LEN];
+    uint8_t mode;                // wl_mode: 1 = join Wi-Fi when the USB cable is unplugged, 0 = USB only
+} config_net_t;
+bool config_net_load(config_net_t *out);
+
+// What may be sent to the daemon and shown: no password and no key.
+typedef struct {
+    bool     saved;
+    char     ssid[CFG_NET_SSID_MAX + 1];
+    char     host[CFG_NET_HOST_MAX + 1];
+    uint16_t port;
+    uint8_t  mode;
+} config_net_info_t;
+void config_net_info(config_net_info_t *out);
+
+// The standard base64 of exactly 32 bytes (44 characters, one "=", no other padding, no whitespace, no url-safe letters, trailing bits zero).
+bool config_net_key_decode(const char *b64, uint8_t out[CFG_NET_KEY_LEN]);
+
+// Check every field, then write all of them, wl_ver last. `port` and `mode` are -1 when the message had none. A refusal names the
+// FIRST bad field in the order ssid, pass, host, port, key, mode and writes nothing.
+config_net_err_t config_net_set(const char *ssid, const char *pass, const char *host, long port, const uint8_t *key, long mode);
+// These three need a whole configuration (CFG_NET_E_NOT_PROVISIONED otherwise).
+config_net_err_t config_net_set_key(const uint8_t *key);
+config_net_err_t config_net_set_host(const char *host, long port);
+config_net_err_t config_net_set_mode(long mode);
+// Forget the network, the address, the key and the mode. Fine when there is nothing to forget.
+config_net_err_t config_net_clear(void);
+
+// Factory reset (BOOT held at power-on, or Settings → Reset): forget all of the above, and the Wi-Fi settings.
 bool config_clear_all(void);

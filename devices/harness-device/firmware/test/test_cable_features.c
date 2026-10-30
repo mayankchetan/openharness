@@ -43,6 +43,11 @@ int main(void)
     check("{\"features\":[\"debug\"]}", CABLE_FEATURE_DEBUG);
     check("{\"features\":[\"debug\",\"form\"]}", CABLE_FEATURE_DEBUG | CABLE_FEATURE_FORM);
     check("{\"features\":[\"Debug\",\"debug.shot\"]}", 0);
+    // Wi-Fi settings (net.*): bit 9, named "net". Wire-visible to the daemon, so its value is pinned here too.
+    assert(CABLE_FEATURE_NET == (1u << 9));
+    check("{\"features\":[\"net\"]}", CABLE_FEATURE_NET);
+    check("{\"features\":[\"Net\",\"net.set\",\"network\"]}", 0);
+    check("{\"features\":[\"voice.adpcm\",\"net\",\"debug\"]}", CABLE_FEATURE_ADPCM | CABLE_FEATURE_NET | CABLE_FEATURE_DEBUG);
     static const char *names[] = {"form", "selection", "visit", "voice.draft", "question.review", "agents.refresh"};
     for (unsigned mask=0; mask<64; mask++) {
         cJSON *root=cJSON_CreateObject(), *array=cJSON_AddArrayToObject(root,"features");

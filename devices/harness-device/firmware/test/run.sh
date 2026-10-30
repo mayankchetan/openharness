@@ -70,6 +70,12 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
    -o "$out/test_cable_json_guard" "$here/test_cable_json_guard.c" "$here/../main/cable_json_guard.c"
 "$out/test_cable_json_guard"
 
+# The dial's Wi-Fi settings in NVS (config_store.c config_net_*; W10): every field checked, wl_ver written last and removed first, a power cut
+# between two keys, clear, factory reset, base64 key decode, and no value in the log. An in-memory NVS (host_nvs/) that can fail after N writes.
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/host_stubs" -I "$here/host_nvs" -I "$here/../main" \
+   -o "$out/test_net_config" "$here/test_net_config.c" "$here/host_nvs/host_nvs.c" "$here/../main/config_store.c"
+"$out/test_net_config"
+
 cc -std=c11 -Wall -Wextra -Werror -O1 \
    -o "$out/test_cable_machines" "$here/test_cable_machines.c" "$here/../main/cable_machines.c"
 "$out/test_cable_machines"
@@ -360,6 +366,8 @@ if [[ -n "${IDF_PATH:-}" ]]; then
     python3 "$here/test_cable_supertab.py"
     python3 "$here/test_cable_models.py"
     python3 "$here/test_cable_outbound.py"
+    # net.set / get / clear / mode / key / host (cable_client.c handle_net, W10): USB only, behind the feature, field names and never values.
+    python3 "$here/test_cable_net_set.py"
     # cable_xport_tls.c against the IDF copy of mbedTLS built for the host: handshake, echo, refusals, concurrency, deadlines (about 20 s)
     python3 "$here/test_cable_xport_tls.py"
 fi
