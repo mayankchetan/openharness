@@ -543,6 +543,10 @@ export interface DialStatus {
    * however many were plugged in.
    */
   devices?: DialStatus[]
+  /** Which link this device is on right now: `usb`, `wifi`, later `ble` or `tunnel`. Absent when the port does not say. */
+  transport?: CableTransport
+  /** The device's address on the network, when it is on a network link (`CablePort.peer`). */
+  lan?: string
 }
 
 interface Message {
@@ -556,10 +560,21 @@ interface Message {
  */
 export interface CablePort {
   readonly path: string
+  /**
+   * Which link this is. Absent means the cable, as every port was before there was another. The session uses it to
+   * refuse a firmware image anywhere but over USB (the OTA path takes plain HTTP and an image with no signature) and to
+   * say so in the status; it reads nothing else from it.
+   */
+  readonly transport?: CableTransport
+  /** The far end's address on a network link, for the log and the status. */
+  readonly peer?: string
   readonly isOpen: boolean
   write(bytes: Uint8Array): Promise<void>
   close(why?: string): Promise<void>
 }
+
+/** The links a dial can come in on. */
+export type CableTransport = 'usb' | 'wifi' | 'ble' | 'tunnel'
 
 /** Open the dial's port, or null when it is not there. Both are ordinary answers. */
 export type PortOpener = (
@@ -1356,7 +1371,8 @@ export class CableSession {
         // Offered on every greeting, but only ONCE per version per session: accepting makes the dial erase
         // a flash slot before it answers, so a cadence of retries would spend erase cycles on the user's
         // hardware every fifteen seconds, and nothing about the next greeting changes what went wrong.
-        await this.maybeOfferFirmware(str('fw') ?? '')
+        // Never over a link that is not the cable: see maybeOfferFirmware.
+        if (this.mayOfferFirmwareHere()) await this.maybeOfferFirmware(str('fw') ?? '')
         // AFTER the firmware offer, so a pending image is already `this.transfer` and the pets wait for it.
         this.readPetHello(msg)
         await this.syncPets()
@@ -1914,7 +1930,15 @@ export class CableSession {
     this.fwStall.unref?.()
   }
 
+  /** A firmware image goes over the cable only: the dial's OTA path takes plain HTTP and no image signature, so nothing over Wi-Fi may start one. */
+  private mayOfferFirmwareHere(): boolean {
+    const transport = this.link?.transport
+    return transport === undefined || transport === 'usb'
+  }
+
   private async maybeOfferFirmware(runningVersion: string): Promise<void> {
+    // The call site checks this too; here it holds for any other caller.
+    if (!this.mayOfferFirmwareHere()) return
     // A pack in flight also holds it back: the reader task that writes flash is busy with the pack, and the
     // next hello (every fifteen seconds) asks again.
     if (!this.host.firmwareFor || this.transfer || this.petTransfer || !runningVersion) return
@@ -2431,6 +2455,8 @@ export class CableSession {
       ...(this.greetedBoard ? { board: this.greetedBoard } : {}),
       ...(this.greetedMac ? { mac: this.greetedMac } : {}),
       ...(this.greetedSettings ? { settings: this.greetedSettings } : {}),
+      ...(this.link?.transport ? { transport: this.link.transport } : {}),
+      ...(this.link?.peer ? { lan: this.link.peer } : {}),
       ...extra,
     })
   }

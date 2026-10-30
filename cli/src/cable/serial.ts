@@ -232,6 +232,9 @@ function findLinux(): DialPort[] {
  * reopening is cheap and safe.
  */
 export class SerialLink {
+  /** The cable: what the session reads to allow a firmware offer and to label the status (cableSession.ts `CablePort`). */
+  readonly transport = 'usb' as const
+
   private constructor(
     readonly path: string,
     private readonly stream: Duplex,
