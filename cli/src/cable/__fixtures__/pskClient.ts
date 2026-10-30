@@ -5,6 +5,8 @@ import * as tls from 'node:tls'
 export interface PskClientOptions {
   port: number
   host?: string
+  /** Source address of the connection: 127.0.0.2 and up are other "hosts" on a loopback test. */
+  localAddress?: string
   identity: string
   psk: Buffer
   /** OpenSSL cipher list; default is the one suite the dial offers first. */
@@ -23,6 +25,7 @@ export function pskConnect(opts: PskClientOptions): Promise<tls.TLSSocket> {
     const options: tls.ConnectionOptions = {
       host: opts.host ?? '127.0.0.1',
       port: opts.port,
+      ...(opts.localAddress ? { localAddress: opts.localAddress } : {}),
       minVersion: opts.minVersion ?? 'TLSv1.2',
       maxVersion: opts.maxVersion ?? 'TLSv1.2',
       // No certificate exists on a PSK link, so there is nothing for the default hostname check to look at.
