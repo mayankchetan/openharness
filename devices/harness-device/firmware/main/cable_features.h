@@ -17,6 +17,9 @@ enum {
     // them with or without it, because a host script that only wants a screenshot has no reason to
     // play daemon and send a welcome first.
     CABLE_FEATURE_DEBUG = 1u << 7,
+    // The daemon decodes ADPCM voice blocks (frame type 0x07, adpcm_ima.h). Offered only to a dial whose hello said
+    // voiceCodec "adpcm-v1"; the dial still chooses per turn, and on USB it keeps sending PCM unless built otherwise.
+    CABLE_FEATURE_ADPCM = 1u << 8,
 };
 
 // Optional welcome field. Older daemons omit it and retain the core voice,

@@ -10,7 +10,9 @@ vi.mock('../config/env.js', () => ({ env: {
   BACKEND_WS_URL: 'wss://api.example.test/', CABLE_STT_PATH: '/api/voice/stt',
 } }))
 
-import { DaemonCableHost, type CableHostWiring } from './cableHost.js'
+import { readFileSync } from 'node:fs'
+import { assembleAdpcm } from './adpcm.js'
+import { DaemonCableHost, wav, type CableHostWiring } from './cableHost.js'
 
 const pcm = Buffer.alloc(32_000)
 const ok = () => new Response(JSON.stringify({ success: true, data: { transcript: 'a test sentence' } }), {
@@ -48,6 +50,20 @@ describe('cabled voice transcription', () => {
     expect(options?.headers).toMatchObject({ authorization: 'Bearer test-access-token', 'x-autonomous-env': 'prod' })
     expect((options?.body as Buffer).includes(Buffer.from('RIFF'))).toBe(true)
     expect((options?.body as Buffer).includes(Buffer.from('WAVE'))).toBe(true)
+  })
+
+  it('uploads the PCM of an ADPCM turn, gaps filled with silence, as one WAV of exactly that audio', async () => {
+    // The daemon decodes ADPCM before the transcriber sees anything (cableSession.ts), so this is the whole path from
+    // the blocks that arrived to the bytes that go up. Vector: one block dropped, 505 zero samples in its place.
+    const lines = readFileSync(new URL('./vectors/adpcm_ima.txt', import.meta.url), 'utf8').split(/\r?\n/)
+    const gap = lines.map((line) => line.split('\t')).find((f) => f[0] === 'gap' && f[1] === 'gap_1')!
+    const audio = assembleAdpcm(gap[2].split(',').map((p) => Uint8Array.from(Buffer.from(p, 'hex'))))
+    expect(audio.equals(Buffer.from(gap[3], 'hex'))).toBe(true)
+    const { host, fetchMock } = setup()
+    fetchMock.mockResolvedValue(ok())
+    await expect(host.transcribe(audio, 16000, 'en')).resolves.toBe('a test sentence')
+    const body = fetchMock.mock.calls[0]![1]?.body as Buffer
+    expect(body.includes(wav(audio, 16000))).toBe(true)
   })
 
   it('forces one refresh after 401 even before the stored expiry, reusing the same audio', async () => {

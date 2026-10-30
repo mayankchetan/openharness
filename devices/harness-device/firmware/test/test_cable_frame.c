@@ -21,6 +21,11 @@
 static int failures;
 static int checks;
 
+// The frame type numbers are wire values shared with the daemon (cli/src/cable/cableFrame.ts); a renumbering is a
+// link that opens and delivers nothing. 0x07 carries one ADPCM voice block (main/adpcm_ima.h).
+_Static_assert(CABLE_TYPE_ADPCM == 0x07, "CABLE_TYPE_ADPCM is wire value 7");
+_Static_assert(CABLE_TYPE_SHOT == 0x06 && CABLE_TYPE_PET == 0x05, "the types before it did not move");
+
 static void fail(const char *name, const char *what)
 {
     printf("  FAIL %-32s %s\n", name, what);

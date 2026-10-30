@@ -78,6 +78,7 @@
 #define CABLE_TYPE_LOG  0x04   // one ESP_LOG line, device → daemon, raw bytes (no JSON escaping)
 #define CABLE_TYPE_PET  0x05   // one slice of a custom pet pack (HPET), daemon → device only
 #define CABLE_TYPE_SHOT 0x06   // one chunk of a debug screenshot, device → host only (docs/DEBUG_COMMANDS.md)
+#define CABLE_TYPE_ADPCM 0x07  // one ADPCM voice block, device → daemon (seq, n, flags + a WAV IMA mono block; adpcm_ima.h)
 
 // CRC-16/CCITT-FALSE — poly 0x1021, init 0xFFFF, no reflection, no final xor.
 //

@@ -55,6 +55,7 @@ export const CableType = {
   Log: 0x04, // one ESP_LOG line, dial → daemon, raw bytes (no JSON escaping)
   Pet: 0x05, // one slice of a custom pet pack, daemon → dial only (same credit window as Fw)
   Shot: 0x06, // one chunk of a screenshot, dial → daemon: id:u16le | index:u16le | RGB565 big-endian pixels (dialDebug.ts)
+  Adpcm: 0x07, // one ADPCM voice block, dial → daemon: seq:u16le | n:u16le | flags:u8 | one WAV IMA mono block (adpcm.ts)
 } as const
 
 /**

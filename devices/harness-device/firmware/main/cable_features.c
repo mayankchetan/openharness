@@ -13,6 +13,7 @@ uint32_t cable_features_parse(const cJSON *welcome)
         {"agents.refresh", CABLE_FEATURE_AGENTS_REFRESH},
         {"settings", CABLE_FEATURE_SETTINGS},
         {"debug", CABLE_FEATURE_DEBUG},
+        {"voice.adpcm", CABLE_FEATURE_ADPCM},
     };
     uint32_t result = 0;
     const cJSON *item;

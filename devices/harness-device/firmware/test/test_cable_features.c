@@ -31,6 +31,14 @@ int main(void)
     check("{\"features\":[\"form\",{}]}", 0);
     check("{\"features\":[\"form\",[\"visit\"]]}", 0);
     check("{\"features\":[\"agents.refresh\"]}", CABLE_FEATURE_AGENTS_REFRESH);
+    // ADPCM voice (frame type 0x07): bit 8, named "voice.adpcm". The bit is wire-visible to the daemon's feature list,
+    // so its value is pinned here, not just referenced.
+    assert(CABLE_FEATURE_ADPCM == (1u << 8));
+    check("{\"features\":[\"voice.adpcm\"]}", CABLE_FEATURE_ADPCM);
+    check("{\"features\":[\"voice.adpcm\",\"voice.adpcm\"]}", CABLE_FEATURE_ADPCM);
+    check("{\"features\":[\"Voice.adpcm\",\"voice.ADPCM\",\"voice.adpcm.2\",\"adpcm\"]}", 0);
+    check("{\"features\":[\"voice.draft\",\"voice.adpcm\",\"debug\"]}", CABLE_FEATURE_DRAFT | CABLE_FEATURE_ADPCM | CABLE_FEATURE_DEBUG);
+    check("{\"features\":[\"voice.adpcm\",{}]}", 0);
     check("{\"features\":[\"debug\"]}", CABLE_FEATURE_DEBUG);
     check("{\"features\":[\"debug\",\"form\"]}", CABLE_FEATURE_DEBUG | CABLE_FEATURE_FORM);
     check("{\"features\":[\"Debug\",\"debug.shot\"]}", 0);
@@ -50,5 +58,5 @@ int main(void)
     assert(cJSON_AddItemToArray(array,cJSON_CreateString("form")));
     assert(cable_features_parse(root)==0);
     cJSON_Delete(root);
-    puts("host features: PASS (legacy default, 64 combinations, unknown/type/size bounds, no allocations)");
+    puts("host features: PASS (legacy default, 64 combinations, voice.adpcm, unknown/type/size bounds, no allocations)");
 }

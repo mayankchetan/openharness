@@ -22,6 +22,7 @@ import { readCompanionIdentity, type CompanionIdentity } from './companionProtoc
 //   3. SAY NOTHING WHEN NOTHING CHANGED. That is what keeps the link idle during a long turn, and it is
 //      why rule 2 has to exist at all.
 
+import { ADPCM_BLOCK_PCM_BYTES, AdpcmAssembler } from './adpcm.js'
 import { CABLE_MAX_PAYLOAD, CableDecoder, CableType, encodeCableFrame } from './cableFrame.js'
 import { DialDebug, type DebugTouch, type DoneResult, type ShotResult } from './dialDebug.js'
 import { DialLog } from './dialLog.js'
@@ -39,7 +40,7 @@ import { QuestionInbox, type ReviewedAnswer, type AnswerReceipt, type QuestionSp
 import { notificationReadToken, type UnreadNotification } from '../lib/notificationRead.js'
 
 /** Bumped when the VOCABULARY changes. Separate from the frame version, which is the envelope. */
-export const CABLE_PROTO_VERSION = 3   // 3: + question.close (a question answered on another client)
+export const CABLE_PROTO_VERSION = 4   // 3: + question.close (a question answered on another client); 4: + ADPCM voice (frame type 0x07, voice.begin.codec)
 
 const PING_EVERY_MS = 5_000
 /** No bytes of any kind for this long → the handle is dead. Longer than the dial's own 15 s window, so a
@@ -626,7 +627,9 @@ export class CableSession {
   private link: CablePort | null = null
   private decoder = new CableDecoder()
   /** This port's traffic since it opened, logged once a minute and when it closes (see logLink). */
-  private traffic = { at: 0, tx: 0, txFrames: 0, rx: 0, rxFrames: 0, corrupt: 0, discarded: 0, run: '', noise: '' }
+  private traffic = { at: 0, tx: 0, txFrames: 0, rx: 0, rxFrames: 0, corrupt: 0, discarded: 0, run: '', noise: '',
+    /** ADPCM voice blocks since the port opened: arrived, lost (a gap in `seq`), repeated or late, refused. */
+    adpcm: { blocks: 0, lost: 0, repeated: 0, bad: 0 } }
   private timer: NodeJS.Timeout | null = null
   private greetedMac: string | null = null
   /** This session has spoken with a real dial at least once. Never reset: a port that has been a dial
@@ -796,8 +799,13 @@ export class CableSession {
   /** Devices already logged as having no image channel this session (the hello repeats every ~15 s). */
   private noChannelLogged = new Set<string>()
 
+  /** `hello.voiceCodec` was "adpcm-v1": the dial can send ADPCM blocks, so the welcome offers `voice.adpcm`. Set on every hello. */
+  private adpcmVoice = false
+
   /** Voice capture in flight: PCM chunks as they arrive, plus what `voice.begin` said about them. */
   private voice: { agentId?: string; cmd?: string; lang: string; rate: number; chunks: Buffer[]; bytes: number;
+    /** Present when `voice.begin.codec` was "adpcm": this turn is made of type-0x07 blocks, never of type-0x02 chunks. */
+    adpcm?: AdpcmAssembler;
     selectionId?: string; selection?: Promise<SelectionResult>;
     carry?: CarryRead;
     question?: { pin?: QuestionSpeech };
@@ -1025,6 +1033,7 @@ export class CableSession {
     this.traffic = {
       at: Date.now(), tx: 0, txFrames: 0, rx: 0, rxFrames: 0,
       corrupt: this.decoder.corruptFrames, discarded: this.decoder.discardedBytes, run: '', noise: '',
+      adpcm: { blocks: 0, lost: 0, repeated: 0, bad: 0 },
     }
     this.link = opened
     // Leftover bytes belong to a session that has ended; carrying them across would put a stale
@@ -1126,7 +1135,10 @@ export class CableSession {
   private logLink(label: string): void {
     const t = this.traffic
     this.keepRun()
-    this.log(`cable: ${label} · tx ${t.tx} B in ${t.txFrames} frames · rx ${t.rx} B in ${t.rxFrames} frames · corrupt ${this.decoder.corruptFrames - t.corrupt} · discarded ${this.decoder.discardedBytes - t.discarded} B${t.noise ? ` · non-frame text: ${t.noise}` : ''}`)
+    const a = t.adpcm
+    // Only once ADPCM has been used on this port: a USB dial on PCM keeps the line it has always had.
+    const adpcm = a.blocks + a.repeated + a.bad ? ` · adpcm ${a.blocks} blocks, ${a.lost} lost, ${a.repeated} repeated, ${a.bad} bad` : ''
+    this.log(`cable: ${label} · tx ${t.tx} B in ${t.txFrames} frames · rx ${t.rx} B in ${t.rxFrames} frames · corrupt ${this.decoder.corruptFrames - t.corrupt} · discarded ${this.decoder.discardedBytes - t.discarded} B${adpcm}${t.noise ? ` · non-frame text: ${t.noise}` : ''}`)
     t.at = Date.now()
     t.noise = ''
   }
@@ -1217,6 +1229,10 @@ export class CableSession {
         this.onPcm(Buffer.from(frame.payload))
         return
       }
+      if (frame.type === CableType.Adpcm) {
+        this.onAdpcm(frame.payload)
+        return
+      }
       // An unknown type is a dial running ahead of this daemon. Visible, never fatal.
       this.log(`cable: unknown frame type 0x${frame.type.toString(16)}`)
     })
@@ -1256,6 +1272,7 @@ export class CableSession {
         this.playerCapable = str('player') === 'library-v1'
         this.superTabWaits = str('superTab') === 'wait-v1'
         this.swarmCard = str('swarmCard') === 'v1'
+        this.adpcmVoice = str('voiceCodec') === 'adpcm-v1'
         this.wantCards(this.swarmCard)
         this.seqOn = str('board') === 'pro'
         this.seq = 0
@@ -1287,6 +1304,9 @@ export class CableSession {
             // The desktop will carry this device's preferences. A device that does not see this keeps
             // its own settings screens and never reports.
             'settings',
+            // Only to a dial that said it can send it. Not tied to a transport: the dial chooses per turn, and the
+            // decode below is the same on USB, Wi-Fi or a later phone link.
+            ...(this.adpcmVoice ? ['voice.adpcm'] : []),
           ],
         })
         // Log a dial that is new OR that came back running something else. The version half of that test
@@ -1662,6 +1682,10 @@ export class CableSession {
           rate: typeof msg.sr === 'number' && msg.sr > 0 ? msg.sr : DEFAULT_VOICE_RATE,
           chunks: [],
           bytes: 0,
+          // Anything but the exact word is PCM, as it always was. A dial ahead of this daemon that names a codec this
+          // side does not know sends frames of a type it does not carry into the turn: they are logged as unknown and
+          // the turn ends as "Didn't catch that", never as garbage heard as speech.
+          ...(str('codec') === 'adpcm' ? { adpcm: new AdpcmAssembler() } : {}),
           form,
           carry,
           question,
@@ -2063,15 +2087,45 @@ export class CableSession {
 
   private onPcm(chunk: Buffer): void {
     if (!this.voice) return // audio outside a turn is a dial that restarted mid-capture
+    if (this.voice.adpcm) return // an ADPCM turn is made of ADPCM blocks only; PCM here would break its timing
     this.voice.bytes += chunk.length
     if (this.voice.bytes > VOICE_MAX_BYTES) {
-      this.log('cable: voice over the length cap, dropped')
-      this.cancelFormVoice()
-      this.cancelSearchVoice()
-      this.voice = null
+      this.dropVoiceOverCap()
       return
     }
     this.voice.chunks.push(chunk)
+  }
+
+  /**
+   * One ADPCM block of the open turn. Decoded here, before the transcriber sees anything, so the host gets the same PCM
+   * it always got. A lost block (a gap in `seq`) becomes silence of the same length so the timing and the length cap stay
+   * true; a repeated or late one is dropped; a malformed one is counted and does not end the turn.
+   */
+  private onAdpcm(payload: Uint8Array): void {
+    const turn = this.voice
+    if (!turn?.adpcm) return // outside a turn (a dial that restarted mid-capture), or in a PCM turn
+    const r = turn.adpcm.push(payload)
+    const counts = this.traffic.adpcm
+    if (r.kind === 'bad') { counts.bad++; return }
+    if (r.kind === 'duplicate') { counts.repeated++; return }
+    counts.blocks++
+    counts.lost += r.gap
+    // Decoded bytes, silence included, count against the cap — and the cap is checked BEFORE the silence is built, so a
+    // corrupt `seq` cannot ask this process for tens of megabytes of zeros.
+    turn.bytes += r.gap * ADPCM_BLOCK_PCM_BYTES + r.pcm.length
+    if (turn.bytes > VOICE_MAX_BYTES) {
+      this.dropVoiceOverCap()
+      return
+    }
+    if (r.gap) turn.chunks.push(AdpcmAssembler.silence(r.gap))
+    turn.chunks.push(r.pcm)
+  }
+
+  private dropVoiceOverCap(): void {
+    this.log('cable: voice over the length cap, dropped')
+    this.cancelFormVoice()
+    this.cancelSearchVoice()
+    this.voice = null
   }
 
   private async finishVoice(review = false): Promise<void> {
@@ -2124,7 +2178,9 @@ export class CableSession {
     }
 
     const seconds = turn.bytes / (turn.rate * 2)
-    this.log(`cable: voice ${seconds.toFixed(1)}s (${Math.round(turn.bytes / 1024)} KB) → stt`)
+    const a = turn.adpcm?.stats
+    this.log(`cable: voice ${seconds.toFixed(1)}s (${Math.round(turn.bytes / 1024)} KB) → stt${a
+      ? ` · adpcm ${a.blocks} blocks, ${a.gapBlocks} lost, ${a.duplicates} repeated, ${a.bad} bad` : ''}`)
 
     let transcript: string
     try {

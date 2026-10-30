@@ -11,8 +11,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
+import { ADPCM_BLOCK_PCM_BYTES, encodeAdpcmBlock } from './adpcm.js'
 import { CABLE_MAX_FRAME, CableDecoder, CableType, encodeCableFrame } from './cableFrame.js'
-import { CableSession, recapFrame, type CableAgent, type CableHost, type CableMachine, type CablePort } from './cableSession.js'
+import { CABLE_PROTO_VERSION, CableSession, recapFrame, type CableAgent, type CableHost, type CableMachine, type CablePort } from './cableSession.js'
 import { DialLog } from './dialLog.js'
 import type { SwarmCard, SwarmLead } from '../superTabs/cards.js'
 import type { PetStore } from './pets/store.js'
@@ -68,6 +69,11 @@ class LoopbackPort implements CablePort {
 
   pcm(bytes: Buffer): void {
     this.onData(Buffer.from(encodeCableFrame(CableType.Pcm, bytes)))
+  }
+
+  /** One ADPCM voice block (frame type 0x07), as the dial sends it. */
+  adpcm(payload: Uint8Array): void {
+    this.onData(Buffer.from(encodeCableFrame(CableType.Adpcm, payload)))
   }
 
   /** A framed ESP_LOG line, as the dial sends while the daemon holds its only port. */
@@ -4118,5 +4124,228 @@ describe('swarm cards', () => {
       await settle(); await settle()
       expect(ofType(port, 'supertab.recap')).toEqual([])
     } finally { await session.stop() }
+  })
+})
+
+// ADPCM voice turns (frame type 0x07). The vectors are the ones the firmware's C test and adpcm.spec.ts assert against;
+// here they go through the whole session, so what is checked is what the transcriber is handed.
+describe('ADPCM voice turns', () => {
+  const gapVectors = readFileSync(new URL('./vectors/adpcm_ima.txt', import.meta.url), 'utf8').split('\n')
+    .map((line) => line.replace(/\r$/, '').split('\t')).filter((f) => f[0] === 'gap')
+    .map((f) => ({ name: f[1], payloads: f[2].split(',').map((p) => Buffer.from(p, 'hex')), pcm: Buffer.from(f[3], 'hex') }))
+  const ADPCM_HELLO = { t: 'hello', product: 'harness', mac: 'aa:bb', fw: '0.1.0', proto: 4, voiceCodec: 'adpcm-v1' }
+  const wave = Int16Array.from({ length: 505 }, (_, i) => Math.round(9000 * Math.sin(i / 6)))
+  const block = (seq: number, n = 505, flags = 0) => encodeAdpcmBlock(wave.subarray(0, n), 0, seq, flags).payload
+
+  async function adpcmTurn(over: Partial<CableHost> = {}, hello: Record<string, unknown> = ADPCM_HELLO) {
+    const lines: string[] = []
+    const transcribe = vi.fn(async (_pcm: Buffer, _rate: number, _lang: string) => 'ship it')
+    const host = makeHost({ transcribe, log: (line) => lines.push(line), ...over })
+    const dial = await connect(host)
+    dial.port.say(hello)
+    await vi.waitFor(() => expect(dial.port.types()).toContain('welcome'))
+    return { ...dial, host, transcribe, lines }
+  }
+  const begin = (port: LoopbackPort, extra: Record<string, unknown> = { codec: 'adpcm' }) =>
+    port.say({ t: 'voice.begin', uploadId: 'u1', agentId: 'a2', sr: 16000, ...extra })
+
+  it('speaks protocol 4', async () => {
+    expect(CABLE_PROTO_VERSION).toBe(4)
+    const { session, port } = await adpcmTurn()
+    try { expect(port.sent[0]).toMatchObject({ t: 'welcome', proto: 4 }) } finally { await session.stop() }
+  })
+
+  it('offers voice.adpcm only to a dial that asked for adpcm-v1, on any transport', async () => {
+    const asked = await adpcmTurn()
+    try { expect(asked.port.sent[0].features).toEqual(['voice.draft', 'agents.refresh', 'settings', 'voice.adpcm']) } finally { await asked.session.stop() }
+    for (const hello of [{ ...ADPCM_HELLO, voiceCodec: undefined }, { ...ADPCM_HELLO, voiceCodec: 'adpcm-v2' }, { ...ADPCM_HELLO, voiceCodec: 1 }]) {
+      const other = await adpcmTurn({}, hello)
+      try { expect(other.port.sent[0].features).not.toContain('voice.adpcm') } finally { await other.session.stop() }
+    }
+  })
+
+  it('hands the transcriber exactly the PCM of a clean turn, at the dial\'s rate', async () => {
+    const { session, port, transcribe, host } = await adpcmTurn()
+    try {
+      begin(port)
+      const blocks = [block(0), block(1), block(2, 100, 1)]
+      blocks.forEach((b) => port.adpcm(b))
+      port.say({ t: 'voice.end', uploadId: 'u1' })
+      await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalledWith('a2', 'ship it'))
+      const [pcm, rate, lang] = transcribe.mock.calls[0]!
+      expect(pcm.length).toBe(2 * ADPCM_BLOCK_PCM_BYTES + 200)
+      expect(rate).toBe(16000)
+      expect(lang).toBe('en')
+      // The first sample of every block is verbatim; the rest is the codec's, checked to the sample in adpcm.spec.ts.
+      expect(pcm.readInt16LE(0)).toBe(wave[0])
+      expect(pcm.readInt16LE(ADPCM_BLOCK_PCM_BYTES)).toBe(wave[0])
+      expect(pcm.readInt16LE(2 * ADPCM_BLOCK_PCM_BYTES)).toBe(wave[0])
+    } finally { await session.stop() }
+  })
+
+  it.each(gapVectors)('turn $name: the transcriber gets the vector PCM', async ({ payloads, pcm }) => {
+    const { session, port, transcribe, host } = await adpcmTurn()
+    try {
+      begin(port)
+      payloads.forEach((p) => port.adpcm(p))
+      port.say({ t: 'voice.end', uploadId: 'u1' })
+      await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalled())
+      expect(transcribe.mock.calls[0]![0].equals(pcm)).toBe(true)
+    } finally { await session.stop() }
+  })
+
+  it('a dropped block puts zeros in its place, so the length stays true', async () => {
+    const { session, port, transcribe, host } = await adpcmTurn()
+    try {
+      begin(port)
+      port.adpcm(block(0)); port.adpcm(block(2)); port.adpcm(block(3))
+      port.say({ t: 'voice.end', uploadId: 'u1' })
+      await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalled())
+      const pcm = transcribe.mock.calls[0]![0]
+      expect(pcm.length).toBe(4 * ADPCM_BLOCK_PCM_BYTES)
+      expect(pcm.subarray(ADPCM_BLOCK_PCM_BYTES, 2 * ADPCM_BLOCK_PCM_BYTES).every((b) => b === 0)).toBe(true)
+      expect(pcm.readInt16LE(2 * ADPCM_BLOCK_PCM_BYTES)).toBe(wave[0])
+    } finally { await session.stop() }
+  })
+
+  it('a repeated or older block is dropped', async () => {
+    const { session, port, transcribe, host } = await adpcmTurn()
+    try {
+      begin(port)
+      port.adpcm(block(0)); port.adpcm(block(1)); port.adpcm(block(1)); port.adpcm(block(0)); port.adpcm(block(2))
+      port.say({ t: 'voice.end', uploadId: 'u1' })
+      await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalled())
+      expect(transcribe.mock.calls[0]![0].length).toBe(3 * ADPCM_BLOCK_PCM_BYTES)
+    } finally { await session.stop() }
+  })
+
+  it('still carries a plain PCM turn, byte for byte, when the dial advertised adpcm and did not use it', async () => {
+    const { session, port, transcribe, host } = await adpcmTurn()
+    try {
+      const raw = Buffer.from(Array.from({ length: 3200 }, (_, i) => (i * 7 + 3) & 0xff))
+      begin(port, {})   // no codec field: the turn is PCM, exactly as before
+      port.pcm(raw)
+      port.say({ t: 'voice.end', uploadId: 'u1' })
+      await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalled())
+      expect(transcribe.mock.calls[0]![0].equals(raw)).toBe(true)
+    } finally { await session.stop() }
+  })
+
+  it('an old dial that says nothing about codecs is served PCM unchanged', async () => {
+    const { session, port, transcribe, host } = await adpcmTurn({}, { t: 'hello', product: 'harness', mac: 'aa:bb', fw: '0.0.58', proto: 3 })
+    try {
+      const raw = Buffer.alloc(3200, 7)
+      port.say({ t: 'voice.begin', uploadId: 'u1', agentId: 'a2' })
+      port.pcm(raw)
+      port.say({ t: 'voice.end', uploadId: 'u1' })
+      await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalled())
+      expect(transcribe.mock.calls[0]![0].equals(raw)).toBe(true)
+      expect(port.sent[0].features).not.toContain('voice.adpcm')
+    } finally { await session.stop() }
+  })
+
+  it('ignores a block that arrives while no turn is open, and one after the turn ended', async () => {
+    const { session, port, transcribe, host } = await adpcmTurn()
+    try {
+      port.adpcm(block(0))   // nothing open: a dial that restarted mid-capture
+      begin(port)
+      port.adpcm(block(0))
+      port.say({ t: 'voice.end', uploadId: 'u1' })
+      await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalled())
+      expect(transcribe.mock.calls[0]![0].length).toBe(ADPCM_BLOCK_PCM_BYTES)
+      port.adpcm(block(1))   // after voice.end
+      begin(port)
+      port.say({ t: 'voice.end', uploadId: 'u1' })   // an empty turn: the stray block was not carried into it
+      await vi.waitFor(() => expect(port.sent.some((m) => m.t === 'voice.error' && m.message === "Didn't catch that")).toBe(true))
+      expect(transcribe).toHaveBeenCalledOnce()
+    } finally { await session.stop() }
+  })
+
+  it('does not mix the two kinds of audio in one turn', async () => {
+    const { session, port, transcribe, host } = await adpcmTurn()
+    try {
+      begin(port)
+      port.pcm(Buffer.alloc(3200, 9))   // PCM in an ADPCM turn
+      port.adpcm(block(0))
+      port.say({ t: 'voice.end', uploadId: 'u1' })
+      await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalled())
+      expect(transcribe.mock.calls[0]![0].length).toBe(ADPCM_BLOCK_PCM_BYTES)
+      begin(port, {})
+      port.adpcm(block(0))   // ADPCM in a PCM turn
+      port.pcm(Buffer.alloc(3200, 9))
+      port.say({ t: 'voice.end', uploadId: 'u1' })
+      await vi.waitFor(() => expect(transcribe).toHaveBeenCalledTimes(2))
+      expect(transcribe.mock.calls[1]![0].length).toBe(3200)
+    } finally { await session.stop() }
+  })
+
+  it('refuses a malformed block without ending the turn, and counts it', async () => {
+    const { session, port, transcribe, host, lines } = await adpcmTurn()
+    try {
+      begin(port)
+      port.adpcm(block(0))
+      port.adpcm(Buffer.from([1, 2, 3]))
+      port.adpcm(Buffer.concat([block(1), Buffer.from([0])]))   // one byte too long
+      port.adpcm(block(1))
+      port.say({ t: 'voice.end', uploadId: 'u1' })
+      await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalled())
+      expect(transcribe.mock.calls[0]![0].length).toBe(2 * ADPCM_BLOCK_PCM_BYTES)
+      expect(lines.some((l) => /voice .*adpcm 2 blocks, 0 lost, 0 repeated, 2 bad/.test(l))).toBe(true)
+    } finally { await session.stop() }
+  })
+
+  it('logs the turn\'s block, loss and repeat counts beside its length', async () => {
+    const { session, port, host, lines } = await adpcmTurn()
+    try {
+      begin(port)
+      port.adpcm(block(0)); port.adpcm(block(3)); port.adpcm(block(3))
+      port.say({ t: 'voice.end', uploadId: 'u1' })
+      await vi.waitFor(() => expect(host.sendTurn).toHaveBeenCalled())
+      // 4 blocks of audio (2 arrived, 2 lost): 4 x 1010 B = 4040 B, 0.1 s at 16 kHz.
+      expect(lines).toContain('cable: voice 0.1s (4 KB) → stt · adpcm 2 blocks, 2 lost, 1 repeated, 0 bad')
+    } finally { await session.stop() }
+  })
+
+  it('counts decoded bytes against the length cap, not payload bytes', async () => {
+    const { session, port, transcribe, lines } = await adpcmTurn()
+    try {
+      begin(port)
+      // 19,010 blocks are 4.96 MB on the wire but 19.2 MB of audio, just over the ten-minute cap (19.2 MB); one more is sent to see it ignored.
+      for (let seq = 0; seq < 19_011; seq++) port.adpcm(block(seq))
+      port.say({ t: 'voice.end', uploadId: 'u1' })
+      await vi.waitFor(() => expect(port.sent.some((m) => m.t === 'voice.error')).toBe(true))
+      expect(lines).toContain('cable: voice over the length cap, dropped')
+      expect(transcribe).not.toHaveBeenCalled()
+    } finally { await session.stop() }
+  }, 30_000)
+
+  it('a corrupt sequence number cannot make the daemon build a huge run of silence', async () => {
+    const { session, port, transcribe, lines } = await adpcmTurn()
+    try {
+      begin(port)
+      port.adpcm(block(0))
+      port.adpcm(block(60_000))   // 59,999 lost blocks would be 60 MB of zeros
+      port.say({ t: 'voice.end', uploadId: 'u1' })
+      await vi.waitFor(() => expect(port.sent.some((m) => m.t === 'voice.error')).toBe(true))
+      expect(lines).toContain('cable: voice over the length cap, dropped')
+      expect(transcribe).not.toHaveBeenCalled()
+    } finally { await session.stop() }
+  })
+
+  it('totals the audio counters in the link line, only once ADPCM has been used', async () => {
+    const log = tmpLog()
+    const { session, port } = await connect(makeHost(), log)
+    try {
+      port.say(ADPCM_HELLO)
+      await vi.waitFor(() => expect(port.types()).toContain('welcome'))
+      port.say({ t: 'voice.begin', uploadId: 'u1', agentId: 'a2', codec: 'adpcm' })
+      port.adpcm(block(0)); port.adpcm(block(2))
+      port.say({ t: 'voice.end', uploadId: 'u1' })
+      await vi.waitFor(() => expect(port.types()).toContain('voice.transcript'))
+      await port.close('unplugged')
+      await log.flush()
+    } finally { await session.stop() }
+    const [line] = readFileSync(log.currentPath, 'utf8').split('\n').filter((l) => l.includes('[daemon] link at close'))
+    expect(line).toContain('adpcm 2 blocks, 1 lost, 0 repeated, 0 bad')
   })
 })

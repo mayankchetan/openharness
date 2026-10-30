@@ -113,7 +113,19 @@ for sample; section 2.6 says what ffmpeg is used for.
 | USB | PCM by default. ADPCM over USB only behind the firmware build flag `DEVICE_VOICE_ADPCM_USB` (task W4) |
 
 The daemon decodes ADPCM on whatever transport the dial uses; it has no "Wi-Fi only" rule. The dial decides.
-`CABLE_PROTO_VERSION` is 4 (3 before this change). Firmware feature bit `CABLE_FEATURE_ADPCM = 1u << 8`.
+`CABLE_PROTO_VERSION` is 4 on the daemon (3 before this change; the firmware's value moves to 4 with the firmware
+sender, task W4). Firmware feature bit `CABLE_FEATURE_ADPCM = 1u << 8`; frame type `CABLE_TYPE_ADPCM = 0x07`.
+
+Daemon behavior for one turn:
+
+- `voice.begin.codec` equal to `"adpcm"` makes the turn an ADPCM turn. Any other value, or none, is a PCM turn, as before.
+- An ADPCM turn takes type-0x07 frames only; a type-0x02 frame in it is ignored. A PCM turn takes type-0x02 frames only.
+  A type-0x07 frame while no turn is open is ignored, like PCM.
+- A malformed block is counted and dropped; the turn goes on.
+- The turn's length cap counts decoded bytes, silence included, and is checked before the silence for a gap is built,
+  so a damaged `seq` cannot make the daemon allocate a long run of zeros. Over the cap the turn is dropped.
+- The dial log gets `cable: voice <s>s (<KB> KB) -> stt - adpcm <blocks> blocks, <lost> lost, <repeated> repeated, <bad> bad`
+  for each turn, and the same four counts in the periodic `link` line once ADPCM has been used on the port.
 
 ### 2.6 Golden vectors and the ffmpeg check
 

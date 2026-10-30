@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-import { CABLE_FRAME_VERSION, CableDecoder, cableCrc16, encodeCableFrame } from './cableFrame.js'
+import { CABLE_FRAME_VERSION, CableDecoder, CableType, cableCrc16, encodeCableFrame } from './cableFrame.js'
 
 const VECTORS = join(__dirname, 'vectors', 'cable_frame.txt')
 
@@ -69,6 +69,11 @@ describe('cable framing', () => {
   it('is CRC-16/CCITT-FALSE', () => {
     // If this is wrong every vector below is wrong, and the failures would read as unrelated bugs.
     expect(cableCrc16(new TextEncoder().encode('123456789'))).toBe(0x29b1)
+  })
+
+  it('numbers its frame types as the firmware does', () => {
+    // Wire values, shared with main/cable_frame.h (whose host test pins them too).
+    expect(CableType).toEqual({ Json: 1, Pcm: 2, Fw: 3, Log: 4, Pet: 5, Shot: 6, Adpcm: 7 })
   })
 
   it('has vectors to check against', () => {
