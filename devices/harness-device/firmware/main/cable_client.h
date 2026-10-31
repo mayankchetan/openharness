@@ -77,15 +77,18 @@ const char *cable_fw_version(void);
 
 #define CABLE_PROTO_VERSION 4   // 3: + question.close (a question answered on another client); 4: + ADPCM voice (frame type 0x07, voice.begin.codec)
 
-// ADPCM voice over the cable (task W4; docs/specs/cable-wifi-link.md section 2). Off unless the build says
-// -DDEVICE_VOICE_ADPCM_USB=1: then the dial advertises hello.voiceCodec "adpcm-v1", sends voice.begin.codec "adpcm" when the daemon's
-// welcome has voice.adpcm, and the voice sender encodes. With the flag off none of that is compiled: the dial sends PCM and its
-// hello is the one it always sent (apart from `proto`). CABLE_VOICE_ADPCM_BUILT is the one switch the code tests; the Wi-Fi mode
-// (W12) widens its definition, it does not add a second one.
+// ADPCM voice (tasks W4 and W12; docs/specs/cable-wifi-link.md section 2). The code is always built in: the voice sender can encode, the hello can
+// advertise hello.voiceCodec "adpcm-v1" and voice.begin can carry codec "adpcm". Whether a turn uses it is a run-time rule (cable_voice_adpcm_chosen,
+// cable_features.h): the daemon's welcome has voice.adpcm AND the transport is not USB (Wi-Fi, later BLE). On USB the dial sends PCM and its hello
+// is the one it always sent (apart from `proto`), unless the build says -DDEVICE_VOICE_ADPCM_USB=1 (bench gate G1: ADPCM over the cable).
+// CABLE_VOICE_ADPCM_BUILT is the one compile switch the code tests; W4 defined it as the USB flag, W12 widens it to 1 and does not add a second.
+// It stays overridable: the host tests build the sender both ways.
 #ifndef DEVICE_VOICE_ADPCM_USB
 #define DEVICE_VOICE_ADPCM_USB 0
 #endif
-#define CABLE_VOICE_ADPCM_BUILT DEVICE_VOICE_ADPCM_USB
+#ifndef CABLE_VOICE_ADPCM_BUILT
+#define CABLE_VOICE_ADPCM_BUILT 1
+#endif
 
 // Most agents the dial holds at once — the size of the list this file hands the UI.
 //

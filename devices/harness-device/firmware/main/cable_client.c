@@ -324,8 +324,9 @@ static void handle_companion_celebrate(const cJSON *p)
     msg_bool(&root,"ok",ok);if (token) msg_string(&root,"token",token);send_json(root);
 }
 #if CABLE_VOICE_ADPCM_BUILT
-// The only link today is the USB cable. The Wi-Fi mode (W11) turns this into a question to the transport.
-static bool voice_transport_is_usb(void) { return true; }
+// The transport the link runs on right now: a wrapper reports the kind of its inner transport, so TLS over TCP is "wifi". Asked at hello and at every
+// voice.begin, so a link that changes between turns changes the codec with it.
+static bool voice_transport_is_usb(void) { return cable_link_transport() == CABLE_XPORT_USB; }
 static atomic_bool s_voice_adpcm;   // set by cable_client_voice_begin for the turn it opened
 static atomic_uchar s_voice_tag;    // the turn tag: counts up by one at every voice.begin and wraps; the sender reads it back
 #endif
@@ -654,7 +655,10 @@ bool cable_client_voice_begin(const char *agent_id, const char *cmd, const char 
 #if CABLE_VOICE_ADPCM_BUILT
     // PCM is the absence of the field. The sender reads the answer back with cable_client_voice_is_adpcm().
     const bool adpcm = cable_client_voice_adpcm_wanted();
-    const uint8_t tag = (uint8_t)(atomic_fetch_add(&s_voice_tag, 1) + 1);
+    // One writer: voice.begin comes from the voice_send task only, and one turn runs at a time (audio_client_habitat.c, `active`). A load and a store
+    // do what an atomic add would, without pulling libgcc's byte-wide __atomic_fetch_add_1 into internal RAM (152 B of DIRAM, measured at W12).
+    const uint8_t tag = (uint8_t)(atomic_load(&s_voice_tag) + 1);
+    atomic_store(&s_voice_tag, tag);
     // The tag rides with the codec: every block of this turn carries it, and the daemon drops a block that does not.
     if (adpcm) {
         msg_string(&root, "codec", "adpcm");

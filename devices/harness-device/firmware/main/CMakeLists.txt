@@ -176,10 +176,10 @@ if(DEVICE_PERF_BENCH)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_PERF_BENCH=1)
 endif()
 
-# ADPCM voice over USB (task W4), -DDEVICE_VOICE_ADPCM_USB=1, default OFF. The dial advertises hello.voiceCodec "adpcm-v1", and when the daemon's
-# welcome has voice.adpcm it sends each voice turn as IMA ADPCM blocks (frame type 0x07, adpcm_ima.c) instead of PCM. This exists so bench gate G1
-# can measure the encoder (encode_us_max, WER) over the cable before Wi-Fi exists. With the flag off no ADPCM code is compiled into the sender, the
-# hello or voice.begin: the dial sends PCM exactly as before. adpcm_ima.c is always in the source list (the linker drops it when nothing calls it).
+# ADPCM voice (tasks W4 and W12). The code is always built in (CABLE_VOICE_ADPCM_BUILT, cable_client.h): on a non-USB link (Wi-Fi mode) the dial
+# advertises hello.voiceCodec "adpcm-v1", and when the daemon's welcome has voice.adpcm it sends each voice turn as IMA ADPCM blocks (frame type 0x07,
+# adpcm_ima.c) instead of PCM. On USB it sends PCM and no voiceCodec, as before, unless -DDEVICE_VOICE_ADPCM_USB=1 (default OFF): that flag exists so
+# bench gate G1 can measure the encoder (encode_us_max, WER) over the cable.
 if(DEVICE_VOICE_ADPCM_USB)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_VOICE_ADPCM_USB=1)
 endif()

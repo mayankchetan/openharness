@@ -43,15 +43,15 @@ static void *consume(void *unused)
 }
 int main(void)
 {
-    static const unsigned sizes[]={32,256,1024,32768};
+    static const unsigned sizes[]={32,256,1024,32768,98304,1000};
     const char *amount=getenv("VOICE_THREAD_BYTES");
     total=amount?(uint32_t)strtoul(amount,NULL,10):2*1024*1024;
     assert(total&&total<UINT32_MAX/2);
     uint64_t verified=0;
-    for(unsigned cycle=0;cycle<8;cycle++) {
-        unsigned cap=sizes[cycle%4];uint8_t *storage=malloc(cap+16);assert(storage);
+    for(unsigned cycle=0;cycle<12;cycle++) {
+        unsigned cap=sizes[cycle%6];uint8_t *storage=malloc(cap+16);assert(storage);
         memset(storage,0xa5,cap+16);voice_buffer_init(&buffer,storage+8,cap);done=false;
-        if(cycle&1){atomic_store(&buffer.head,UINT32_MAX-255);atomic_store(&buffer.tail,UINT32_MAX-255);}
+        if(cycle&1||cycle>=6){uint32_t at=buffer.span?buffer.span-255:UINT32_MAX-255;atomic_store(&buffer.head,at);atomic_store(&buffer.tail,at);}
         seed=0x4d6a1985u+cycle*38119u;
         pthread_t producer,consumer;
         assert(!pthread_create(&producer,NULL,produce,NULL));
@@ -61,5 +61,5 @@ int main(void)
         for(int i=0;i<8;i++)assert(storage[i]==0xa5&&storage[cap+8+i]==0xa5);
         free(storage);verified+=total;
     }
-    printf("Voice ring threads: %llu bytes in exact order across four capacities, backpressure and counter wrap PASS\n",(unsigned long long)verified);
+    printf("Voice ring threads: %llu bytes in exact order across six capacities (two not powers of two, 98,304 B is the Wi-Fi ring), backpressure and counter wrap PASS\n",(unsigned long long)verified);
 }

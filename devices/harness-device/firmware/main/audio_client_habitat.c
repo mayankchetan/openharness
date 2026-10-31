@@ -25,11 +25,16 @@
 #include <stdlib.h>
 
 #define CAPTURE_SAMPLES 160
+// The PCM ring between the 10 ms capture and the sender. USB keeps the 32 KB it always had (1.02 s of 16 kHz PCM). Wi-Fi mode gets 96 KB (3 x 2^15,
+// 3.07 s): a Wi-Fi stall must not abort a turn, and a 1.5 s stall (48,000 B) does not fit in 32 KB. Both are taken from PSRAM, never the internal heap
+// (the scarce budget). The ring is full-or-abort: a stall longer than the ring ends the turn (capture() below), as it always did.
 #define BUFFER_BYTES 32768
+#define BUFFER_BYTES_WIFI 98304
 static const char *TAG = "audio_fast";
 static TaskHandle_t capture_task, sender_task;
 static uint8_t *storage;
 static voice_buffer_t buffer;
+static uint32_t ring_bytes = BUFFER_BYTES;   // the size of `storage`: chosen once, in audio_client_init
 static atomic_bool active, recording, stop_requested, abort_requested, capture_done, heard;
 static atomic_uint input_level;
 static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -280,12 +285,22 @@ void audio_client_init(void)
 {
     if (storage)
         return;
-    storage = ram_psram_alloc(BUFFER_BYTES, "voice_stream_ring");
+    // Which ring: the one for the link this boot will use. net_link_start() runs after this (the ring is reserved early, while PSRAM is unfragmented), so
+    // the answer is the stored mode: Wi-Fi settings whole and wl_mode 1. If Wi-Fi mode then fails to start and the dial falls back to USB it keeps the
+    // bigger ring (PSRAM only, harmless). If the 96 KB block cannot be had, the 32 KB ring is the fallback, not a dial without voice.
+    config_net_info_t net;
+    config_net_info(&net);
+    ring_bytes = (net.saved && net.mode == 1) ? BUFFER_BYTES_WIFI : BUFFER_BYTES;
+    storage = ram_psram_alloc(ring_bytes, "voice_stream_ring");
+    if (!storage && ring_bytes != BUFFER_BYTES) {
+        ring_bytes = BUFFER_BYTES;
+        storage = ram_psram_alloc(ring_bytes, "voice_stream_ring");
+    }
     if (!storage) {
         ESP_LOGE(TAG, "PCM buffer allocation failed");
         return;
     }
-    voice_buffer_init(&buffer, storage, BUFFER_BYTES);
+    voice_buffer_init(&buffer, storage, ring_bytes);
     BaseType_t a =
         xTaskCreatePinnedToCore(capture, "voice_capture", 5120, NULL, 6, &capture_task, 0);
 #if TASK_STACK_PSRAM_FLASH_OPS
@@ -308,7 +323,7 @@ void audio_client_init(void)
         ESP_LOGE(TAG, "Audio task allocation failed");
         return;
     }
-    ESP_LOGI(TAG, "10ms PCM capture; independent sender; %d-byte ring", BUFFER_BYTES);
+    ESP_LOGI(TAG, "10ms PCM capture; independent sender; %lu-byte ring", (unsigned long)ring_bytes);
 }
 static void start_context(const char *id, voice_cmd_t cmd, const char *selected, unsigned revision, const char *form, unsigned form_rev, const char *carried, const char *question, unsigned index, const char *draft, unsigned draft_rev, bool append, const char *search, unsigned search_rev)
 {
@@ -338,7 +353,7 @@ static void start_context(const char *id, voice_cmd_t cmd, const char *selected,
     atomic_store(&review_requested, false);
     command = cmd;
     produced = high_water = read_max_us = 0;
-    voice_buffer_init(&buffer, storage, BUFFER_BYTES);
+    voice_buffer_init(&buffer, storage, ring_bytes);
     atomic_store(&heard, false);
     atomic_store(&input_level, 0);
     atomic_store(&stop_requested, false);

@@ -46,18 +46,24 @@ assert '"vox_probe.c"' not in cmake.split('if(DEVICE_VOX_PROBE)')[0], 'the probe
 header = text('cable_client.h')
 assert re.search(r'#define CABLE_PROTO_VERSION 4\b', header)
 assert re.search(r'#ifndef DEVICE_VOICE_ADPCM_USB\s+#define DEVICE_VOICE_ADPCM_USB 0\s+#endif', header)
-assert re.search(r'#define CABLE_VOICE_ADPCM_BUILT\s+DEVICE_VOICE_ADPCM_USB', header)
+# W12: Wi-Fi mode widens the definition (the sender, hello.voiceCodec and voice.begin.codec are always compiled in); DEVICE_VOICE_ADPCM_USB is then only
+# the run-time "also on USB" flag of the codec rule. The define stays overridable: the host tests build the sender both ways.
+assert re.search(r'#ifndef CABLE_VOICE_ADPCM_BUILT\s+#define CABLE_VOICE_ADPCM_BUILT 1\s+#endif', header)
+assert not re.search(r'#define CABLE_VOICE_ADPCM_BUILT\s+DEVICE_VOICE_ADPCM_USB', header)
 for decl in ('bool cable_client_voice_adpcm(const uint8_t *payload, size_t len);', 'bool cable_client_voice_is_adpcm(void);',
              'bool cable_client_voice_adpcm_wanted(void);', 'uint8_t cable_client_voice_tag(void);'):
     assert decl in header, decl
 client = text('cable_client.c')
+# W12: the codec rule asks the transport that is open, not a constant (the stub W4 left said "the only link today is USB"). Its table runs in test_audio_stream.py.
+assert re.search(r'static bool voice_transport_is_usb\(void\) \{ return cable_link_transport\(\) == CABLE_XPORT_USB; \}', client)
 hello = re.search(r'static void send_hello\(void\)\n\{.*?\n\}', client, re.S)[0]
 assert re.search(r'#if CABLE_VOICE_ADPCM_BUILT\s+(?://[^\n]*\n\s*)*if \(cable_voice_adpcm_allowed\([^\n]*\)\s+msg_string\(&root, "voiceCodec", "adpcm-v1"\);\s+#endif', hello)
 begin = re.search(r'bool cable_client_voice_begin\(.*?\n\}', client, re.S)[0]
 assert re.search(r'#if CABLE_VOICE_ADPCM_BUILT\s+.*cable_client_voice_adpcm_wanted\(\).*s_voice_adpcm.*#endif', begin, re.S)
 # The codec and the turn's tag go out together, and the tag counter moves at every voice.begin, ADPCM turn or not.
 assert re.search(r'if \(adpcm\) \{\s+msg_string\(&root, "codec", "adpcm"\);\s+msg_number\(&root, "tag", tag\);\s+\}', begin), 'voice.begin carries codec and tag together'
-assert re.search(r'const uint8_t tag = \(uint8_t\)\(atomic_fetch_add\(&s_voice_tag, 1\) \+ 1\);', begin), 'a new tag at every voice.begin'
+assert re.search(r'const uint8_t tag = \(uint8_t\)\(atomic_load\(&s_voice_tag\) \+ 1\);\s+atomic_store\(&s_voice_tag, tag\);', begin), 'a new tag at every voice.begin'
+assert 'atomic_fetch_add(&s_voice_tag' not in client, 'a byte-wide atomic add links libgcc into DIRAM (+152 B); voice.begin has one writer'
 assert re.search(r'uint8_t cable_client_voice_tag\(void\) \{ return \(uint8_t\)atomic_load\(&s_voice_tag\); \}', client)
 assert re.search(r'#if CABLE_VOICE_ADPCM_BUILT\s+bool cable_client_voice_adpcm\(const uint8_t \*payload, size_t len\)\s+\{\s+return cable_link_send\(CABLE_TYPE_ADPCM, payload, len\);', client)
 
@@ -88,6 +94,21 @@ send = re.search(r'static void send_audio\(void \*unused\)\n\{.*?^\}', sender, r
 assert re.search(r'#if CABLE_VOICE_ADPCM_BUILT\s+.*?audio_stream_is_adpcm\(\);\s+if \(adpcm\)\s+send_adpcm\(&delivered, &send_max_us, &encode_us_max, &adpcm_blocks\);\s+else\s+#endif\s+for \(;;\) \{', send, re.S)
 assert re.search(r'#if CABLE_VOICE_ADPCM_BUILT\s+if \(adpcm\)\s+ESP_LOGI\(TAG, "codec=adpcm blocks=%lu encode_us_max=%lu"', send)
 assert 'audio_stream_pcm(data, n)' in send    # the PCM loop is still there, untouched
+
+# -- the ring (W12): 96 KB in PSRAM when Wi-Fi mode is stored, today's 32 KB otherwise -------------------------------
+assert re.search(r'#define BUFFER_BYTES 32768\b', sender) and re.search(r'#define BUFFER_BYTES_WIFI 98304\b', sender)
+init = re.search(r'void audio_client_init\(void\)\n\{.*?^\}', sender, re.M | re.S)[0]
+assert 'config_net_info(&' in init and 'ram_psram_alloc(ring_bytes, "voice_stream_ring")' in init, 'the ring size is chosen from the stored mode and taken from PSRAM'
+assert 'heap_caps_malloc' not in init and 'malloc(' not in re.sub(r'ram_psram_alloc', '', init), 'no internal-heap allocation for the ring'
+assert re.search(r'ring_bytes = BUFFER_BYTES;', init), 'a refused 96 KB block falls back to the 32 KB ring'
+ctx = re.search(r'static void start_context\(.*?^\}', sender, re.M | re.S)[0]
+assert 'voice_buffer_init(&buffer, storage, ring_bytes);' in ctx and 'BUFFER_BYTES)' not in ctx
+assert 'stalled beyond the PCM buffer; discarding utterance' in sender, 'the overflow message is the existing one'
+
+# -- the probe: a 1.5 s sink stall next to the 120 ms one (bench-only code) ------------------------------------------------
+probe_c = text('audio_probe.c')
+assert 'sink_stall_1500ms' in probe_c and 'sink_stall_120ms' in probe_c and 'healthy_sink' in probe_c
+assert re.search(r'scenario\s*<\s*3', probe_c) and re.search(r'\b1500\b', probe_c)
 
 # -- with the flags off, every ADPCM and probe line is inside a guard: the PCM text is what it was ----------------
 flat = strip_guarded(sender)

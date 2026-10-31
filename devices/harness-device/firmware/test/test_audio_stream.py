@@ -2,6 +2,11 @@
 
 Two builds of the same sender source: CABLE_VOICE_ADPCM_BUILT=0 (the PCM sender every image has today) and =1 (the ADPCM
 path of task W4, which the sender takes only when the turn's codec was chosen ADPCM). The ADPCM sink decodes every block.
+
+Task W12 adds, to both builds: the stall cases of the Wi-Fi ring (a sender that cannot send for 1.5 s survives with the 96 KB ring and not with the
+32 KB USB ring; one that cannot send for 4 s overflows either ring, logs the existing message once and aborts once); a socket that dies mid-turn
+(one abort, no send after the failure, even when the UI aborts as well); and the codec rule as the glue in cable_client.c applies it, for each
+transport (ADPCM needs the daemon's feature AND a non-USB transport, or the USB build flag; USB is PCM).
 """
 from pathlib import Path
 import os
@@ -27,6 +32,7 @@ code = r'''
 #include <string.h>
 #define CAPTURE_SAMPLES 160
 #define BUFFER_BYTES 32768
+#define BUFFER_BYTES_WIFI 98304   /* the Wi-Fi ring (W12): 3 x 2^15, 3.07 s of PCM */
 #define AUDIO_SAMPLE_RATE 16000
 #define CABLE_VOICE_CHUNK 1024
 #define CFG_VLANG_MAX 16
@@ -38,7 +44,10 @@ code = r'''
 #define portMAX_DELAY (-1)
 #define pdMS_TO_TICKS(ms) (ms)
 static const char *TAG="offline-test";
-static void log_noop(const char *tag,const char *format,...) {(void)tag;(void)format;}
+static unsigned overflow_logs;   /* how often the existing "ring full" message was logged */
+static void log_noop(const char *tag,const char *format,...) {
+    (void)tag;if(strstr(format,"stalled beyond the PCM buffer; discarding utterance"))overflow_logs++;
+}
 #define ESP_LOGI(...) log_noop(__VA_ARGS__)
 #define ESP_LOGE(...) log_noop(__VA_ARGS__)
 typedef void *TaskHandle_t;
@@ -51,7 +60,8 @@ static char agent[]="target-agent";
 enum { VOICE_CMD_NONE,VOICE_CMD_GOAL,VOICE_CMD_LOOP };
 static int command;
 static uint32_t produced,high_water,read_max_us;
-enum { HEALTHY, BEGIN_FAIL, START_FAIL, READ_FAIL, READ_RECOVER, TX_FAIL, OVERFLOW, DMA_LOSS, MODES };
+enum { HEALTHY, BEGIN_FAIL, START_FAIL, READ_FAIL, READ_RECOVER, TX_FAIL, OVERFLOW, DMA_LOSS, SOCKET_LOSS, MODES };
+static bool link_lost;   /* a send failed: the link is gone, and nothing may be handed to it again in this turn */
 static int mode,role;
 static unsigned capture_waits,sender_waits,reads,raw_bytes,sent_bytes,pcm_calls,reads_total=64;
 static unsigned adpcm_seq,adpcm_samples,adpcm_last_index_end;
@@ -94,9 +104,13 @@ static bool audio_stream_begin(const char *id,const char *cmd,const char *lang,i
     begins++;return mode!=BEGIN_FAIL;
 }
 static bool audio_stream_pcm(const uint8_t *bytes,size_t n) {
-    assert(begins==1&&mode!=BEGIN_FAIL&&n&&n<=CABLE_VOICE_CHUNK);pcm_calls++;
+    assert(begins==1&&mode!=BEGIN_FAIL&&n&&n<=CABLE_VOICE_CHUNK&&!link_lost);pcm_calls++;
     for(size_t i=0;i<n;i++)assert(bytes[i]==(uint8_t)(sent_bytes+i));
-    if(mode==TX_FAIL&&pcm_calls==3)return false;
+    if((mode==TX_FAIL||mode==SOCKET_LOSS)&&pcm_calls==3) {
+        link_lost=true;
+        if(mode==SOCKET_LOSS)atomic_store(&abort_requested,true);   /* the UI aborts the turn too, as it does when the link drops */
+        return false;
+    }
     sent_bytes+=(unsigned)n;return true;
 }
 __attribute__((unused)) static bool audio_stream_is_adpcm(void) {return CABLE_VOICE_ADPCM_BUILT;}
@@ -104,7 +118,7 @@ __attribute__((unused)) static bool audio_stream_is_adpcm(void) {return CABLE_VO
 __attribute__((unused)) static uint8_t audio_stream_voice_tag(void) {return TURN_TAG;}   // the tag voice.begin carried for this turn
 // The ADPCM sink: every block is decoded and checked against the capture pattern (byte g of the turn is (uint8_t)g).
 __attribute__((unused)) static bool audio_stream_adpcm(const uint8_t *bytes,size_t n) {
-    assert(begins==1&&mode!=BEGIN_FAIL&&n&&n<=ADPCM_PAYLOAD_MAX);pcm_calls++;
+    assert(begins==1&&mode!=BEGIN_FAIL&&n&&n<=ADPCM_PAYLOAD_MAX&&!link_lost);pcm_calls++;
     adpcm_info_t info;int16_t out[ADPCM_BLOCK_SAMPLES];
     int got=adpcm_decode_block(bytes,n,out,ADPCM_BLOCK_SAMPLES,&info);
     assert(got>0&&info.seq==adpcm_seq&&!adpcm_seen_last);
@@ -114,7 +128,11 @@ __attribute__((unused)) static bool audio_stream_adpcm(const uint8_t *bytes,size
     unsigned first=adpcm_samples;   // sample 0 of a block is verbatim: the order and the cut points are exact
     assert(out[0]==(int16_t)((uint16_t)(uint8_t)(2*first)|(uint16_t)((uint16_t)(uint8_t)(2*first+1)<<8)));
     if(info.flags&ADPCM_FLAG_LAST)adpcm_seen_last=true;else assert(got==ADPCM_BLOCK_SAMPLES);
-    if(mode==TX_FAIL&&pcm_calls==3)return false;
+    if((mode==TX_FAIL||mode==SOCKET_LOSS)&&pcm_calls==3) {
+        link_lost=true;
+        if(mode==SOCKET_LOSS)atomic_store(&abort_requested,true);
+        return false;
+    }
     adpcm_seq++;adpcm_samples+=(unsigned)got;sent_bytes+=(unsigned)got*2;return true;
 }
 static void audio_stream_end(void) {
@@ -137,7 +155,7 @@ int main(void) {
         active=recording=true;stop_requested=abort_requested=capture_done=heard=false;
         input_level=produced=high_water=read_max_us=0;
         capture_waits=sender_waits=reads=raw_bytes=sent_bytes=pcm_calls=0;
-        starts=stops=begins=ends=aborts=notifications=overruns=0;clock_us=0;role=2;
+        starts=stops=begins=ends=aborts=notifications=overruns=0;clock_us=0;role=2;link_lost=false;
         if(!setjmp(finished))send_audio(NULL);
         assert(!active&&!recording&&capture_done&&input_level==0&&begins==1&&starts==1);
         assert(stops==(unsigned)(mode!=START_FAIL));
@@ -152,12 +170,50 @@ int main(void) {
             }
         } else {
             assert(!ends&&aborts==1);
-            if(mode!=TX_FAIL)assert(!pcm_calls);
+            if(mode!=TX_FAIL&&mode!=SOCKET_LOSS)assert(!pcm_calls);
+            if(mode==SOCKET_LOSS)assert(pcm_calls==3&&link_lost);   /* the failed send was the last: nothing after it */
         }
         for(int i=0;i<8;i++)assert(guarded[i]==0xa5&&guarded[BUFFER_BYTES+8+i]==0xa5);
     }
-    puts(CABLE_VOICE_ADPCM_BUILT ? "Audio workers (ADPCM sender): 1600 offline sessions; every block decoded, exact cut points, carried index, flagged last block, abort paths PASS"
-        : "Audio workers: 1600 offline sessions; exact PCM order, failed begin/start, read retry/failure, USB failure, ring overflow, DMA loss and 32-bit wrap PASS");
+    /* W12: a stall. The capture loop of this harness runs to its stop before the sender gets a turn, so reads_total reads (10 ms and 320 B each) are in the
+       ring when the first frame can leave: that is a sender whose link takes nothing for reads_total x 10 ms. */
+    static uint8_t wifi_ring[BUFFER_BYTES_WIFI+16];
+    static const struct { unsigned ms, ring; bool survives; } stalls[]={
+        {1500,BUFFER_BYTES_WIFI,true},    /* G6: the Wi-Fi ring rides out a 1.5 s stall: no overflow, no abort */
+        {1500,BUFFER_BYTES,false},        /* the USB ring (1.02 s) would not: the reason the Wi-Fi ring is bigger */
+        {3000,BUFFER_BYTES_WIFI,true},    /* 96,000 B: the ring holds 3.07 s */
+        {4000,BUFFER_BYTES_WIFI,false},   /* 4 s overflows it: the turn aborts with the existing message, once */
+        {4000,BUFFER_BYTES,false},
+    };
+    static unsigned stall_cases,stall_round;   /* static: setjmp below, and -Wclobbered */
+    for(stall_round=0;stall_round<20;stall_round++)for(unsigned s=0;s<sizeof stalls/sizeof *stalls;s++) {
+        const unsigned ring=stalls[s].ring;mode=HEALTHY;
+        reads_total=stalls[s].ms/10;
+        adpcm_seq=adpcm_samples=adpcm_last_index_end=0;adpcm_seen_last=false;overflow_logs=0;
+        memset(wifi_ring,0xa5,sizeof wifi_ring);voice_buffer_init(&buffer,wifi_ring+8,ring);
+        if(stall_round&1) {   /* the counters of a ring that is not a power of two wrap at span, not at 2^32 */
+            uint32_t at=buffer.span?buffer.span-255:UINT32_MAX-255;atomic_store(&buffer.head,at);atomic_store(&buffer.tail,at);
+        }
+        active=recording=true;stop_requested=abort_requested=capture_done=heard=false;
+        input_level=produced=high_water=read_max_us=0;
+        capture_waits=sender_waits=reads=raw_bytes=sent_bytes=pcm_calls=0;
+        starts=stops=begins=ends=aborts=notifications=overruns=0;clock_us=0;role=2;link_lost=false;
+        if(!setjmp(finished))send_audio(NULL);
+        assert(!active&&!recording&&capture_done&&begins==1&&starts==1&&stops==1&&high_water<=ring);
+        if(stalls[s].survives) {
+            assert(!overflow_logs&&ends==1&&!aborts&&sent_bytes==reads_total*CAPTURE_SAMPLES*2&&!voice_buffer_used(&buffer));
+            assert(high_water==sent_bytes);                              /* everything sat in the ring at once ... */
+            if(ring==BUFFER_BYTES_WIFI)assert(high_water>BUFFER_BYTES);  /* ... which the 32 KB ring could not have held */
+            if(stalls[s].ms==1500)assert(high_water*2<ring);             /* G6: ring_peak under 50% of 96 KB at a 1.5 s stall */
+        } else {
+            assert(overflow_logs==1&&!ends&&aborts==1&&!pcm_calls);   /* the existing message once, one voice.abort, no frame sent */
+        }
+        for(int i=0;i<8;i++)assert(wifi_ring[i]==0xa5&&wifi_ring[ring+8+i]==0xa5);
+        stall_cases++;
+    }
+    puts(CABLE_VOICE_ADPCM_BUILT ? "Audio workers (ADPCM sender): 1800 offline sessions; every block decoded, exact cut points, carried index, flagged last block, abort paths PASS"
+        : "Audio workers: 1800 offline sessions; exact PCM order, failed begin/start, read retry/failure, USB failure, socket loss, ring overflow, DMA loss and 32-bit wrap PASS");
+    printf("Audio stall cases: %u (1.5 s and 3 s survive the 96 KB ring, 4 s aborts once with the existing message, 1.5 s overflows the 32 KB ring) PASS\n",stall_cases);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='harness-audio-stream-') as folder:
@@ -169,4 +225,57 @@ with tempfile.TemporaryDirectory(prefix='harness-audio-stream-') as folder:
                         '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
                         '-I', str(main), str(out / 'stream.c'), str(main / 'voice_buffer.c'), str(main / 'adpcm_ima.c'),
                         '-o', str(exe)], check=True)
+        subprocess.run([str(exe)], check=True, timeout=60)
+
+# -- the codec rule as cable_client.c applies it (W12) -------------------------------------------------------------
+# The two functions are cut out of the real source and compiled against a fake transport kind and a fake feature word, so a
+# glue that ignores the transport (the stub W4 left: "the only link is USB") fails here. voice.begin.codec is "adpcm" exactly when
+# cable_client_voice_adpcm_wanted() is true; PCM is the absence of the field.
+client = (main / 'cable_client.c').read_text()
+transport_fn = re.search(r'^static bool voice_transport_is_usb\(void\)[^\n]*\n', client, re.M)
+wanted_fn = re.search(r'^bool cable_client_voice_adpcm_wanted\(void\)\n\{.*?^\}', client, re.M | re.S)
+assert transport_fn and wanted_fn, 'voice_transport_is_usb / cable_client_voice_adpcm_wanted not found in cable_client.c'
+codec_code = r'''
+#include <assert.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include "cable_features.h"
+#include "cable_xport.h"
+static cable_xport_kind_t kind;
+__attribute__((unused)) static cable_xport_kind_t cable_link_transport(void) { return kind; }
+static atomic_uint s_features;
+#ifndef DEVICE_VOICE_ADPCM_USB
+#define DEVICE_VOICE_ADPCM_USB 0
+#endif
+''' + transport_fn[0] + wanted_fn[0] + r'''
+int main(void) {
+    static const cable_xport_kind_t kinds[] = {CABLE_XPORT_USB, CABLE_XPORT_WIFI, CABLE_XPORT_BLE};
+    static const uint32_t words[] = {0, CABLE_FEATURE_ADPCM, ~0u, ~CABLE_FEATURE_ADPCM, CABLE_FEATURE_NET | CABLE_FEATURE_DRAFT};
+    unsigned n = 0;
+    for (unsigned k = 0; k < 3; k++) for (unsigned w = 0; w < sizeof words / sizeof *words; w++) {
+        kind = kinds[k];
+        atomic_store(&s_features, words[w]);
+        const bool feature = (words[w] & CABLE_FEATURE_ADPCM) != 0;
+        const bool expect = feature && (kinds[k] != CABLE_XPORT_USB || DEVICE_VOICE_ADPCM_USB != 0);
+        assert(cable_client_voice_adpcm_wanted() == expect);
+        n++;
+    }
+    kind = CABLE_XPORT_USB;atomic_store(&s_features, ~0u);
+    assert(cable_client_voice_adpcm_wanted() == (DEVICE_VOICE_ADPCM_USB != 0));   /* USB: PCM unless the G1 build flag is on */
+    kind = CABLE_XPORT_WIFI;atomic_store(&s_features, 0);
+    assert(!cable_client_voice_adpcm_wanted());                                    /* Wi-Fi to a daemon without voice.adpcm: PCM */
+    kind = CABLE_XPORT_WIFI;atomic_store(&s_features, CABLE_FEATURE_ADPCM);
+    assert(cable_client_voice_adpcm_wanted());                                     /* Wi-Fi to a daemon with it: ADPCM */
+    printf("Voice codec choice (DEVICE_VOICE_ADPCM_USB=%d): %u transport x feature cases PASS\n", DEVICE_VOICE_ADPCM_USB, n);
+    return 0;
+}
+'''
+with tempfile.TemporaryDirectory(prefix='harness-audio-codec-') as folder:
+    out = Path(folder)
+    (out / 'codec.c').write_text(codec_code)
+    for usb_flag in (0, 1):
+        exe = out / f'codec{usb_flag}'
+        subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g', f'-DDEVICE_VOICE_ADPCM_USB={usb_flag}',
+                        '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
+                        '-I', str(main), str(out / 'codec.c'), '-o', str(exe)], check=True)
         subprocess.run([str(exe)], check=True, timeout=60)

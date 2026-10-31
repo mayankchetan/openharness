@@ -10,8 +10,18 @@
 #include <stdlib.h>
 #include <string.h>
 static atomic_bool probing;
-static bool stalled, aborted;
+static bool aborted;
 static int64_t next_stall;
+// The sink scenarios. A stall is the sender being stuck in one send: the mic goes on, the ring fills. Period 0 = once, 0.5 s into the run. The 120 ms
+// stall repeats every 0.5 s (a USB host that is slow to read). The 1.5 s stall (task W12, gate G6) is the Wi-Fi case: the 96 KB ring rides it out,
+// the 32 KB USB ring does not, and the line shows which ring this image has (aborted=1 means the ring overflowed).
+static const struct { const char *name; uint32_t stall_ms; int64_t period_us; } scenarios[] = {
+    {"healthy_sink", 0, 0},
+    {"sink_stall_120ms", 120, 500000},
+    {"sink_stall_1500ms", 1500, 0},
+};
+static uint32_t stall_ms;
+static int64_t stall_period_us;
 static uint32_t read_us[512], reads, produced, sent;
 void audio_probe_read(uint32_t us, int bytes)
 {
@@ -32,9 +42,9 @@ bool audio_stream_pcm(const uint8_t *pcm, size_t size)
 {
     if (!atomic_load(&probing))
         return cable_client_voice_pcm(pcm, size);
-    if (stalled && esp_timer_get_time() >= next_stall) {
-        next_stall += 500000;
-        vTaskDelay(pdMS_TO_TICKS(120));
+    if (stall_ms && esp_timer_get_time() >= next_stall) {
+        next_stall = stall_period_us ? next_stall + stall_period_us : INT64_MAX;
+        vTaskDelay(pdMS_TO_TICKS(stall_ms));
     }
     sent += (uint32_t)size;
     return true;
@@ -78,10 +88,11 @@ void audio_probe_run(void)
 {
     // Uses the real codec, capture worker and buffer. PCM is discarded by the local sink;
     // no audio is written to a file, USB, host daemon or transcription service.
-    for (int scenario = 0; scenario < 2; scenario++) {
+    for (int scenario = 0; scenario < 3; scenario++) {
         reads = produced = sent = 0;
         aborted = false;
-        stalled = scenario != 0;
+        stall_ms = scenarios[scenario].stall_ms;
+        stall_period_us = scenarios[scenario].period_us;
         next_stall = esp_timer_get_time() + 500000;
         atomic_store(&probing, true);
         audio_client_start_cable(NULL, VOICE_CMD_NONE);
@@ -102,7 +113,7 @@ void audio_probe_run(void)
         ESP_LOGI("AUDIO_PERF",
                  "case=%s reads=%lu read_p50_us=%lu read_p95_us=%lu produced=%lu delivered=%lu "
                  "rx_overruns=%lu aborted=%d",
-                 scenario ? "sink_stall_120ms" : "healthy_sink", (unsigned long)reads,
+                 scenarios[scenario].name, (unsigned long)reads,
                  (unsigned long)(reads ? read_us[reads / 2] : 0),
                  (unsigned long)(reads ? read_us[reads * 95 / 100] : 0), (unsigned long)produced,
                  (unsigned long)sent, (unsigned long)audio_capture_overruns(), aborted);
