@@ -27,6 +27,7 @@ import { cableEventFor, cableStepFor, cableQuestionCloseFor, cableQuestionFor, D
 import { CableSession } from '../cable/cableSession.js'
 import { DIAL_KEY_FILE, DialKeys } from '../cable/dialKeys.js'
 import { NetDials } from '../cable/netDials.js'
+import { TunnelDials } from '../cable/tunnelDials.js'
 import { NetProvisioner, lanAddress } from '../cable/netProvision.js'
 import { PetStore } from '../cable/pets/store.js'
 import { DialLog } from '../cable/dialLog.js'
@@ -65,6 +66,12 @@ export interface DevicesDeps {
    * keystore or opens a port.
    */
   net?: 'env' | { keysFile: string; port: number; bind: string; enabled: boolean; /** The keystore, when the caller holds it (tests); else read from `keysFile`. */ keys?: DialKeys }
+  /**
+   * The phone bridge's relay endpoint (cable/tunnelDials.ts), a loopback WebSocket that feeds the same TLS-PSK server and keystore
+   * as `net`. With `net: 'env'` it follows `CABLE_TUNNEL_*`; with a `net` object a test names its own, and left out there is none.
+   * It needs the keystore, so without `net` it is never started.
+   */
+  tunnel?: { port: number; enabled: boolean; /** Tests only: a non-loopback address is refused. */ bind?: string }
   /** This computer's LAN IPv4 on its default route, which a provisioned dial is told to connect to (cable/netProvision.ts `lanAddress`); a test names its own. */
   lan?: () => Promise<string | null>
   /** `HARNESSD_TEST_FAULTS`: parts to fail, for the end-to-end suite. */
@@ -452,6 +459,7 @@ export function startDevices(core: CoreApi, ports: CorePorts, deps: DevicesDeps)
   // the keystore has a dial, so with none provisioned nothing listens. A removed key closes that dial's link and row.
   let netDials: NetDials | null = null
   let netKeys: DialKeys | null = null
+  let tunnelDials: TunnelDials | null = null
   const net = deps.net === 'env'
     ? { keysFile: join(env.HARNESS_DEVICES_DIR, DIAL_KEY_FILE), port: env.CABLE_NET_PORT, bind: env.CABLE_NET_BIND, enabled: env.CABLE_NET_ENABLE }
     : deps.net
@@ -466,6 +474,13 @@ export function startDevices(core: CoreApi, ports: CorePorts, deps: DevicesDeps)
       onDial: (connection) => cable.adoptNet(connection),
     })
     netDials.start()
+    // The phone bridge's relay: its own switch (off by default), the same keystore, and the same NetDials behind it, so one dial
+    // is one link whichever door it comes by. It opens only while the keystore holds a dial.
+    const tunnel = deps.net === 'env' ? { port: env.CABLE_TUNNEL_PORT, enabled: env.CABLE_TUNNEL_ENABLE } : deps.tunnel
+    if (tunnel) {
+      tunnelDials = new TunnelDials({ keys, dials: netDials, port: tunnel.port, bind: tunnel.bind, enabled: tunnel.enabled, log: (line) => log(`[cable] ${line}`) })
+      tunnelDials.start()
+    }
     provisioner = new NetProvisioner({
       net: (dial, request) => cable.net(dial, request),
       keys, port: net.port, lan: deps.lan ?? lanAddress,
@@ -590,6 +605,7 @@ export function startDevices(core: CoreApi, ports: CorePorts, deps: DevicesDeps)
     // The serial ports first: a port left held makes esptool fail in a way that reads like dead hardware.
     stop: async () => {
       for (const agentId of [...replies.keys()]) endReplies(agentId, false)   // no timer may fire into a stopped cable
+      await tunnelDials?.stop()
       await netDials?.stop()
       netKeys?.close()
       await cable.stop()
