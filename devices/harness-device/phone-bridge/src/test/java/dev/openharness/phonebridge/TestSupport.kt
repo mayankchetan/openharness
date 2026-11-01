@@ -75,6 +75,7 @@ class FakeTunnel : TunnelOpener {
     @Volatile var events: TunnelEvents? = null
     val sent = ByteArrayOutputStream()
     val sendCalls = AtomicInteger(0)
+    val maxSend = AtomicInteger(0)
     val closeCodes: MutableList<Int> = java.util.Collections.synchronizedList(mutableListOf<Int>())
 
     /** What queueSize() reports. Set it high to simulate a tunnel that does not drain. */
@@ -88,6 +89,7 @@ class FakeTunnel : TunnelOpener {
             override fun send(bytes: ByteArray): Boolean {
                 if (!sendResult) return false
                 sendCalls.incrementAndGet()
+                maxSend.accumulateAndGet(bytes.size) { a, b -> maxOf(a, b) }
                 synchronized(sent) { sent.write(bytes) }
                 return true
             }
