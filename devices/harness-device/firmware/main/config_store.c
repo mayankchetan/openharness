@@ -222,6 +222,7 @@ void config_save_swipe_reversed(bool reversed)
 #define K_WL_MODE "wl_mode"
 #define K_WL_VER  "wl_ver"
 #define WL_VERSION 1
+#define K_STAY_WL "stay_wl"   // the mode switch's override; net.clear takes it with the network (its accessors are at the end of the file)
 
 const char *config_net_err_name(config_net_err_t err)
 {
@@ -517,6 +518,7 @@ config_net_err_t config_net_clear(void)
     bool ok = erased(nvs_erase_key(h, K_WL_VER)) && nvs_commit(h) == ESP_OK
         && erased(nvs_erase_key(h, K_WL_SSID)) && erased(nvs_erase_key(h, K_WL_PASS)) && erased(nvs_erase_key(h, K_WL_HOST))
         && erased(nvs_erase_key(h, K_WL_PORT)) && erased(nvs_erase_key(h, K_WL_KEY)) && erased(nvs_erase_key(h, K_WL_MODE))
+        && erased(nvs_erase_key(h, K_STAY_WL))   // the override means nothing without a network, and must not outlive it
         && nvs_commit(h) == ESP_OK;
     close_rw(h);
     ESP_LOGW(TAG, "net clear: %s", ok ? "ok" : "FAILED");
@@ -532,4 +534,42 @@ bool config_clear_all(void)
     close_rw(h);
     ESP_LOGW(TAG, "clear_all: %s", ok ? "ok" : "FAILED");
     return ok;
+}
+
+// ── the mode switch's values (config_store.h) ──────────────────────────────────────────────────────
+#define K_BOOT_USB "boot_usb"
+
+/** True only for the byte 1. Absent, corrupt, another type or an unreadable store: false. */
+static bool flag_load(const char *flag)
+{
+    nvs_handle_t h;
+    uint8_t v = 0;
+    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return false;
+    const bool ok = nvs_get_u8(h, flag, &v) == ESP_OK;
+    nvs_close(h);
+    return ok && v == 1;
+}
+
+static bool flag_save(const char *flag, bool on)
+{
+    // Unchanged: no write. (A corrupt byte reads false, so asking for false leaves it where it is; it is harmless and reads as the default.)
+    if (flag_load(flag) == on) return true;
+    nvs_handle_t h;
+    if (open_rw(&h) != ESP_OK) return false;
+    const bool ok = nvs_set_u8(h, flag, on ? 1 : 0) == ESP_OK && nvs_commit(h) == ESP_OK;
+    close_rw(h);
+    ESP_LOGI(TAG, "%s %d: %s", flag, (int)on, ok ? "ok" : "FAILED");
+    return ok;
+}
+
+bool config_load_stay_wl(void) { return flag_load(K_STAY_WL); }
+bool config_save_stay_wl(bool on) { return flag_save(K_STAY_WL, on); }
+bool config_load_boot_usb(void) { return flag_load(K_BOOT_USB); }
+bool config_save_boot_usb(bool on) { return flag_save(K_BOOT_USB, on); }
+
+uint8_t config_load_wl_effective(void)
+{
+    config_net_info_t info;
+    config_net_info(&info);                       // saved = the marker and every key, valid; mode is 0 or 1 (anything else reads 0)
+    return info.saved && info.mode == 1 ? 1 : 0;
 }

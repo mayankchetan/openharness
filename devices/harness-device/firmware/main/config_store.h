@@ -128,5 +128,25 @@ config_net_err_t config_net_set_mode(long mode);
 // Forget the network, the address, the key and the mode. Fine when there is nothing to forget.
 config_net_err_t config_net_clear(void);
 
+// ── The automatic mode switch's three values (task W15; mode_switch.h, workbench briefs/research/2026-10-29-dial-mode-switch.md) ─────────────
+// wl_mode (above) says which wireless mode the user picked. stay_wl and boot_usb are two more bytes in the same namespace.
+//
+// NO STORED VALUE MAY LEAVE A DIAL UNABLE TO REACH USB, so every read here fails toward the default behaviour:
+//   - stay_wl and boot_usb are true only for the byte 1. A corrupt byte, a byte of the wrong type, an absent key and a failed read are false.
+//   - config_load_wl_effective() is the wireless target the mode switch sees. It is Wi-Fi (1) only when the Wi-Fi settings are WHOLE (the commit
+//     marker and every key, config_net_info) AND wl_mode is exactly 1. Anything else is 0 = no wireless target: the dial boots USB and never
+//     leaves it. That covers wl_mode with no credentials, a corrupt wl_mode, wl_mode 2 (Bluetooth: no transport exists yet; the value cannot be set
+//     today and, if it is ever found, reads as 0) and a lost marker.
+//   - net.clear (config_net_clear) and the factory reset take stay_wl with the rest, so a network provisioned later cannot inherit an override
+//     that never probes for a cable.
+// stay_wl has no setter on any user path yet (task W16 adds the Settings row). It is a dial that stays in Wi-Fi with the cable in.
+bool config_load_stay_wl(void);
+bool config_save_stay_wl(bool on);
+// boot_usb: 1 if the mode chosen at the last boot, or set by the last automatic switch, was USB. The save writes only when the value changes
+// (one flash write per mode change, none per boot) and says false when NVS refused the write.
+bool config_load_boot_usb(void);
+bool config_save_boot_usb(bool on);
+uint8_t config_load_wl_effective(void);   // 1 = Wi-Fi is a usable wireless target, 0 = none (the numbers of MS_WL_WIFI and MS_WL_UNSET)
+
 // Factory reset (BOOT held at power-on, or Settings → Reset): forget all of the above, and the Wi-Fi settings.
 bool config_clear_all(void);

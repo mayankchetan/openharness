@@ -83,6 +83,18 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" \
    -o "$out/test_mode_switch" "$here/test_mode_switch.c" "$here/../main/mode_switch.c"
 "$out/test_mode_switch"
+# The glue around it (W15), pure parts. The mode switch's three NVS values and the rule that no stored value strands a dial (corrupt bytes, wl_mode
+# with no credentials, wl_mode 2, a lost marker, net.clear, factory reset); the RTC record wrapper (trusted only after a software reset); the USB
+# probe's hello, strict welcome test, frame cap and cadence; and the glue run against a simulated dial (boot plan, reboot sequence, the recovery
+# paths to USB and the bounds on every detour).
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/host_stubs" -I "$here/host_nvs" -I "$here/../main"    -o "$out/test_mode_config" "$here/test_mode_config.c" "$here/host_nvs/host_nvs.c" "$here/../main/config_store.c"
+"$out/test_mode_config"
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -DMODE_RECORD_HOST -I "$here/host_stubs" -I "$here/../main"    -o "$out/test_mode_record" "$here/test_mode_record.c" "$here/../main/mode_record.c" "$here/../main/mode_switch.c"
+"$out/test_mode_record"
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main"    -o "$out/test_usb_probe" "$here/test_usb_probe.c" "$here/../main/usb_probe_core.c" "$here/../main/cable_frame.c"
+"$out/test_usb_probe"
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -DMODE_RECORD_HOST -I "$here/host_stubs" -I "$here/host_nvs" -I "$here/../main"    -o "$out/test_mode_glue" "$here/test_mode_glue.c" "$here/../main/mode_glue_core.c" "$here/../main/mode_record.c" "$here/../main/mode_switch.c"    "$here/host_nvs/host_nvs.c" "$here/../main/config_store.c"
+"$out/test_mode_glue"
 # The decoder buffer is in PSRAM (W6): only cable_link.c names it, and every consumer of a frame payload is CPU-side (no DMA).
 python3 "$here/test_decoder_psram.py"
 # IMA ADPCM voice blocks (frame type 0x07): encoder and decoder against the shared vectors, sanitizers on.
