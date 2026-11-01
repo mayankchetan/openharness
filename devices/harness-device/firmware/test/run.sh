@@ -430,6 +430,8 @@ if [[ -n "${IDF_PATH:-}" ]]; then
     python3 "$here/test_cable_xport_tls.py"
     # which mbedTLS errors mean "the daemon refused us" (net_hs_class.h), against the IDF headers
     python3 "$here/test_net_hs_class.py"
+    # B7: voice over the phone mode: ADPCM when offered, PCM on USB, the 96 KB ring for a whole phone mode
+    python3 "$here/test_ble_voice.py"
 fi
 
 python3 "$here/test_companions.py"
