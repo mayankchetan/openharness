@@ -189,6 +189,7 @@ unsigned display_render_stage(void) { return fake_stage; }
 static int bounces;                   // usb_dp_bounce(): the D+ pull-up was dropped and restored
 void usb_dp_bounce(void) { bounces++; ev("BOUNCE"); }
 static int notifies, guard_stops, guard_starts, audio_idles, audio_resumes, touch_arms, touch_disarms;
+static bool arm_adds_hold;                 // touch_sleep_arm(): a hold arrives while the touch wake is being armed (S8 review M3)
 static bool arm_fails, touch_armed;   // the touch wake cannot be armed (no pin lock, controller not ready) / is armed now (PP_TOUCH_WAKE_ON_BATTERY=1 only)
 
 esp_err_t esp_pm_lock_create(esp_pm_lock_type_t t, int arg, const char *name, esp_pm_lock_handle_t *out) { assert(t == ESP_PM_NO_LIGHT_SLEEP && arg == 0); lock_creates++; the_lock.name = name; *out = &the_lock; return ESP_OK; }
@@ -236,6 +237,7 @@ static int touch_pokes;               // touch_wake_task(): the touch task is wo
 void touch_wake_task(void) { touch_pokes++; ev("TPOKE"); }
 bool touch_sleep_armed(void) { return touch_armed; }
 bool touch_sleep_arm(void) {
+    if (arm_adds_hold) { arm_adds_hold = false; power_sleep_hold(PP_HOLD_LINK); }
     if (arm_fails) { ev("TARM-FAIL"); return false; }
     touch_armed = true;
     touch_arms++; ev("TARM");
@@ -273,7 +275,7 @@ static void reset_world(void) {
     configure_calls = configure_battery = configure_usb = 0; pads_kept = 0; pmic_reads = 0;
     cache_chg = -1; usb_host = asleep = voice = session = false; transport = CABLE_XPORT_USB; audio_stopped = false; audio_idle_ok = true; pmu0 = 0x08; g_logs[0] = 0;
     guard_stops = guard_starts = audio_idles = audio_resumes = touch_arms = touch_disarms = 0; pmic_state = 0; retention_result = ESP_OK;
-    wdt_arms = wdt_feeds = wdt_disarms = 0; crumbs = 0; fake_stage = 3; bounces = 0; release_wakes_screen = false; release_plugs_usb = false; arm_fails = false; touch_armed = false; touch_pokes = 0;
+    wdt_arms = wdt_feeds = wdt_disarms = 0; crumbs = 0; fake_stage = 3; bounces = 0; arm_adds_hold = false; release_wakes_screen = false; release_plugs_usb = false; arm_fails = false; touch_armed = false; touch_pokes = 0;
     off_calls = off_first_reason = off_last_reason = 0; off_last_force = false; off_accept = true;
     clear_events();
 }
@@ -431,6 +433,39 @@ static void scenario_arm_fails(void) {
     // and a wake while it was never armed is a clean exit
     reset_world();
     power_sleep_init();
+}
+
+static void scenario_arm_hold(void) {
+    // S8 review M3: a hold that arrives while the touch wake is being armed (after the entry look at the holds, before the lock goes) must not be
+    // undone by the release that follows: the look-again after the release counts holds too. Without it the chip slept up to 250 ms into a join.
+    reset_world();
+    power_sleep_init();
+    unplug(); tick(4000);
+    arm_adds_hold = true;
+    screen(false);
+    for (int waited = 0; strcmp(power_sleep_state_name(), "S2") && waited < 6000; waited += 100) tick(100);
+    assert(!strcmp(power_sleep_state_name(), "S2"));       // the render task has applied S2 (the hold is one ptt poll from being seen)
+    assert(!arm_adds_hold && touch_arms == 1);
+    assert(the_lock.count == 1 && !power_sleep_relaxed()); // the hold took the pollers and the lock back inside the same pass
+    power_sleep_release(PP_HOLD_LINK);
+    tick(1000);
+    assert(power_sleep_relaxed() && the_lock.count == 0);  // and when it is gone the chip may sleep
+}
+
+static void scenario_wdt_selftest(void) {
+    // S8 review H1, the bench aid: built with -DSLEEP_WDT_SELFTEST=1 the RTC watchdog is armed at S2 entry and then never fed. The bench expects a
+    // reset about 60 s later with reason WATCHDOG and the breadcrumb report. A screen wake still disarms it (a touch is a legitimate way out).
+    reset_world();
+    power_sleep_init();
+    unplug(); tick(4000);
+    screen(false); tick(3500);
+    assert(!strcmp(power_sleep_state_name(), "S2") && wdt_arms == 1 && wdt_armed_ms == 60000);
+    const int fed = wdt_feeds;
+    tick(20000);
+    assert(wdt_feeds == fed);                              // never fed
+    assert(strstr(g_logs, "SLEEP_WDT_SELFTEST") && strstr(g_logs, "WATCHDOG") && strstr(g_logs, "60 s"));
+    screen(true); tick(300);
+    assert(wdt_disarms == 1);
 }
 
 static void scenario_driver_lost(void) {
@@ -640,6 +675,7 @@ static void scenario_watchdog(void) {
     int fed = wdt_feeds;
     tick(1000);
     assert(wdt_feeds - fed == 10);                                                                             // fed by every ptt wake in S2
+    assert(!strstr(g_logs, "SLEEP_WDT_SELFTEST"));                                                             // the product build never says it will starve the watchdog
     assert(last_crumb.want == PP_S2 && last_crumb.applied == PP_S2 && last_crumb.in_s2 == 1 && last_crumb.stage == 4);
     exit_cb(5000, NULL); exit_cb(5000, NULL);
     voice = true; tick(100);                                                                                   // a hold at the next wake
@@ -846,6 +882,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "policy")) scenario_policy_leaves_during_entry();
     else if (!strcmp(argv[1], "noarm")) scenario_arm_fails();
     else if (!strcmp(argv[1], "lost")) scenario_driver_lost();
+    else if (!strcmp(argv[1], "armhold")) scenario_arm_hold();
+    else if (!strcmp(argv[1], "wdt_selftest")) scenario_wdt_selftest();
     else if (!strcmp(argv[1], "facts")) scenario_external_power_facts();
     else if (!strcmp(argv[1], "boards")) scenario_other_boards();
     else if (!strcmp(argv[1], "host")) scenario_usb_host();
@@ -897,12 +935,15 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
         subprocess.run([str(folder / 'glue'), name], check=True)
     # the arming code D1 turns off still has to work for a later mode: build it in and run its two scenarios
     build('glue_arm', '-DPP_TOUCH_WAKE_ON_BATTERY=1')
-    for name in ('noarm', 'lost'):
+    for name in ('noarm', 'lost', 'armhold'):
         subprocess.run([str(folder / 'glue_arm'), name], check=True)
+    # the bench aid of the RTC watchdog: armed, never fed
+    build('glue_selftest', '-DSLEEP_WDT_SELFTEST=1')
+    subprocess.run([str(folder / 'glue_selftest'), 'wdt_selftest'], check=True)
     # the S3 triggers through the real glue (power_off_request is a fake that counts)
     build('glue_off', '-DDEVICE_BATTERY_POWEROFF=1')
     for name in ('off_s2_timeout_0', 'off_s2_timeout_1', 'off_low_battery_0', 'off_low_battery_1', 'off_low_battery_2', 'off_drain_0', 'off_drain_1', 'off_never_on_external_power_0', 'off_never_on_external_power_1', 'off_never_on_external_power_2', 'off_never_on_external_power_3'):
         subprocess.run([str(folder / 'glue_off'), name], check=True)
     print('power sleep glue: ' + ', '.join(scenarios) + ' PASS (boot order, unplug, S2 entry and wake order without a touch wake, plug-in, 200 cycles balanced, '
           'no retention RAM, PWR wake during entry, other boards, host, holds, Wi-Fi session and link holds, the D+ bounce after a sleep, the RTC watchdog and the breadcrumb in S2, audio retry, D1 input gate, sleep statistics); '
-          'noarm, lost PASS with PP_TOUCH_WAKE_ON_BATTERY=1; the S3 triggers PASS with DEVICE_BATTERY_POWEROFF=1')
+          'noarm, lost, armhold PASS with PP_TOUCH_WAKE_ON_BATTERY=1; wdt_selftest PASS with SLEEP_WDT_SELFTEST=1; the S3 triggers PASS with DEVICE_BATTERY_POWEROFF=1')

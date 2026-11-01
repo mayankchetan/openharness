@@ -48,6 +48,12 @@ arm = body(wdt, 'sleep_wdt_arm')
 assert 'WDT_RWDT' in arm and 'WDT_STAGE_ACTION_RESET_SYSTEM' in arm and 'RESET_RTC' not in arm, 'a system reset, which keeps RTC memory'
 assert 'wdt_hal_config_stage(&s_ctx, WDT_STAGE0, ticks,' in arm and 'rtc_clk_slow_freq_get_hz()' in arm, 'the timeout is in slow-clock ticks'
 assert arm.index('wdt_hal_config_stage') < arm.index('wdt_hal_enable'), 'configured before it is enabled'
+# S8 review H1: wdt_hal_init() turns "pause in sleep" ON (hal/wdt_hal_iram.c), which would stop this watchdog while the chip is asleep: the one state it is
+# for. It is turned off again after the init, inside the write-protect window, before the stage is configured.
+assert '#include "hal/rwdt_ll.h"' in text('sleep_wdt.c')
+assert arm.index('wdt_hal_init(') < arm.index('wdt_hal_write_protect_disable(&s_ctx)') < arm.index('rwdt_ll_set_pause_in_sleep_en(s_ctx.rwdt_dev, false)') \
+    < arm.index('wdt_hal_config_stage') < arm.index('wdt_hal_write_protect_enable(&s_ctx)'), 'pause in sleep is cleared after the init, with write protect off'
+assert 'rwdt_ll_set_pause_in_sleep_en(' not in code('sleep_wdt.c').replace('rwdt_ll_set_pause_in_sleep_en(s_ctx.rwdt_dev, false)', ''), 'and never set again'
 for name in ('sleep_wdt_arm', 'sleep_wdt_feed', 'sleep_wdt_disarm'):
     fn = body(wdt, name)
     assert fn.count('wdt_hal_write_protect_disable(&s_ctx)') == 1 and fn.count('wdt_hal_write_protect_enable(&s_ctx)') == 1, name
@@ -68,6 +74,13 @@ cmake = text('CMakeLists.txt')
 block = re.search(r'if\(DEVICE_BATTERY_SLEEP\)\n    if\(NOT CONFIG_PM_ENABLE.*?\nendif\(\)', cmake, re.S)
 assert block and 'target_sources(${COMPONENT_LIB} PRIVATE "power_policy.c" "power_sleep.c" "usb_bounce.c" "sleep_wdt.c")' in block.group(0)
 assert cmake.count('usb_bounce.c') == 1 and cmake.count('sleep_wdt.c') == 1, 'listed once, in the flag block, and nowhere else'
+# the bench self-test (SLEEP_WDT_SELFTEST=1): a build switch inside the sleep block, off by default, and only power_sleep.c reads it
+assert re.search(r'if\(SLEEP_WDT_SELFTEST\)\s+target_compile_definitions\(\$\{COMPONENT_LIB\} PRIVATE SLEEP_WDT_SELFTEST=1\)\s+endif\(\)', block.group(0)), 'a switch in the sleep block'
+for path in sorted(main.rglob('*.[ch]')):
+    rel = path.relative_to(main).as_posix()
+    if 'managed_components' not in path.parts and rel != 'power_sleep.c':
+        assert 'SLEEP_WDT_SELFTEST' not in text(rel), f'{rel} reads the watchdog self-test switch'
+assert 'SLEEP_WDT_SELFTEST' in text('power_sleep.c')
 users = {'sleep_wdt_arm': 'power_sleep.c', 'sleep_wdt_feed': 'power_sleep.c', 'sleep_wdt_disarm': 'power_sleep.c', 'usb_dp_bounce': 'power_sleep.c'}
 for path in sorted(main.rglob('*.c')):
     rel = path.relative_to(main).as_posix()

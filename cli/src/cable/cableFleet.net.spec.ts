@@ -421,7 +421,8 @@ describe('one dial on both links', () => {
       }
     }
 
-    async function liveOverWifi(withDial: boolean) {
+    // `keepWifi`: what the dial's hello says about its Keep Wi-Fi setting (S8 review M4: only a dial that says it is on Wi-Fi on purpose is left alone)
+    async function liveOverWifi(withDial: boolean, keepWifi = true) {
       Tap.hosts = []
       const verdicts = new DialVerdicts()
       const reset = vi.fn(async () => true)
@@ -432,7 +433,7 @@ describe('one dial on both links', () => {
       let wifi: Awaited<ReturnType<typeof s.dial>> | undefined
       if (withDial) {
         wifi = await s.dial(A, key)
-        wifi.hello()
+        wifi.say({ t: 'hello', product: 'harness', mac: A, fw: 'fixture', proto: 3, ...(keepWifi ? { keepWifi: true } : {}) })
         await wifi.next('agents.end')
         await vi.waitFor(() => expect(s.fleet.devices()[0]?.transport).toBe('wifi'))
       }
@@ -461,6 +462,24 @@ describe('one dial on both links', () => {
       expect(rows[0]).toMatchObject({ attached: true, transport: 'wifi' })
       expect(rows[0]).not.toHaveProperty('problem')
       expect(s.usb[0].isOpen).toBe(true)   // the cable session goes on: when Keep Wi-Fi is turned off the dial's probe finds a daemon at once
+    })
+
+    it('still resets it when the dial is live over Wi-Fi but does not say Keep Wi-Fi is on: its USB block may be dead (S8 review M4)', async () => {
+      const { s, reset, port, usbHost } = await liveOverWifi(true, false)
+      usbHost.onForeignPort?.(port.path, 'silent')
+      await vi.waitFor(() => expect(reset).toHaveBeenCalledWith(port.path))
+      expect(stuckLines(s)).toHaveLength(0)
+    })
+
+    it('follows the dial: Keep Wi-Fi turned off while connected, the next silent cable is reset', async () => {
+      const { s, reset, port, wifi, usbHost } = await liveOverWifi(true, true)
+      usbHost.onForeignPort?.(port.path, 'silent')
+      await vi.waitFor(() => expect(stuckLines(s)).toHaveLength(1))
+      expect(reset).not.toHaveBeenCalled()
+      wifi!.say({ t: 'hello', product: 'harness', mac: A, fw: 'fixture', proto: 3 })   // the next greeting no longer carries keepWifi
+      await vi.waitFor(() => expect(s.fleet.devices().find((d) => d.transport === 'wifi')).not.toHaveProperty('keepWifi'))
+      usbHost.onForeignPort?.(port.path, 'silent')
+      await vi.waitFor(() => expect(reset).toHaveBeenCalledWith(port.path))
     })
 
     it('still resets it when no Wi-Fi link is live', async () => {

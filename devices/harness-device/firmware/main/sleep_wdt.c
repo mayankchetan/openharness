@@ -2,6 +2,7 @@
 
 #include "esp_attr.h"
 #include "freertos/FreeRTOS.h"
+#include "hal/rwdt_ll.h"
 #include "hal/wdt_hal.h"
 #include "hal/wdt_types.h"
 #include "soc/rtc.h"
@@ -20,6 +21,9 @@ void sleep_wdt_arm(uint32_t ms)
     portENTER_CRITICAL(&s_mux);
     wdt_hal_init(&s_ctx, WDT_RWDT, 0, false);
     wdt_hal_write_protect_disable(&s_ctx);
+    // wdt_hal_init() turns "pause in sleep" ON (hal/wdt_hal_iram.c), and a watchdog that stops while the chip sleeps cannot catch a chip that never
+    // wakes: the one thing this one is for (S8 review H1). Off again, here, with write protect off, before the stage is set.
+    rwdt_ll_set_pause_in_sleep_en(s_ctx.rwdt_dev, false);
     wdt_hal_config_stage(&s_ctx, WDT_STAGE0, ticks, WDT_STAGE_ACTION_RESET_SYSTEM);
     wdt_hal_enable(&s_ctx);
     wdt_hal_write_protect_enable(&s_ctx);

@@ -551,6 +551,11 @@ export interface DialStatus {
   hw?: string
   /** `hello.board`; "pro" is the square Harness Pro. Absent = a round dial. */
   board?: string
+  /**
+   * `hello.keepWifi === true`: the dial is on Wi-Fi on purpose (its Keep Wi-Fi setting is on), so a silent USB cable is expected and the fleet does
+   * not reset it for that (cableFleet.ts). Sent over Wi-Fi only; absent from a USB greeting and from an older firmware.
+   */
+  keepWifi?: boolean
   updating?: string
   /** Something the person has to do about this device, in words shown as they are (cableFleet.ts: a silent Harness Pro). */
   problem?: string
@@ -682,6 +687,7 @@ export class CableSession {
   private greetedHw: string | undefined
   /** `hello.board` (absent on rounds and the old Player-1 Pro build). "pro" is the standalone Pod firmware. */
   private greetedBoard: string | undefined
+  private greetedKeepWifi = false   // hello.keepWifi of the newest greeting (cleared with the port)
   private greetedOta: string | undefined
   /** What the device last SAID its settings are. Never what this computer last asked for. */
   private greetedSettings: DeviceSettings | undefined
@@ -1105,6 +1111,7 @@ export class CableSession {
     this.decoder.reset()
     this.greetedMac = null
     this.greetedFw = null
+    this.greetedKeepWifi = false
     this.appFocusGeneration += 1
     this.drivingAppFocus = false
     this.expectedAppFocusEcho = ''
@@ -1155,6 +1162,7 @@ export class CableSession {
     this.link = null
     this.greetedMac = null
     this.greetedFw = null
+    this.greetedKeepWifi = false
     this.appFocusGeneration += 1
     this.expectedAppFocusEcho = ''
     this.expectedAppFocusEchoUntil = 0
@@ -1423,7 +1431,11 @@ export class CableSession {
         const settingsChanged = JSON.stringify(settings) !== JSON.stringify(this.greetedSettings)
         this.greetedSettings = settings
         this.skinReported = hasUiSkin(msg.settings)
-        if (settingsChanged && mac === this.greetedMac && fw === this.greetedFw) this.report()
+        // Only the boolean true counts. Read on every greeting: Keep Wi-Fi can be turned off on the dial while it stays connected.
+        const keepWifi = msg.keepWifi === true
+        const keepChanged = keepWifi !== this.greetedKeepWifi
+        this.greetedKeepWifi = keepWifi
+        if ((settingsChanged || keepChanged) && mac === this.greetedMac && fw === this.greetedFw) this.report()
         if (mac !== this.greetedMac || fw !== this.greetedFw) {
           this.playerOffset = this.playerRequest = 0
           this.playerLibraryKey = ''
@@ -2556,6 +2568,7 @@ export class CableSession {
       fw: this.greetedFw ?? undefined,
       ...(this.greetedHw ? { hw: this.greetedHw } : {}),
       ...(this.greetedBoard ? { board: this.greetedBoard } : {}),
+      ...(this.greetedKeepWifi ? { keepWifi: true } : {}),
       ...(this.greetedMac ? { mac: this.greetedMac } : {}),
       ...(this.greetedSettings ? { settings: this.greetedSettings } : {}),
       ...(this.link?.transport ? { transport: this.link.transport } : {}),

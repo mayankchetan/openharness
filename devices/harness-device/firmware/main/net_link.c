@@ -17,6 +17,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "mode_glue.h"
 #include "net_hs_class.h"
 #include "net_state.h"
 #include "power_sleep.h"
@@ -59,7 +60,7 @@ static void post(net_event_t event)
     }
 }
 
-const char *net_link_status_text(void) { return net_state_caption((net_state_t)atomic_load(&s_state)); }
+const char *net_link_status_text(void) { return net_state_caption((net_state_t)atomic_load(&s_state), mode_glue_keep_wifi()); }
 net_state_t net_link_state(void) { return (net_state_t)atomic_load(&s_state); }
 
 // Tell the screen when the caption changed. net_link calls this between its waits; the event task only sets the flag.

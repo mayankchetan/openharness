@@ -45,7 +45,9 @@ net_state_t net_state_next(net_state_t state, net_event_t event);
 
 const char *net_state_name(net_state_t state);      // for log lines: "joining", "auth_failed", ...
 // What the glass says under the wordmark, or NULL when there is nothing to say (OFF, UP). At most 24 characters.
-const char *net_state_caption(net_state_t state);
+// `keep_wifi`: the dial's Keep Wi-Fi setting. A refused key says how to get out: with Keep Wi-Fi off the cable's probe brings the dial back to USB ("Plug in
+// USB"); with it on the dial does not look at the cable, so the line names the Link screen instead.
+const char *net_state_caption(net_state_t state, bool keep_wifi);
 // The one line of the Link screen (task W16): a line for every state, OFF and UP included; "" for a number out of range. It takes the state and
 // nothing else, so no network name, password or key can reach it.
 const char *net_state_line(net_state_t state);

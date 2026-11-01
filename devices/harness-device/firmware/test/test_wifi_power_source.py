@@ -205,12 +205,19 @@ for rel in firmware_sources():
 # power_off.c: the close is after the last look and before the PMIC write; a refusal before it never reaches it; put_back gives the link back
 po = code('power_off.c')
 run_fn = body(po, 'run')
-assert run_fn.index('external_power_now(') < run_fn.rindex('external_power_now(') < run_fn.index('net_link_close_for_power_off()') < run_fn.index('power_pmic_soft_off()'), \
-    'close after the last look at VBUS, right before the PMIC write'
+looks = [m.start() for m in re.finditer(r'external_power_now\(', run_fn)]
+assert len(looks) == 3 and looks[1] < run_fn.index('net_link_close_for_power_off()') < looks[2] < run_fn.index('power_pmic_soft_off()'), \
+    'close after the second look at VBUS; a third look after the close and its flush, right before the PMIC write (S8 review M1)'
 assert run_fn.index('store_gate_freeze(') < run_fn.index('net_link_close_for_power_off()'), 'with the writers stopped'
 assert 'net_link_resume()' in body(po, 'put_back') and 's_link_closed' in body(po, 'put_back')
 assert len(re.findall(r'net_link_close_for_power_off\(\)', po)) == 1 and len(re.findall(r'net_link_resume\(\)', po)) == 1
-assert re.search(r'xTaskCreate\(task, "", 6144, NULL, 5, NULL\)', po), 'an internal 6 KB stack: the close_notify runs on it too'
+assert re.search(r'xTaskCreate\(task, "", STACK_BYTES, NULL, 5, NULL\)', po) and re.search(r'#define STACK_BYTES\s+6144\b', po), 'an internal 6 KB stack: the close_notify runs on it too'
+assert 'uxTaskGetStackHighWaterMark(NULL)' in run_fn and run_fn.index('net_link_close_for_power_off()') < run_fn.index('uxTaskGetStackHighWaterMark(NULL)') < run_fn.index('power_pmic_soft_off()'), \
+    'the stack mark is logged after the close, right before the PMIC write (S8 review M2)'
+assert run_fn.index('net_link_close_for_power_off()') < run_fn.rindex('external_power_now(') < run_fn.index('power_pmic_soft_off()'), 'a look at VBUS after the close and the flush (S8 review M1)'
+# the dial says it is on Wi-Fi on purpose, in the Wi-Fi hello only (S8 review M4); the daemon reads it as hello.keepWifi
+hello_fn = body(raw_client, 'send_hello')
+assert re.search(r'if \(cable_link_transport\(\) == CABLE_XPORT_WIFI && config_load_stay_wl\(\)\) msg_bool\(&root, "keepWifi", true\);', hello_fn)
 assert 'power_off.c' in text('CMakeLists.txt') and text('CMakeLists.txt').count('"power_off.c"') == 1
 # the dial's goodbye is a message the daemon knows (cli/src/cable/cableSession.ts case 'bye')
 daemon = (cli / 'cableSession.ts').read_text(encoding='utf-8')

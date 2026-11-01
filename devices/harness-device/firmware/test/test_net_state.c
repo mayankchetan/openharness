@@ -71,18 +71,21 @@ static void test_names_and_captions(void)
     for (int s = 0; s < NET_STATE_COUNT; s++) CHECK(!strcmp(net_state_name((net_state_t)s), names[s]));
     CHECK(!strcmp(net_state_name((net_state_t)99), "?"));
     // Nothing to say when off or up; a short line (it sits under the wordmark) for every other state, all different.
-    CHECK(net_state_caption(NET_OFF) == NULL && net_state_caption(NET_UP) == NULL);
+    CHECK(net_state_caption(NET_OFF, false) == NULL && net_state_caption(NET_UP, false) == NULL && net_state_caption(NET_OFF, true) == NULL && net_state_caption(NET_UP, true) == NULL);
     const char *seen[4];
     int n = 0;
     for (int s = NET_JOINING; s <= NET_AUTH_FAILED; s++) {
-        const char *c = net_state_caption((net_state_t)s);
+        const char *c = net_state_caption((net_state_t)s, false);
+        CHECK(c && !strcmp(c, net_state_caption((net_state_t)s, true)) == (s != NET_AUTH_FAILED));   // only the refused-key line depends on Keep Wi-Fi
         CHECK(c && *c && strlen(c) <= 24);
         for (int i = 0; i < n; i++) CHECK(strcmp(seen[i], c) != 0);
         seen[n++] = c;
     }
     CHECK(n == 4);
     // The two states a person can act on say what to do about it: the cable fixes the second.
-    CHECK(!strcmp(net_state_caption(NET_AUTH_FAILED), "Plug in USB"));   // the way out: the cable's probe brings the dial back to USB (W15); a factory reset is not it
+    CHECK(!strcmp(net_state_caption(NET_AUTH_FAILED, false), "Plug in USB"));   // the way out: the cable's probe brings the dial back to USB (W15); a factory reset is not it
+    // S8 review (Low): with Keep Wi-Fi on the dial does not look at the cable, so the cable is no way out: the Link screen is
+    CHECK(!strcmp(net_state_caption(NET_AUTH_FAILED, true), "Open Link screen") && strlen(net_state_caption(NET_AUTH_FAILED, true)) <= 24);
 }
 
 // The one line of the Link screen (W16): a line for EVERY state, OFF and UP included, with the names the tests and the logs use

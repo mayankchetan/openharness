@@ -39,7 +39,8 @@ While the dial has no link to this computer it shows the word "Harness". On Wi-F
 | Joining Wi-Fi | It is working on it: finding the network, getting an address, or reaching this computer. | Wait. |
 | Wi-Fi: no address | It joined the network but the router gave it no address. | Check the router. |
 | Daemon not reachable | It has an address, but this computer did not answer. | Is Harness running here? Is the firewall rule in place? Did this computer's address change? |
-| Plug in USB | This computer refused the dial's key: it does not know this dial, or holds a different key. | Plug the cable in. The dial restarts on USB after about 5 seconds, once it has run for a minute. Run `harness dial wifi set` again. If you turned Keep Wi-Fi on, the dial does not look at the cable: open the Link screen on the dial and turn Keep Wi-Fi off first. |
+| Plug in USB | This computer refused the dial's key: it does not know this dial, or holds a different key. Keep Wi-Fi is off. | Plug the cable in. The dial restarts on USB after about 5 seconds, once it has run for a minute. Run `harness dial wifi set` again. |
+| Open Link screen | The same, with Keep Wi-Fi on: the dial does not look at the cable. | Open the Link screen on the dial and turn Keep Wi-Fi off, then plug the cable in and run `harness dial wifi set` again. |
 
 When the link is up the line goes away.
 

@@ -70,6 +70,13 @@ static esp_err_t IRAM_ATTR on_light_sleep_exit(int64_t slept_us, void *arg)
 // The RTC watchdog while the chip may sleep (sleep_wdt.h): 60 s, fed by every ptt wake (every 250 ms in S2). The task watchdog counts awake time
 // only (the 2026-11-01 hang on dial :50 was found after 62 h), and a chip that never wakes from a light sleep trips nothing else.
 #define SLEEP_WDT_MS 60000u
+// The bench aid for it (S8 review H1): -DSLEEP_WDT_SELFTEST=1 arms the watchdog at S2 entry and then never feeds it, so one bench run shows that a dial
+// stuck asleep is reset. Off in every product build (CMakeLists.txt switch, default off).
+#if defined(SLEEP_WDT_SELFTEST) && SLEEP_WDT_SELFTEST
+#define WDT_STARVE 1
+#else
+#define WDT_STARVE 0
+#endif
 
 // 1: the S0 to S1 step also turns automatic light sleep on (CPU and cache retention RAM, about 13.4 KB, allocated once for the whole
 // battery session and freed when external power returns); 0: frequency scaling only. If the RAM is not there the dial stays on 1.
@@ -231,7 +238,7 @@ void power_sleep_poll(void)
         .screen_asleep = display_is_asleep(),
         .holds = holds_now(),
     };
-    if (atomic_load(&s_wdt_armed)) sleep_wdt_feed();
+    if (atomic_load(&s_wdt_armed) && !WDT_STARVE) sleep_wdt_feed();
     {   // the breadcrumb: where everything was at this wake, for the report after a hang (last_words.h)
         const last_words_crumb_t crumb = {.tick_ms = in.now_ms, .sleeps = s_slept_count, .holds = in.holds, .want = (uint8_t)atomic_load(&s_want),
                                           .applied = (uint8_t)s_applied, .in_s2 = (uint8_t)atomic_load(&s_in_s2), .stage = (uint8_t)display_render_stage()};
@@ -349,7 +356,7 @@ static bool s2_go_live(void)
     // Look again after the release: the screen may have woken (its hook ran before the release took effect), or the ptt task may have
     // sent the policy back to S0 or S1 (a USB host, a plug-in, work started) while this ran. Either way take the lock back
     // (idempotent). s_in_s2 stays set so the next render pass runs exit_s2 and undoes the rest.
-    if (!display_is_asleep() || (pp_state_t)atomic_load(&s_want) != PP_S2) {
+    if (!display_is_asleep() || (pp_state_t)atomic_load(&s_want) != PP_S2 || holds_now()) {   // a hold that arrived during the arm counts too (S8 review M3)
         lock_acquire_once();
         atomic_store(&s_relaxed, false);
     }
@@ -363,6 +370,10 @@ static void enter_s2(void)
     display_render_guard(false);                 // the 1 s stall-guard timer would cap every sleep at one second
     sleep_wdt_arm(SLEEP_WDT_MS);                 // before the lock goes: from here a chip that does not wake is reset within a minute
     atomic_store(&s_wdt_armed, true);
+#if WDT_STARVE
+    ESP_LOGW(TAG, "SLEEP_WDT_SELFTEST: the RTC watchdog is armed for 60 s and is not fed; expect a system reset about 60 s from now with reset reason "
+                  "WATCHDOG (ESP_RST_WDT) and the 'last sleep breadcrumb' report. A touch or the PWR key leaves S2 and disarms it.");
+#endif
     s_s2_live = s2_go_live();
 }
 

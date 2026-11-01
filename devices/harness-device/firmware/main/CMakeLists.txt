@@ -275,6 +275,10 @@ if(DEVICE_BATTERY_SLEEP)
     endif()
     target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_BATTERY_SLEEP=1)
     target_sources(${COMPONENT_LIB} PRIVATE "power_policy.c" "power_sleep.c" "usb_bounce.c" "sleep_wdt.c")
+    # Bench aid, off by default: arm the RTC watchdog at S2 entry and never feed it (power_sleep.c WDT_STARVE). -DSLEEP_WDT_SELFTEST=1. Never for a product image.
+    if(SLEEP_WDT_SELFTEST)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE SLEEP_WDT_SELFTEST=1)
+    endif()
 endif()
 
 # PMIC power-off (power_off.c, store_gate.c): -DDEVICE_BATTERY_POWEROFF=1, default OFF, needs DEVICE_BATTERY_SLEEP=1. From S2 (battery, screen off) the dial

@@ -34,8 +34,9 @@ const cable_xport_t *net_link_xport(void);
 // close and not a drop (and does not wait out its silence window). net_link_close_for_power_off() says goodbye to the daemon when a session is up
 // (cable_client_say_bye), closes the TLS connection (close_notify, best effort, 100 ms), and parks the net_link task so it does not reconnect.
 // Returns true when Wi-Fi mode is running (there was a link to close, or one that was being made); false in USB mode, where it does nothing. Call it
-// from an internal-stack task, once the decision to power off is final. Bounded: the goodbye waits at most for a write that is already stalled
-// (the 2 s write cap of cable_xport_tls.c), usually a few milliseconds. net_link_resume() un-parks the task (the PMIC did not take the power-off).
+// from an internal-stack task, once the decision to power off is final. The goodbye and the close usually take a few
+// milliseconds. NOT bounded by a second: tls_close takes the transport's lock, which a TCP connect or a handshake in progress holds for up to 5 s
+// (CONNECT_MS in cable_xport_tcp.c) and a stalled write for up to 2 s; power_off.c therefore looks at VBUS again after the close (S8 review M1). net_link_resume() un-parks the task (the PMIC did not take the power-off).
 bool net_link_close_for_power_off(void);
 void net_link_resume(void);
 

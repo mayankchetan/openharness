@@ -173,7 +173,7 @@ assert net_store.index('mode_glue_settings_changed()') < net_store.index('net_re
 # W16b (review of the Link screen, finding 1 and 2): the task reads wl_mode through the confirming path, so one read inside a config_net_set_mode write
 # cannot send a Wi-Fi dial to USB (behaviour: test_mode_glue.c), and a dial that RUNS Wi-Fi starts believing Wi-Fi is a target.
 task_src = body(glue, 'mode_sw_task')
-assert re.search(r'atomic_exchange\(&s_reload, false\) \|\| s_mg\.wl_pending\) mg_apply_settings\(&s_mg, config_load_wl_effective\(\), config_load_stay_wl\(\), now\)', task_src)
+assert re.search(r'atomic_exchange\(&s_reload, false\) \|\| s_mg\.wl_pending\) \{\s*mg_apply_settings\(&s_mg, config_load_wl_effective\(\), config_load_stay_wl\(\), now\);\s*atomic_store\(&s_keep_wifi, s_mg\.stay_wl\);\s*\}', task_src)
 assert 'mg_set_settings(' not in glue, 'the glue never applies a read of wl_mode without the confirmation'
 start_src = body(glue, 'mode_glue_start')
 assert 's_running == MS_MODE_WIFI ? MS_WL_WIFI : config_load_wl_effective()' in start_src and 'atomic_store(&s_reload, true)' in start_src
@@ -242,6 +242,11 @@ for need in ('ui_mode_switch_busy(NULL, 0)', 'cable_client_models_waiting()', 'M
 assert re.search(r'#ifndef DEVICE_NO_OTA\s+if \(fw_update_active\(\)\)', blocked), 'the update counts where an update can exist'
 # the restart's last look uses the same gate as the step: the running mode decides the rule, and the idle time is the screen's own
 assert 'ms_gate_blocked(s_running, mode_switch_busy(), display_is_asleep(), display_idle_ms())' in body(glue, 'mode_switch_blocked')
+# S8 review (Low): the refused-key caption depends on Keep Wi-Fi. The UI reads a cached copy (no NVS read on the render task): written at start and after
+# every reload of the settings, by the one task that reloads them.
+assert re.search(r'static atomic_bool s_keep_wifi;', glue) and re.search(r'bool mode_glue_keep_wifi\(void\) \{ return atomic_load\(&s_keep_wifi\); \}', glue)
+assert 'atomic_store(&s_keep_wifi, s_mg.stay_wl);' in body(glue, 'mode_glue_start') and 'atomic_store(&s_keep_wifi, s_mg.stay_wl);' in body(glue, 'mode_sw_task')
+assert 'net_state_caption((net_state_t)atomic_load(&s_state), mode_glue_keep_wifi())' in code('net_link.c')
 assert 'w->idle_ms = display_idle_ms();' in sample, 'the step is given the time since the last touch'
 disp = text('ui/display.h')
 assert re.search(r'uint32_t display_idle_ms\(void\);', disp), 'declared in display.h, in every build'

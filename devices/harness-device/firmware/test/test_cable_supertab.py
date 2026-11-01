@@ -56,6 +56,8 @@ static int battery_pct(void) { return bat_pct; }
 static int battery_chg(void) { return bat_chg; }
 static cable_xport_kind_t link_kind = CABLE_XPORT_USB;   // which wire the hello goes out on: net "v1" is offered on the cable only
 static cable_xport_kind_t cable_link_transport(void) { return link_kind; }
+static bool stay_wl_on = false;   // the dial's Keep Wi-Fi setting (config_load_stay_wl)
+static bool config_load_stay_wl(void) { return stay_wl_on; }
 
 static unsigned beeps, ids_calls, card_calls, recap_calls, focus_calls, wait_calls, close_calls, question_calls, qclose_calls;
 static bool beep_next;
@@ -122,6 +124,14 @@ int main(void) {
     link_kind=CABLE_XPORT_WIFI;send_hello();
     assert(sends==2 && !strstr(wire[1],"\"net\""));
     link_kind=CABLE_XPORT_USB;sends=1;
+    // S8 review M4: over Wi-Fi, and only then, a dial with Keep Wi-Fi on says so (the boolean true; absent otherwise)
+    stay_wl_on=false;link_kind=CABLE_XPORT_WIFI;send_hello();
+    assert(sends==2 && !strstr(wire[1],"\"keepWifi\""));
+    stay_wl_on=true;send_hello();
+    assert(sends==3 && strstr(wire[2],"\"keepWifi\":true"));
+    link_kind=CABLE_XPORT_USB;send_hello();   // on the cable the setting is not sent
+    assert(sends==4 && !strstr(wire[3],"\"keepWifi\""));
+    stay_wl_on=false;sends=1;
 
     // supertabs: ids in order, the bad and the repeated skipped, at most 16.
     feed(handle_supertabs,"{\"ids\":[\"s1\",\"\",7,\"s2\",\"s1\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"]}");

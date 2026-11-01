@@ -67,6 +67,7 @@ typedef void *TaskHandle_t;
 void vTaskDelay(uint32_t ticks);
 BaseType_t xTaskCreate(void (*fn)(void *), const char *name, uint32_t stack, void *arg, int prio, TaskHandle_t *out);
 void vTaskDelete(TaskHandle_t t);
+uint32_t uxTaskGetStackHighWaterMark(TaskHandle_t t);
 ''',
 'nvs.h': '''
 #pragma once
@@ -124,6 +125,7 @@ static int pct = 4, mv = 3300, reg20 = 0x04, reg21 = 0x02, soft_off_calls, delay
 static jmp_buf death;                            // the PMIC cuts the power: the task never runs another line
 static bool armed_death;
 static uint32_t delay_total_ms;
+static int plug_during_close;           // the cable goes in while net_link closes the link: 1 VBUS, 2 a USB host
 static bool link_up; static int net_close_calls, net_resume_calls; static int64_t t_close, t_reg10;   // Wi-Fi mode: net_link.h
 static int plug_during_show;                    // 1: VBUS appears while the screen is shown; 2: a USB host does
 static int writer_in_flight_ms;                  // a writer holds the gate for this long (virtual time), then leaves; <0: for ever
@@ -141,7 +143,7 @@ bool display_is_asleep(void) { return asleep; }
 void display_wake(void) { asleep = false; ev("WAKE"); }
 void ui_show_error(const char *t, const char *d) { char b[96]; snprintf(b, sizeof b, "SHOW[%s|%s]", t, d); ev(b); }
 void ui_leave_error_screen(void) { ev("HOME"); }
-bool net_link_close_for_power_off(void) { ev("NETCLOSE"); net_close_calls++; assert(store_gate_frozen()); t_close = g_now_us; return link_up; }
+bool net_link_close_for_power_off(void) { ev("NETCLOSE"); net_close_calls++; assert(store_gate_frozen()); t_close = g_now_us; if (plug_during_close == 1) status0 = 0x28; else if (plug_during_close == 2) usb_host = true; return link_up; }
 void net_link_resume(void) { ev("NETRESUME"); net_resume_calls++; }
 
 // NVS: one namespace, one record, in memory; "commit" is the moment it becomes durable
@@ -173,6 +175,7 @@ BaseType_t xTaskCreate(void (*fn)(void *), const char *name, uint32_t stack, voi
 }
 static void run_deferred(void) { void (*f)(void *) = deferred_fn; deferred_fn = NULL; run_task(f, deferred_arg); }
 void vTaskDelete(TaskHandle_t t) { (void)t; }
+uint32_t uxTaskGetStackHighWaterMark(TaskHandle_t t) { (void)t; ev("HWM"); return 2000; }
 
 static void clear_events(void) { g_events[0] = 0; g_logs[0] = 0; }
 static bool in_order(const char *a, const char *b) { const char *pa = strstr(g_events, a); return pa && strstr(pa + strlen(a), b); }
@@ -181,7 +184,7 @@ static int count_of(const char *needle) { int n = 0; for (const char *p = g_even
 static void reset_world(void) {
     status0 = 0x08; status1 = 0x40; usb_host = ota = false; asleep = true; soft_off_ok = true; dies_on_soft_off = true; nvs_fail = false;
     pct = 4; mv = 3300; reg20 = 0x04; reg21 = 0x02; soft_off_calls = delays = 0; delay_total_ms = 0; writer_in_flight_ms = 0; plug_during_show = 0; the_board.has_pmic = true; reg_reads = 0; armed_death = true;
-    link_up = false; net_close_calls = net_resume_calls = 0; defer = false; store.present = pending.present = false; tasks_created = 0; g_now_us += 10LL * 1000000 * 100;   // far past any retry throttle
+    plug_during_close = 0; link_up = false; net_close_calls = net_resume_calls = 0; defer = false; store.present = pending.present = false; tasks_created = 0; g_now_us += 10LL * 1000000 * 100;   // far past any retry throttle
     store_gate_thaw();
     clear_events();
 }
@@ -203,6 +206,8 @@ static void scenario_sequence(void) {
     assert(store_gate_frozen() && !store_gate_enter());
     // the screen is shown for 1 s before the PMIC write
     assert(delay_total_ms >= 1000);
+    // S8 review M2: the task's stack high-water mark is logged right before the PMIC write (the 6 KB is a guess: this is how the bench reads it)
+    assert(in_order("SHOW[Power|Off - hold PWR]", "HWM") && in_order("HWM", "REG10") && strstr(g_logs, "stack high-water mark: 2000 B free of 6144 B"));
     // the record: reason, percent, mV, uptime, durable (committed) and with the magic
     assert(store.present && store.len == sizeof(rec_t));
     rec_t rec; memcpy(&rec, store.data, sizeof rec);
@@ -332,13 +337,30 @@ static void scenario_wifi_link(void) {
     assert(power_off_request(PP_OFF_S2_TIMEOUT, false));          // the PMIC takes the power: the task never runs another line (a death leaves the busy flag set, so this is a scenario of its own)
     assert(net_close_calls == 1 && net_resume_calls == 0 && has("DEAD"));
     assert(in_order("SHOW[Power|Off - hold PWR]", "NETCLOSE") && in_order("NETCLOSE", "REG10"));
-    assert(count_of("PMUREAD") == 2 && in_order("PMUREAD", "SHOW[Power|Off - hold PWR]") && in_order("SHOW[Power|Off - hold PWR]", "PMUREAD") && in_order("PMUREAD", "NETCLOSE"));
+    assert(count_of("PMUREAD") == 3 && in_order("PMUREAD", "SHOW[Power|Off - hold PWR]") && in_order("SHOW[Power|Off - hold PWR]", "PMUREAD") && in_order("PMUREAD", "NETCLOSE"));
+    assert(in_order("NETCLOSE", "PMUREAD") && in_order("NETCLOSE", "HWM") && in_order("HWM", "REG10"));   // a look after the close and the flush, then the stack mark, then the write
     assert(in_order("NVSCOMMIT", "NETCLOSE"));                  // the writers are stopped and the record is durable first (the close asserts the gate is frozen)
     assert(t_reg10 - t_close <= 1000LL * 1000 && t_reg10 >= t_close);   // the wait for the close to leave the radio is bounded: at most a second
     assert(strstr(g_logs, "link closed before the power-off"));
 }
 
 static void scenario_wifi_link_cases(void) {
+    // S8 review M1: a cable that goes in while the close waits (tls_close waits for the transport's lock, held through a TCP connect of up to 5 s) is seen
+    // by the look after the close and the flush: no PMIC write, the link is given back, the screen goes home
+    for (int what = 1; what <= 2; what++) {
+        reset_world();
+        link_up = true;
+        plug_during_close = what;                               // 1: VBUS appears during the close; 2: a USB host does
+        dies_on_soft_off = true;
+        assert(power_off_request(PP_OFF_S2_TIMEOUT, false));
+        assert(net_close_calls == 1 && !has("REG10") && soft_off_calls == 0);
+        assert(count_of("PMUREAD") == 3 && in_order("NETCLOSE", "PMUREAD") && in_order("PMUREAD", "NETRESUME"));
+        assert(net_resume_calls == 1 && in_order("HOME", "NETRESUME"));
+        assert(!store_gate_frozen() && !store.present && strstr(g_logs, "after the link close"));
+        assert(!power_off_pending());
+    }
+    plug_during_close = 0;
+
     // not in Wi-Fi mode (USB mode, or the radio never came up): net_link says nothing was open; the sequence is as before
     reset_world();
     link_up = false;

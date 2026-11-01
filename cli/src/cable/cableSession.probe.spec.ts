@@ -239,6 +239,27 @@ describe('hello{probe:1}', () => {
   })
 })
 
+describe('hello.keepWifi (S8 review M4: the dial says it is on Wi-Fi on purpose)', () => {
+  afterEach(() => vi.useRealTimers())
+  it('rides on the status while the greeting carries it, and goes when a later greeting does not', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    const onDialStatus = vi.fn()
+    const { session, port } = await connect(host({ onDialStatus }))
+    const last = () => onDialStatus.mock.calls.at(-1)![0] as { attached: boolean; keepWifi?: boolean }
+    port.say({ ...HELLO, keepWifi: true })
+    await settle()
+    expect(last()).toMatchObject({ attached: true, keepWifi: true })
+    port.say(HELLO)   // same mac and fw: only the field changed, and that alone is reported
+    await settle()
+    expect(last().attached).toBe(true)
+    expect(last()).not.toHaveProperty('keepWifi')
+    port.say({ ...HELLO, keepWifi: 'yes' })   // only the boolean true counts
+    await settle()
+    expect(last()).not.toHaveProperty('keepWifi')
+    await session.stop()
+  })
+})
+
 describe('bye (the dial says it is leaving on purpose: a power-off)', () => {
   afterEach(() => vi.useRealTimers())
   const fake = () => vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })

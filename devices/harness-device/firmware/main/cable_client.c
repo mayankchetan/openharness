@@ -351,6 +351,9 @@ static void send_hello(void)
 #endif
     // This dial keeps Wi-Fi settings (handle_net) and takes them over the cable only: the daemon then lists "net" in its welcome.
     if (cable_link_transport() == CABLE_XPORT_USB) msg_string(&root, "net", "v1");
+    // Over Wi-Fi: say when the dial is there on purpose (Keep Wi-Fi on), so the daemon does not take a silent USB cable for a stuck dial and reset it
+    // (S8 review M4). Only the boolean true is ever sent; the setting is on no other wire path.
+    if (cable_link_transport() == CABLE_XPORT_WIFI && config_load_stay_wl()) msg_bool(&root, "keepWifi", true);
     // This dial reads `welcome.keepaliveMs` (cable_keepalive.h, W13). The daemon sends the field only to a dial that says so: an older firmware
     // would call a ping slower than 5 s a dead daemon.
     msg_string(&root, "keepalive", "v1");

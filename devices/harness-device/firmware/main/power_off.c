@@ -26,6 +26,7 @@ static const char *TAG = "poff";
 #define NS                  "poff"
 #define KEY                 "rec"
 #define REC_MAGIC           0x504F4646u   // "POFF"
+#define STACK_BYTES         6144          // the task's internal stack; the high-water mark is logged before the PMIC write (the size is a guess until benched)
 #define FREEZE_TIMEOUT_MS   2000          // how long a writer in flight is waited for
 #define SETTLE_MS           100           // after the last write has been committed, before the screen
 #define SHOW_MS             1000          // "Off - hold PWR" is on the glass this long before the PMIC write
@@ -142,7 +143,15 @@ static void run(void)
     if (s_link_closed) {
         ESP_LOGW(TAG, "POWEROFF: Wi-Fi link closed before the power-off");
         vTaskDelay(pdMS_TO_TICKS(CLOSE_FLUSH_MS));
+        // The close can wait for the transport's lock, which a connect in progress holds for up to 5 s: a cable can have gone in meanwhile (S8 review M1).
+        // Look again, fresh; on a cable the link is given back and the dial stays on.
+        if (!s_force && external_power_now(" after the link close")) {
+            put_back();
+            return;
+        }
     }
+    // The stack the task really used, with the TLS close_notify in it (S8 review M2): the 6 KB is a guess, and this line is how the bench reads it.
+    ESP_LOGW(TAG, "POWEROFF: task stack high-water mark: %u B free of %u B", (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)STACK_BYTES);
     const bool wrote = power_pmic_soft_off();   // REG 0x10 bit 0: on success the power goes within milliseconds and nothing below runs
     ESP_LOGW(TAG, "PMIC soft power-off written: %s", wrote ? "ok" : "FAILED");
     vTaskDelay(pdMS_TO_TICKS(AFTER_MS));
@@ -167,7 +176,7 @@ bool power_off_request(int reason, bool force)
     s_force = force;
     // An internal stack (xTaskCreate): the task writes NVS, and the ptt task that asks has a PSRAM stack that must not run a flash write. 6 KB, not 4:
     // in Wi-Fi mode it also runs the TLS close_notify (net_link.h) on this stack. The margin is a guess, not a measurement: bench the high-water mark.
-    if (xTaskCreate(task, "poweroff", 6144, NULL, 5, NULL) != pdPASS) {
+    if (xTaskCreate(task, "poweroff", STACK_BYTES, NULL, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "POWEROFF: task create failed");
         atomic_store(&s_busy, false);
         return false;

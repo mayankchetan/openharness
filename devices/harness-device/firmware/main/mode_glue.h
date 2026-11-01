@@ -37,3 +37,6 @@ void mode_glue_settings_changed(void);
 // blocking model list; and the verdict with the asleep rule applied (a sleeping dial switches silently, except for an update or an upload).
 uint32_t mode_switch_busy(void);
 bool mode_switch_blocked(void);
+// The dial's Keep Wi-Fi setting (stay_wl), cached: written at start and after every reload of the settings, readable from any task (the UI's caption for a
+// refused key reads it on the render task, which must not read NVS).
+bool mode_glue_keep_wifi(void);

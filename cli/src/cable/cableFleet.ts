@@ -378,10 +378,14 @@ export class CableFleet {
     })(), 0)
   }
 
-  /** Is there a live Wi-Fi link for the dial with this USB serial (its MAC)? */
+  /**
+   * Is the dial with this USB serial (its MAC) live over Wi-Fi AND on Wi-Fi on purpose? Both: a link that is only "waiting" (a socket nobody has
+   * greeted: `slot.active`) says nothing about the dial, and a dial that is connected but does not say Keep Wi-Fi is on (`hello.keepWifi`) is one
+   * whose USB block may be dead, which is what the reset is for. The daemon cannot see the setting any other way: it is on no wire path but this hello.
+   */
   private wifiLive(serial: string | undefined): boolean {
     const net = serial ? this.netEntries.get(serial.toUpperCase()) : undefined
-    return !!net && (net.attached || net.slot.active)
+    return !!net && net.attached && net.status.keepWifi === true
   }
 
   private silentOnCableWifiLive(id: string, port: DialPort): void {

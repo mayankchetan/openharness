@@ -41,6 +41,7 @@ static mg_t s_mg;
 static ms_mode_t s_running = MS_MODE_USB;
 static char s_focus[MS_FOCUS_MAX];     // the agent to restore, copied out of the boot plan
 static bool s_focus_pending;
+static atomic_bool s_keep_wifi;        // stay_wl as of the last read (mode_glue_keep_wifi)
 static atomic_bool s_reload;           // mode_glue_settings_changed(): the task re-reads wl_mode and stay_wl at its next step
 static bool s_crash_usb;               // this boot took USB because of the panic loop (said again once the daemon is likely to be listening)
 static uint8_t s_crashes;              // the crash count as of this boot
@@ -294,7 +295,10 @@ static void mode_sw_task(void *arg)
         const uint64_t now = uptime_ms();
         // A reload (the Link screen wrote wl_mode or stay_wl), and again at every loop while a drop to "no target" waits for its second read: the
         // value of a read taken inside a config_net_set_mode write is not believed alone (mg_apply_settings, MG_CONFIRM_MS).
-        if (atomic_exchange(&s_reload, false) || s_mg.wl_pending) mg_apply_settings(&s_mg, config_load_wl_effective(), config_load_stay_wl(), now);
+        if (atomic_exchange(&s_reload, false) || s_mg.wl_pending) {
+            mg_apply_settings(&s_mg, config_load_wl_effective(), config_load_stay_wl(), now);
+            atomic_store(&s_keep_wifi, s_mg.stay_wl);
+        }
 
         if (s_mg.probe_on) {
             // The probe is wanted. If the driver would not install, say so and try again: a dial that cannot probe cannot come back to USB.
@@ -335,6 +339,7 @@ void mode_glue_start(ms_mode_t running)
     // that says "no target" has to be confirmed like any other), so one failed read of NVS here cannot send it to USB (review finding 2).
     mg_init(&s_mg, s_running, s_boot.flaps, s_running == MS_MODE_WIFI ? MS_WL_WIFI : config_load_wl_effective(), config_load_stay_wl());
     if (s_running == MS_MODE_WIFI) atomic_store(&s_reload, true);
+    atomic_store(&s_keep_wifi, s_mg.stay_wl);
     mg_note_crashes(&s_mg, s_crashes);
     mode_record_crash_seal(s_crashes, s_running);   // the mode that really started (the radio may not have come up: then USB, and a crash is not Wi-Fi's)
     if (xTaskCreate(mode_sw_task, "mode_sw", TASK_STACK, NULL, TASK_PRIO, NULL) != pdPASS)
@@ -342,5 +347,7 @@ void mode_glue_start(ms_mode_t running)
     else
         ESP_LOGI(TAG, "running in %s mode (wl_effective=%u stay_wl=%d)", ms_mode_name(s_running), (unsigned)s_mg.wl_effective, (int)s_mg.stay_wl);
 }
+
+bool mode_glue_keep_wifi(void) { return atomic_load(&s_keep_wifi); }
 
 void mode_glue_settings_changed(void) { atomic_store(&s_reload, true); }
