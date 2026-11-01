@@ -100,13 +100,26 @@ function Test-LoopbackListen($Rows) {
     'LOOPBACK'
 }
 
+# All lines of a file that another process may hold open for writing (the daemon does with harness.log and the dial logs):
+# [IO.File]::ReadAllLines would fail on the sharing mode.
+function Read-SharedLines([string]$Path) {
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+    try {
+        $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8)
+        $lines = New-Object Collections.Generic.List[string]
+        while ($null -ne ($line = $reader.ReadLine())) { $lines.Add($line) }
+        , $lines.ToArray()
+    }
+    finally { $stream.Dispose() }
+}
+
 # Lines of one or more files as @{ Time; Text }, only those at or after $Since (all when $Since is null). Lines without a stamp
 # are dropped when a window is set. A missing file is reported in $Missing, never read as empty-and-fine.
 function Read-Window([string[]]$Path, $Since, [ref]$Missing) {
     $out = New-Object Collections.Generic.List[object]
     foreach ($p in $Path) {
         if (-not $p -or -not (Test-Path -LiteralPath $p -PathType Leaf)) { $Missing.Value += @($p); continue }
-        foreach ($line in [IO.File]::ReadAllLines($p, [Text.Encoding]::UTF8)) {
+        foreach ($line in (Read-SharedLines $p)) {
             $time = $null
             if ($line -match $script:Pat.Stamp) { $time = ConvertTo-Utc $Matches[1] }
             elseif ($line -match $script:Pat.LocalStamp) { $time = ConvertFrom-LocalStamp $Matches[1] }

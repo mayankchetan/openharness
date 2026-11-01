@@ -107,6 +107,14 @@ $onlyOld = Join-Path $tmp 'harness-old.log'
 $r = Test-M1 -DialLog $dialFile -DaemonLog $onlyOld -Since $t0 -Mac $dialMac
 Assert-Equal (Status $r 'tunnel-session') 'FAIL' 'only a line before the window: no tunnel session'
 
+Write-Host 'A log the daemon still holds open for writing (the real harness.log is)'
+$held = [IO.File]::Open($localLog, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+try {
+    $r = Test-M1 -DialLog $dialFile -DaemonLog $localLog -Since $t0 -Mac $dialMac
+    Assert-Equal (Status $r 'tunnel-session') 'PASS' 'read while a writer holds the file'
+}
+finally { $held.Dispose() }
+
 Write-Host 'Default daemon log path'
 $fakeHome = Join-Path $tmp 'home'
 Assert-Equal ([bool](Get-DefaultDaemonLog -HomeDir $fakeHome)) $false 'absent file: no default (the check is skipped, not failed)'
