@@ -29,6 +29,7 @@ static ht_gallery_t gallery;
 #include "config_store.h"
 #include "cable_client.h"
 #include "net_link.h"
+#include "mode_switch.h"
 #include "pet_store.h"
 #include "../../elapsed.h"
 #include "task_util.h"
@@ -257,6 +258,7 @@ static EXT_RAM_BSS_ATTR struct {
     ht_rect_t caption_arc;
     int hit_count, pressed;
     bool touch_down, touch_cancelled;
+    bool mode_notice;         // "Switching in a moment" over the current view (ui_mode_notice); an overlay, not a view
     bool touch_brake, coasting;
     uint32_t coast_until;
     uint32_t character_activity;
@@ -2396,6 +2398,12 @@ static void render_battery_rim(ht_scene_t *f)
                                       color(HT_THEME_RIM_TEXT_BG)};
     ht_battery_rim(f, battery_rim_pct(), s.battery_pct_until != 0, &ink);
 }
+// The automatic mode switch is due and something the user is doing holds it (ui_mode_switch_busy). A dim line low on the glass over any view; it is not a view,
+// so it is not in the busy mask and the switch never waits for its own notice.
+static void render_mode_notice(ht_scene_t *f)
+{
+    center(f, 346, "Switching in a moment", DIM);
+}
 bool habitat_scene_take(ht_scene_t *f)
 {
 #ifdef DEVICE_CREATURE_GALLERY
@@ -2503,6 +2511,7 @@ bool habitat_scene_take(ht_scene_t *f)
         ui_wrap(f, FACE_CX(336), 161, 336, 5, 0, UI_FONT, FG, s.message);
         break;
     }
+    if (s.mode_notice) render_mode_notice(f);
     render_battery_rim(f);
     return true;
 }
@@ -4550,6 +4559,48 @@ bool ui_is_projects_active(void)
     return s.view == HOME || s.view == AGENT || s.view == AGENTS;
 }
 bool ui_reader_is_open(void) { return s.view == READER; }
+
+// ── the automatic mode switch (task W15; ui_screens.h, mode_switch.h, MS section 3) ──────────────────────────────────────────────────────────────
+// What the user is in the middle of, as a mask for the pure module's gate. The first four are the user's list; the picker row is the proposed one.
+// Anything that is on the glass and takes the user's next touch counts, so a switch never lands in the middle of a turn, a draft, an answer, a page or
+// a choice. (A dial whose screen is off switches silently; that rule is mode_switch.c's, ms_blocked.)
+uint32_t ui_mode_switch_busy(char *focus, size_t cap)
+{
+    uint32_t busy = 0;
+    display_lock();
+    // voice turn: recording or starting or waiting for the transcript, or the voice view itself
+    if (s.voice_open || s.voice_start_pending || s.voice_waiting || s.view == VOICE || audio_client_active()) busy |= MS_BUSY_VOICE;
+    // draft: one open, one in flight, or one of its two views
+    if (draft.page.active || draft.pending || s.view == DRAFT || s.view == DRAFT_OPTIONS) busy |= MS_BUSY_DRAFT;
+    // question: its three views, with a question that is still valid (an answered-elsewhere page has nothing to lose)
+    if (question_view(s.view) && s.q.valid) busy |= MS_BUSY_QUESTION;
+    // reader
+    if (s.view == READER) busy |= MS_BUSY_READER;
+    // forms, selections, stop confirmation, model and machine pickers, tabs, the update screen, a message
+    switch (s.view) {
+    case FORM: case SELECTION: case STOP: case MODELS: case MACHINES: case TABS: case OTA: case MESSAGE:
+        busy |= MS_BUSY_PICKER;
+        break;
+    default:
+        break;
+    }
+    if (focus && cap) {
+        const agent_t *a = active();
+        snprintf(focus, cap, "%s", a ? a->id : "");
+    }
+    display_unlock();
+    return busy;
+}
+
+void ui_mode_notice(bool on)
+{
+    display_lock();
+    if (s.mode_notice != on) {
+        s.mode_notice = on;
+        change();
+    }
+    display_unlock();
+}
 bool ui_picker_is_open(void) { return s.view == MODELS || s.view == MACHINES || s.view == TABS; }
 bool ui_switch_is_open(void) { return s.view == TABS; }
 bool ui_scroll_reportable(void)

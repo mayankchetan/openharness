@@ -297,3 +297,18 @@ probe still finds the welcome, and drops the rest.
 The probe's decoder holds one frame of at most 1,024 bytes. A frame over that is noise to it, so the daemon's probe welcome is kept
 under 256 bytes whatever the machine is called (`cableSession.probe.spec.ts`). The rule that turns welcomes into a switch to USB (5 s of
 fresh welcomes, none older than 3 s) is `firmware/main/mode_switch.c`.
+
+## 6. The mode switch on the dial (task W15)
+
+Pure rules: `firmware/main/mode_switch.c` (boot table, timers, busy gate, flap guard). Glue: `mode_glue_core.c` (tested on the host against a simulated
+dial), `mode_glue.c` (IDF calls), `usb_probe.c` / `usb_probe_core.c` (section 5), `mode_record.c` (RTC record), `config_store.c` (three NVS values).
+
+NVS, namespace `pair`: `wl_mode` (net.set; 0 or 1 only), `stay_wl` and `boot_usb` (one byte each, true only for the byte 1). The wireless target the
+switch sees is `config_load_wl_effective()`: Wi-Fi only when the Wi-Fi settings are whole and `wl_mode` is exactly 1; anything else is no target and
+the dial boots USB and never leaves it. `net.clear` and the factory reset take `stay_wl` too. Bluetooth (`wl_mode` 2) is not storable and not a target
+until it has a transport.
+
+Boot order in `app_main`: factory-reset countdown, `mode_glue_boot()` (record, NVS, SOF flag read once, at least 20 ms after the reset), the radio only
+if the decision is Wi-Fi, the link, the focus restored, the `mode_sw` task started with the mode that really started. A switch is: log the reason
+(`last_words`: "mode switch"), seal the focus and the flap count in the RTC record, store `boot_usb`, restart. Three switches in a row, then none until 10
+minutes of uptime in one mode; none before 60 s of uptime.

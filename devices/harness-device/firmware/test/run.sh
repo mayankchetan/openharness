@@ -95,6 +95,9 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
 "$out/test_usb_probe"
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -DMODE_RECORD_HOST -I "$here/host_stubs" -I "$here/host_nvs" -I "$here/../main"    -o "$out/test_mode_glue" "$here/test_mode_glue.c" "$here/../main/mode_glue_core.c" "$here/../main/mode_record.c" "$here/../main/mode_switch.c"    "$here/host_nvs/host_nvs.c" "$here/../main/config_store.c"
 "$out/test_mode_glue"
+# The IDF side of that glue, as source rules: boot order and the radio gate, SOF settle, record trusted after a software reset only, internal task stack,
+# the reboot sequence, the probe retry, no Bluetooth target, no stay_wl writer, the UI busy rows, the last_words reason, the build list.
+python3 "$here/test_mode_glue_source.py"
 # The decoder buffer is in PSRAM (W6): only cable_link.c names it, and every consumer of a frame payload is CPU-side (no DMA).
 python3 "$here/test_decoder_psram.py"
 # IMA ADPCM voice blocks (frame type 0x07): encoder and decoder against the shared vectors, sanitizers on.

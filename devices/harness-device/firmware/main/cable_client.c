@@ -2008,3 +2008,28 @@ void cable_client_counters(uint32_t *bad, uint32_t *unknown)
     if (bad) *bad = s_bad;
     if (unknown) *unknown = s_unknown;
 }
+
+// ── for the automatic mode switch (cable_client.h; task W15) ────────────────────────────────────────
+// Written by other tasks' data and read here without a lock, on purpose: each is one aligned word (or a retry loop over two), and a wrong answer for
+// one 250 ms step only holds a switch back one step more or hurries it one step; none of them can start a switch by itself.
+
+bool cable_client_last_daemon_byte(uint32_t *ms32)
+{
+    if (!ms32) return false;
+    // s_last_rx_us is 64 bits on a 32-bit CPU: a read can tear while the reader stores it. A torn value is wrong by 2^32 us (71 minutes), which
+    // would read as a daemon that has been silent for 71 minutes, so read twice until the two agree.
+    int64_t a = 0, b = 0;
+    for (int tries = 0; tries < 4; tries++) {
+        a = s_last_rx_us;
+        b = s_last_rx_us;
+        if (a == b) break;
+    }
+    if (a == 0) return false;   // the link has not started
+    // Four reads that never agreed (not seen in practice): say "a frame just now", the answer that keeps a USB dial where it is.
+    *ms32 = (uint32_t)((a == b ? a : esp_timer_get_time()) / 1000);
+    return true;
+}
+
+bool cable_client_models_waiting(void) { return ((model_item_t *volatile *)&s_models_out)[0] != NULL; }
+
+bool cable_client_pet_upload_active(void) { return *(const volatile char *)&s_pet_id[0] != 0; }

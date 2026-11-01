@@ -24,6 +24,7 @@
 #include "config_store.h"
 #include "fw_update.h"
 #include "last_words.h"
+#include "mode_glue.h"
 #include "net_link.h"
 #include "board/board.h"
 #include "board/board_probe.h"
@@ -322,15 +323,21 @@ void app_main(void)
     ui_perf_run();  // synthetic, local-only, before the cable can affect a live harness
 #endif
 
-    // Which way in: NVS says wl_mode = 1 with a whole set of Wi-Fi settings (net.set over the cable put them there), or it does not. If it does,
-    // net_link_start() brings the radio up and the link runs over Wi-Fi; if it does not, it returns false having started nothing, and the link
-    // is the USB cable exactly as it always was. No automatic switching between the two: a change of mode is a reboot.
-    const bool wifi_mode = net_link_start();
+    // Which way in. mode_glue_boot() decides (task W15; mode_switch.h boot table): NVS says wl_mode = 1 with a whole set of Wi-Fi settings (net.set over
+    // the cable put them there), or it does not; stay_wl, boot_usb and whether a host is driving the USB port settle the rest. It runs HERE, after the
+    // factory-reset countdown above (which can wipe what it reads) and long after the 20 ms the SOF flag needs to be believed. If the answer is Wi-Fi,
+    // net_link_start() brings the radio up and the link runs over Wi-Fi; if the radio does not come up it returns false having started nothing, and the
+    // link is the USB cable in this same boot. A change of mode is a reboot, and the mode switch task started below asks for it.
+    const bool wifi_mode = mode_glue_boot() == MS_MODE_WIFI && net_link_start();
     if (!cable_client_start_with(wifi_mode ? net_link_xport() : cable_xport_usb())) {
         // A dial with no link still runs, still lights up, and still says so on screen. A device stuck in a
         // boot loop is not diagnosable from across the room; one showing "Not connected" is.
         ESP_LOGE(TAG, "cable link did not start — the dial will show no machine");
     }
+    // After an automatic switch: the agent the dial was showing (held until the roster arrives), and then the task that decides the next switch, told
+    // the mode that REALLY started. The UI exists (ui_init above) and the link is up, which is what the busy gate and the daemon-byte clock read.
+    mode_glue_restore_focus();
+    mode_glue_start(wifi_mode ? MS_MODE_WIFI : MS_MODE_USB);
 
     // If this boot is a freshly installed image, confirm it HERE and nowhere earlier — see fw_mark_valid.
     // Both things that make the dial fixable have now happened: it can draw, and the port is open so a

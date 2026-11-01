@@ -1,5 +1,6 @@
 #include "last_words.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_attr.h"
@@ -28,6 +29,34 @@ static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static esp_reset_reason_t s_reason;
 static bool s_abnormal;
+
+// The reason a software reset was asked for (last_words_note_reason). Same memory, same rule as the ring: it survives esp_restart(), a power cut
+// leaves it as anything, so it is believed only after a software reset and only with the right magic and checksum, and it is used once.
+#define NOTE_MAGIC 0x4E4F5445u   // "NOTE"
+#define NOTE_MAX 24
+typedef struct {
+    uint32_t magic;
+    uint32_t check;
+    char     text[NOTE_MAX];
+} note_t;
+static RTC_NOINIT_ATTR note_t s_note;
+static char s_note_text[NOTE_MAX];   // this boot's copy of the previous boot's note; empty for any other kind of reset
+
+static uint32_t note_check(const note_t *n)
+{
+    uint32_t h = 2166136261u ^ n->magic;   // FNV-1a over the text
+    for (size_t i = 0; i < NOTE_MAX; i++) h = (h ^ (uint8_t)n->text[i]) * 16777619u;
+    return h;
+}
+
+void last_words_note_reason(const char *reason)
+{
+    if (!reason) return;
+    note_t n = {.magic = NOTE_MAGIC};
+    snprintf(n.text, sizeof n.text, "%s", reason);
+    n.check = note_check(&n);
+    s_note = n;
+}
 // The previous boot's lines, copied out before this boot starts overwriting the ring. Static rather than
 // heap: 4 KB of BSS is cheaper than a failed allocation at the one moment it would matter.
 static EXT_RAM_BSS_ATTR char s_previous[RING_BYTES + 1];   // PSRAM: boot-time copy, task context only
@@ -64,6 +93,11 @@ static const char *reason_name(esp_reset_reason_t r)
 void last_words_boot(void)
 {
     s_reason = esp_reset_reason();
+    s_note_text[0] = '\0';
+    if (s_reason == ESP_RST_SW && s_note.magic == NOTE_MAGIC && s_note.check == note_check(&s_note) && memchr(s_note.text, '\0', NOTE_MAX)) {
+        memcpy(s_note_text, s_note.text, NOTE_MAX);
+    }
+    s_note.magic = 0;   // used once, whatever kind of reset this was
     s_abnormal = s_reason == ESP_RST_PANIC || s_reason == ESP_RST_INT_WDT || s_reason == ESP_RST_TASK_WDT
               || s_reason == ESP_RST_WDT || s_reason == ESP_RST_BROWNOUT || s_reason == ESP_RST_UNKNOWN;
     if (s_abnormal && ring_valid() && s_ring.len) {
@@ -101,7 +135,7 @@ void last_words_report(void)
     if (s_reported) return;
     s_reported = true;
     if (s_abnormal) ESP_LOGW(TAG, "reset reason: %s", reason_name(s_reason));
-    else            ESP_LOGI(TAG, "reset reason: %s", reason_name(s_reason));
+    else            ESP_LOGI(TAG, "reset reason: %s%s%s", reason_name(s_reason), s_note_text[0] ? ": " : "", s_note_text);
     if (!s_previous_len) return;
     ESP_LOGW(TAG, "last %u bytes of log before that reset follow", (unsigned)s_previous_len);
     // The first line is very likely a fragment (the ring wrapped through it); everything after is whole.

@@ -81,6 +81,15 @@ void ui_set_connected(bool connected);
 void ui_pets_changed(void);
 // Wi-Fi mode: the link state changed (net_link.c). Redraws the caption under the wordmark; any task but the render task.
 void ui_net_status_changed(void);
+// The automatic mode switch (task W15; mode_glue.c, mode_switch.h). Any task but the render task; both take the display lock.
+//
+// ui_mode_switch_busy(): the MS_BUSY_* mask of what the user is in the middle of, from the view and the pending actions: a voice turn, a draft, a
+// question, the reader, a picker or form (MS section 3). If `focus` is given, the id of the agent on the carousel is copied into it (at most
+// `cap` bytes, always terminated; empty when there is none) under the same lock, for the RTC record.
+uint32_t ui_mode_switch_busy(char *focus, size_t cap);
+// Show or hide "Switching in a moment": a line over whatever is on screen, NOT a view (a view of its own would be one more thing the busy mask
+// counts, and the switch would wait for its own notice).
+void ui_mode_notice(bool on);
 // Node (paired machine) online↔offline from the `node_status` frame — distinct from ui_set_connected
 // Ensure a tile exists for project_id (creates one if new). Safe to call repeatedly.
 // Set/refresh the human name shown on a project's tile.

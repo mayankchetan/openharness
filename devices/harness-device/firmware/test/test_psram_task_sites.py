@@ -22,7 +22,8 @@ MOVED = [  # (file, task name, macro, plain create that the #else branch keeps)
     # the Wi-Fi bring-up, which may write the PHY calibration to NVS, runs on net_init, which is internal and short-lived.
     ('net_link.c', 'net_link', 'TASK_STACK_PSRAM_NET', 'xTaskCreate'),
 ]
-STAYS_INTERNAL = ['habitat_render', 'habitat_touch', 'voice_capture', 'net_init', 'net_store']
+# mode_sw (W15, mode_glue.c): writes NVS (boot_usb) and installs and removes the USB driver, so its stack is internal
+STAYS_INTERNAL = ['habitat_render', 'habitat_touch', 'voice_capture', 'net_init', 'net_store', 'mode_sw']
 
 header = (main / 'task_util.h').read_text()
 # The cable_link reader is the one conditional task: in PSRAM only with the OTA path compiled out (DEVICE_NO_OTA), because

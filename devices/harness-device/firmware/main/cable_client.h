@@ -121,6 +121,17 @@ bool cable_client_start_with(const cable_xport_t *xport);
 // Whether `welcome` has been seen and the session is still believed to be live.
 bool cable_client_is_connected(void);
 
+// For the automatic mode switch (mode_glue.c, task W15). Cheap, lock-free, any task.
+//
+// When the newest frame from the daemon arrived: the low 32 bits of the millisecond clock (esp_timer_get_time() / 1000), so the caller works out the
+// age with an unsigned subtraction that survives the wrap. Before any frame has come it is the time the link started (about a second after boot),
+// which is what the 60-second "no daemon" rule counts from. False only before the cable client has started.
+bool cable_client_last_daemon_byte(uint32_t *ms32);
+// A models.list request is waiting for its answer (the one blocking round trip of the protocol): the model picker must not be torn down under it.
+bool cable_client_models_waiting(void);
+// A custom pet pack is arriving (offer accepted, slices not finished): a reboot now would throw the pack away and the daemon would start over.
+bool cable_client_pet_upload_active(void);
+
 // The machine's display name, as `welcome` gave it ("" until then). The dial shows the computer it is
 // plugged into, and there is exactly one — the machine picker this firmware used to carry existed for a
 // backend that is no longer part of the design.

@@ -19,3 +19,8 @@ void last_words_add(const char *line, size_t len);
 // Once a daemon is listening (session up): log the reset reason, and the previous boot's last lines if
 // that reset was a crash. Logs once per boot.
 void last_words_report(void);
+
+// Say WHY the reset about to happen is happening (the automatic mode switch passes "mode switch", task W15), so the next boot's report reads
+// "reset reason: software (esp_restart): mode switch" and is not taken for a fault. Kept in RTC memory with a checksum; believed only after a
+// software reset, and used once.
+void last_words_note_reason(const char *reason);
