@@ -61,6 +61,7 @@ class Pump(
     private val clock: Clock = RealClock,
     queueBytes: Int = Wire.RELAY_QUEUE_BYTES.toInt(),
     fullCloseMs: Long = Wire.RELAY_FULL_CLOSE_MS,
+    private val chunkBytes: Int = CHUNK_BYTES,
 ) : TunnelEvents {
 
     private val toTunnel = ByteQueue(queueBytes, clock, fullCloseMs)
@@ -94,7 +95,7 @@ class Pump(
     }
 
     private fun readDial() {
-        val buf = ByteArray(CHUNK_BYTES)
+        val buf = ByteArray(chunkBytes)
         try {
             while (true) {
                 val n = dial.read(buf)
@@ -132,23 +133,29 @@ class Pump(
     private fun writeTunnel() {
         tunnelReady.await()
         val tunnel = tunnelRef.get() ?: return
-        val buf = ByteArray(CHUNK_BYTES)
+        val buf = ByteArray(chunkBytes)
         while (true) {
             val n = toTunnel.take(buf)
             if (n < 0) break
-            // Hold the chunk until the WebSocket has room, so the queue in front of it is the only deep one.
-            while (!closing.get() && tunnel.queueSize() >= SEND_AHEAD_BYTES) Thread.sleep(2)
-            if (closing.get()) return
-            if (!tunnel.send(buf.copyOf(n))) {
-                closeAll(CloseReason.TUNNEL_FAILED)
-                return
+            // One WebSocket message never exceeds the daemon's limit (Wire.MAX_WS_MESSAGE_BYTES): split, keep order.
+            var off = 0
+            while (off < n) {
+                val len = minOf(n - off, Wire.MAX_WS_MESSAGE_BYTES)
+                // Hold the piece until the WebSocket has room, so the queue in front of it is the only deep one.
+                while (!closing.get() && tunnel.queueSize() >= SEND_AHEAD_BYTES) Thread.sleep(2)
+                if (closing.get()) return
+                if (!tunnel.send(buf.copyOfRange(off, off + len))) {
+                    closeAll(CloseReason.TUNNEL_FAILED)
+                    return
+                }
+                off += len
             }
         }
         closeAll(CloseReason.DIAL_CLOSED) // drained after the dial closed; a no-op after any other close
     }
 
     private fun writeDial() {
-        val buf = ByteArray(CHUNK_BYTES)
+        val buf = ByteArray(chunkBytes)
         try {
             while (true) {
                 val n = toDial.take(buf)

@@ -22,6 +22,9 @@ object Wire {
     const val RELAY_FULL_CLOSE_MS = 4000L
     const val WS_PING_MS = 25000L
 
+    /** Daemon relay endpoint contract (B3b): one binary WebSocket message is at most 64 KiB. Not a vector value. */
+    const val MAX_WS_MESSAGE_BYTES = 64 * 1024
+
     /** The vector `const` lines this app relies on. The test checks each against the vectors. */
     val CONSTANTS: Map<String, Long> = mapOf(
         "relay_queue_bytes" to RELAY_QUEUE_BYTES,

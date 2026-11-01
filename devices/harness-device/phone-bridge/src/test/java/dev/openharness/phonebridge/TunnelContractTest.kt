@@ -52,4 +52,25 @@ class TunnelContractTest {
         assertEquals("custom headers still pass", "1", req.header("X-Test"))
         waitUntil(what = "failure callback") { failed.get() != -1 }
     }
+
+    @Test
+    fun a200KBBurstIsSplitIntoMessagesOfAtMost64KiBInOrder() {
+        val dial = FakeDial()
+        val tunnel = FakeTunnel()
+        // Large chunk and queue on purpose: a single take can hold the whole burst, so only the cap splits it.
+        val pump = Pump(dial, tunnel, RecordingListener(), queueBytes = 1_048_576, chunkBytes = 300_000)
+        pump.start()
+        val burst = randomPayload(71, 200_000)
+        dial.feed(burst)
+        waitUntil(what = "burst sent") { tunnel.sentBytes().size >= burst.size }
+        assertTrue("largest message ${tunnel.maxSend.get()} must be <= ${Wire.MAX_WS_MESSAGE_BYTES}", tunnel.maxSend.get() <= Wire.MAX_WS_MESSAGE_BYTES)
+        assertTrue("200000 bytes need at least 4 messages, got ${tunnel.sendCalls.get()}", tunnel.sendCalls.get() >= 4)
+        org.junit.Assert.assertArrayEquals("order preserved", burst, tunnel.sentBytes())
+        pump.stop()
+    }
+
+    @Test
+    fun messageCapIsExactly64KiB() {
+        assertEquals(65_536, Wire.MAX_WS_MESSAGE_BYTES)
+    }
 }
