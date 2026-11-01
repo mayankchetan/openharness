@@ -266,7 +266,8 @@ static void test_accept_policy(void)
 static size_t unhex(const char *hex, uint8_t *out, size_t cap)
 {
     size_t n = 0;
-    while (hex[0] && hex[0] != '\t' && hex[0] != '\n' && hex[1]) {
+    // a field ends at a tab or a line end; a CRLF checkout (git archive on Windows) ends it with \r\n
+    while (hex[0] && hex[0] != '\t' && hex[0] != '\n' && hex[0] != '\r' && hex[1]) {
         assert(n < cap);
         unsigned v;
         assert(sscanf(hex, "%2x", &v) == 1);
