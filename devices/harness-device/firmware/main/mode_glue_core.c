@@ -118,7 +118,12 @@ void mg_step(mg_t *g, const mg_world_t *w, const mg_ops_t *ops)
         return;
     }
     notice(g, ops, false);                 // the reason went (cable pulled, busy cleared) or the switch goes now
+    if (out.act == MS_ACT_NONE && !out.waiting) {   // no switch is due any more: the next one starts a fresh ladder
+        g->refusals = 0;
+        g->retry_at = 0;
+    }
     if (out.act != MS_ACT_REBOOT) return;
+    if (g->refusals && w->now_ms < g->retry_at) return;   // a refusal is recent: not before the delay is over (review finding 1)
 
     // THE SEQUENCE. Log the reason (so the next boot's report is not read as a fault), seal the focus and the flap count (so the cap holds across
     // the reset), store boot_usb (so the next boot does not undo the switch), and only then restart. If the store fails the restart still goes
@@ -128,9 +133,33 @@ void mg_step(mg_t *g, const mg_world_t *w, const mg_ops_t *ops)
     g->done = true;
     if (ops->log_reason) ops->log_reason(ops->ctx, out.target);
     if (ops->seal) ops->seal(ops->ctx, out.flaps);
+    // What NVS holds NOW, read before the store: a refusal puts back this, not the running mode's value (they differ after a radio fallback).
+    const bool boot_usb_before = ops->load_boot_usb ? ops->load_boot_usb(ops->ctx) : g->ms.mode == MS_MODE_USB;
     if (ops->store_boot_usb) (void)ops->store_boot_usb(ops->ctx, out.boot_usb);
     if (ops->restart && !ops->restart(ops->ctx, out.target)) {
-        if (ops->undo) ops->undo(ops->ctx, g->ms.mode, g->ms.flaps);
+        if (ops->undo) ops->undo(ops->ctx, boot_usb_before, g->ms.flaps);
         g->done = false;
+        if (g->refusals < 250) g->refusals++;
+        g->retry_at = w->now_ms + mg_retry_delay_ms(g->refusals);
     }
+}
+
+uint32_t mg_retry_delay_ms(uint8_t refusals)
+{
+    uint64_t d = MG_RETRY_BASE_MS;
+    for (uint8_t n = 1; n < refusals && d < MG_RETRY_MAX_MS; n++) d *= 2;
+    return d > MG_RETRY_MAX_MS ? MG_RETRY_MAX_MS : (uint32_t)d;
+}
+
+mg_restart_t mg_restart_try(const mg_gate_ops_t *g)
+{
+    if (!g || !g->frozen || !g->freeze || !g->thaw || !g->blocked || !g->restart) return MG_RESTART_FROZEN;
+    if (g->frozen(g->ctx)) return MG_RESTART_FROZEN;
+    if (!g->freeze(g->ctx)) return MG_RESTART_WRITER;
+    if (g->blocked(g->ctx)) {
+        g->thaw(g->ctx);
+        return MG_RESTART_BUSY;
+    }
+    g->restart(g->ctx);
+    return MG_RESTART_GONE;
 }

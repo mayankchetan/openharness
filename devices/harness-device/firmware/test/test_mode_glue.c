@@ -55,6 +55,8 @@ typedef struct {
     bool reset_sw;              // how the last reset happened (the flap record is believed after a software reset only)
     ms_reset_t reset_cls;       // the same reset as the crash record sees it (zero: power-on)
     int refuse_restarts;        // the final busy check inside the restart op finds the dial busy this many times
+    int attempts;               // how many times the restart op was called (accepted or refused)
+    uint64_t attempt_t[256];    // the uptime of each attempt (the first 256)
     bool crash_usb;             // this boot took USB because of the panic loop
     uint8_t crashes;            // the crash count this boot started with
     ms_mode_t running;
@@ -94,6 +96,8 @@ static bool op_store(void *c, bool v) { dial_t *d = c; strcat(d->order, "B"); re
 static bool op_restart(void *c, ms_mode_t target)
 {
     dial_t *d = c;
+    if (d->attempts < 256) d->attempt_t[d->attempts] = d->t;
+    d->attempts++;
     if (d->refuse_restarts > 0) { d->refuse_restarts--; strcat(d->order, "r"); return false; }
     strcat(d->order, "R");
     d->reboot_to[d->reboots < 64 ? d->reboots : 63] = target;
@@ -103,16 +107,19 @@ static bool op_restart(void *c, ms_mode_t target)
     d->reset_cls = MS_RESET_HOLD;
     return true;
 }
-static void op_undo(void *c, ms_mode_t running, uint8_t flaps)
+// A refused restart puts back what the dial HELD before the sequence wrote boot_usb (the core read it through load_boot_usb), not the running
+// mode's value: after a radio fallback (Wi-Fi chosen, USB running) those differ.
+static void op_undo(void *c, bool boot_usb_before, uint8_t flaps)
 {
     dial_t *d = c;
     strcat(d->order, "U");
-    config_save_boot_usb(running == MS_MODE_USB);
+    config_save_boot_usb(boot_usb_before);
     mode_record_save(NULL, flaps);
 }
 static void op_clear_crashes(void *c) { (void)c; mode_record_crash_clear(); }
+static bool op_load_boot_usb(void *c) { (void)c; return config_load_boot_usb(); }
 
-static const mg_ops_t OPS = {&D, op_probe, op_notice, op_clear, op_log, op_seal, op_store, op_restart, op_clear_crashes, op_undo};
+static const mg_ops_t OPS = {&D, op_probe, op_notice, op_clear, op_log, op_seal, op_store, op_restart, op_clear_crashes, op_undo, op_load_boot_usb};
 
 static bool sof_now(void)
 {
@@ -633,7 +640,7 @@ static void test_restart_refused_when_the_dial_turns_busy_again(void)
     ms_record_view_t v;
     assert(mode_record_boot(true, &v) && v.flaps == 0);   // the raised flap count was put back
     D.refuse_restarts = 0;                                // the voice turn ended
-    assert(run(MS_STEP_MS * 2));
+    assert(run(MG_RETRY_MAX_MS + MS_STEP_MS * 2));
     assert(D.reboots == 1 && D.order[strlen(D.order) - 1] == 'R');
     assert(strstr(D.order, "LSBR") != NULL);
     assert(config_load_boot_usb());                       // and now the switch is stored as usual
@@ -651,7 +658,7 @@ static void test_restart_refused_when_the_dial_turns_busy_again(void)
     assert(!run(120000));                                 // 60 s without a daemon byte: due; refused every time
     assert(D.reboots == 0 && config_load_boot_usb());
     D.refuse_restarts = 0;
-    assert(run(MS_STEP_MS * 2) && D.reboot_to[0] == MS_MODE_WIFI && !config_load_boot_usb());
+    assert(run(MG_RETRY_MAX_MS + MS_STEP_MS * 2) && D.reboot_to[0] == MS_MODE_WIFI && !config_load_boot_usb());
 }
 
 // ── W16: the Link screen's two controls reach the running glue (mode_glue_settings_changed -> mg_set_settings) ────────────────────────────
@@ -674,7 +681,7 @@ static void test_picking_usb_on_wifi_goes_to_usb_and_stays(void)
     ms_record_view_t v;
     assert(mode_record_boot(true, &v) && v.flaps == 0);
     D.refuse_restarts = 0;
-    assert(run(MS_STEP_MS * 2));
+    assert(run(MG_RETRY_MAX_MS + MS_STEP_MS * 2));
     assert(D.reboots == 1 && D.reboot_to[0] == MS_MODE_USB && D.reboot_uptime[0] < MS_T_DWELL_MS);   // the user's pick is not held by the dwell
     assert(strstr(D.order, "LSBR") != NULL);              // log, seal, boot_usb, restart: the one sequence
     assert(config_load_boot_usb());                       // boot_usb follows the target
@@ -725,6 +732,142 @@ static void test_keep_wifi_off_gives_a_wifi_dial_its_way_back_to_usb(void)
     assert(config_save_stay_wl(true));
     link_screen_changed();
     assert(run(MS_T_DWELL_MS) && D.reboot_to[1] == MS_MODE_WIFI);
+}
+
+// ── W15e: review findings of the W15d re-review (2026-11-01) ────────────────────────────────────────
+// 1. A refused restart is not retried at once: the delay doubles from MG_RETRY_BASE_MS to MG_RETRY_MAX_MS. A stuck NVS writer used to cost a
+//    boot_usb commit, an undo commit and a probe stop and start about once a second for ever.
+static void test_retry_delay_ladder(void)
+{
+    assert(mg_retry_delay_ms(0) == MG_RETRY_BASE_MS && mg_retry_delay_ms(1) == MG_RETRY_BASE_MS);
+    assert(mg_retry_delay_ms(2) == 2 * MG_RETRY_BASE_MS && mg_retry_delay_ms(3) == 4 * MG_RETRY_BASE_MS && mg_retry_delay_ms(4) == 8 * MG_RETRY_BASE_MS);
+    for (unsigned n = 5; n < 256; n++) assert(mg_retry_delay_ms((uint8_t)n) == MG_RETRY_MAX_MS);
+    assert(MG_RETRY_BASE_MS >= 5000 && MG_RETRY_MAX_MS <= 300000 && MG_RETRY_MAX_MS >= MG_RETRY_BASE_MS);
+}
+
+static void test_a_persistent_refusal_is_rate_bounded(void)
+{
+    fresh();
+    provision(1);
+    boot();
+    assert(!run(70000));
+    D.cable = D.daemon = true;
+    D.refuse_restarts = 1 << 30;                          // a writer that never finishes, or a gate that never opens
+    const uint64_t hour = 3600ull * 1000;
+    assert(!run(hour));
+    assert(D.reboots == 0 && D.attempts >= 2);
+    assert(D.attempts <= (int)(hour / MG_RETRY_MAX_MS) + 6);   // before the fix: about one attempt a second, 3,600 in the hour
+    // the gaps are never below the base, never shrink, and stop growing at the cap
+    uint64_t prev = 0;
+    for (int i = 1; i < D.attempts && i < 256; i++) {
+        const uint64_t gap = D.attempt_t[i] - D.attempt_t[i - 1];
+        assert(gap + MS_STEP_MS >= MG_RETRY_BASE_MS && gap + MS_STEP_MS >= prev && gap <= MG_RETRY_MAX_MS + MS_STEP_MS);
+        prev = gap;
+    }
+    assert(D.attempt_t[1] - D.attempt_t[0] >= MG_RETRY_BASE_MS);
+    assert(D.attempt_t[1] - D.attempt_t[0] <= MG_RETRY_BASE_MS + MS_STEP_MS);
+    // the dial is as it was: boot_usb is the running mode's
+    assert(!config_load_boot_usb());
+    // the refusal ends: the switch goes at the next attempt, which is at most MG_RETRY_MAX_MS away
+    D.refuse_restarts = 0;
+    assert(run(MG_RETRY_MAX_MS + MS_STEP_MS * 2) && D.reboot_to[0] == MS_MODE_USB);
+}
+
+static void test_the_retry_count_starts_again_when_the_switch_is_no_longer_due(void)
+{
+    fresh();
+    provision(1);
+    boot();
+    assert(!run(70000));
+    D.cable = D.daemon = true;
+    D.refuse_restarts = 1 << 30;
+    assert(!run(10 * 60 * 1000));                         // the ladder has climbed to its cap
+    assert(D.attempts >= 5);
+    D.cable = false;                                      // the cable goes: the switch is no longer due
+    assert(!run(5000));
+    const int before = D.attempts;
+    const uint64_t replugged = D.t;
+    D.cable = true;                                       // it comes back: a fresh 5 s of welcomes, and the first attempt is not held by the old ladder
+    assert(!run(20000));
+    assert(D.attempts > before && D.attempt_t[before] - replugged < MG_RETRY_BASE_MS);
+}
+
+// 2. The undo puts back what NVS held before the sequence wrote boot_usb, not the running mode's value.
+static void test_undo_after_a_radio_fallback_restores_the_old_boot_usb(void)
+{
+    fresh();
+    provision(1);
+    D.radio_fails = true;                                 // Wi-Fi is chosen at boot and the radio does not come up: USB runs
+    assert(boot() == MS_MODE_USB);
+    assert(!config_load_boot_usb());                      // the boot recorded the CHOICE (Wi-Fi), not the mode that runs
+    D.refuse_restarts = 1000;
+    assert(!run(120000));                                 // no cable: leaves for Wi-Fi after T_LEAVE and the dwell, and every attempt is refused
+    assert(D.attempts >= 1 && D.reboots == 0);
+    assert(strchr(D.order, 'r') && D.order[strlen(D.order) - 1] == 'U');
+    assert(!config_load_boot_usb());                      // the old value; "running == USB" would have written 1 here
+    D.refuse_restarts = 0;
+    D.radio_fails = false;
+    assert(run(MG_RETRY_MAX_MS + MS_STEP_MS * 2) && D.reboot_to[0] == MS_MODE_WIFI);
+    assert(!config_load_boot_usb());
+    // and with a stored 1 the undo puts back a 1
+    fresh();
+    provision(1);
+    config_save_boot_usb(true);
+    D.cable = D.daemon = true;
+    D.reset_sw = true;
+    assert(boot() == MS_MODE_USB);
+    assert(!run(30000));
+    D.daemon = false;
+    D.refuse_restarts = 1000;
+    assert(!run(120000));
+    assert(D.attempts >= 1 && config_load_boot_usb());
+}
+
+// 3. The restart op's gate sequence, run against a fake store gate with the real gate's semantics (store_gate.c): freeze stops new writers and
+//    waits for the ones in flight, a failed freeze opens the gate again by itself, thaw opens it. power_off.c freezes it for good before the PMIC
+//    cuts the power (DEVICE_BATTERY_POWEROFF): a restart must neither thaw that nor race it.
+typedef struct { bool frozen, writer_stuck, busy; int freezes, thaws, restarts, busy_looks; char order[16]; } fake_gate_t;
+static bool fg_frozen(void *c) { return ((fake_gate_t *)c)->frozen; }
+static bool fg_freeze(void *c)
+{
+    fake_gate_t *g = c;
+    g->freezes++;
+    strcat(g->order, "F");
+    g->frozen = true;
+    if (g->writer_stuck) { g->frozen = false; return false; }
+    return true;
+}
+static void fg_thaw(void *c) { fake_gate_t *g = c; g->thaws++; strcat(g->order, "T"); g->frozen = false; }
+static bool fg_blocked(void *c) { fake_gate_t *g = c; g->busy_looks++; strcat(g->order, "B"); return g->busy; }
+static void fg_restart(void *c) { fake_gate_t *g = c; g->restarts++; strcat(g->order, "R"); }
+
+static void test_the_restart_gate_sequence(void)
+{
+    fake_gate_t g;
+    mg_gate_ops_t ops;
+    // open gate, not busy: freeze, then the last look, then the restart, and nothing is thawed
+    memset(&g, 0, sizeof g);
+    ops = (mg_gate_ops_t){&g, fg_frozen, fg_freeze, fg_thaw, fg_blocked, fg_restart};
+    assert(mg_restart_try(&ops) == MG_RESTART_GONE && !strcmp(g.order, "FBR") && g.thaws == 0 && g.frozen);
+    // busy at the last look: thaw once, no restart
+    memset(&g, 0, sizeof g);
+    g.busy = true;
+    assert(mg_restart_try(&ops) == MG_RESTART_BUSY && !strcmp(g.order, "FBT") && g.thaws == 1 && !g.frozen && g.restarts == 0);
+    // a writer that will not finish: no thaw (the freeze reopened the gate itself), no look, no restart
+    memset(&g, 0, sizeof g);
+    g.writer_stuck = true;
+    assert(mg_restart_try(&ops) == MG_RESTART_WRITER && !strcmp(g.order, "F") && g.thaws == 0 && !g.frozen && g.restarts == 0);
+    // ALREADY FROZEN by the power-off sequence: the switch is skipped, the gate is left exactly as found (frozen), nothing else is touched
+    memset(&g, 0, sizeof g);
+    g.frozen = true;
+    assert(mg_restart_try(&ops) == MG_RESTART_FROZEN && g.order[0] == 0 && g.frozen && g.freezes == 0 && g.thaws == 0 && g.busy_looks == 0 && g.restarts == 0);
+    g.busy = true;                                        // busy as well: still not thawed
+    assert(mg_restart_try(&ops) == MG_RESTART_FROZEN && g.frozen && g.thaws == 0);
+    // missing ops never crash, and never restart
+    assert(mg_restart_try(NULL) == MG_RESTART_FROZEN);
+    mg_gate_ops_t none;
+    memset(&none, 0, sizeof none);
+    assert(mg_restart_try(&none) == MG_RESTART_FROZEN);
 }
 
 // ── the panic loop (user decision 2026-10-31) ───────────────────────────────────────────────────────
@@ -888,6 +1031,11 @@ static void test_a_crash_loop_in_wifi_is_slowed_to_one_attempt_per_dwell(void)
 int main(void)
 {
     test_restart_refused_when_the_dial_turns_busy_again();
+    test_retry_delay_ladder();
+    test_a_persistent_refusal_is_rate_bounded();
+    test_the_retry_count_starts_again_when_the_switch_is_no_longer_due();
+    test_undo_after_a_radio_fallback_restores_the_old_boot_usb();
+    test_the_restart_gate_sequence();
     test_picking_usb_on_wifi_goes_to_usb_and_stays();
     test_a_dial_busy_on_the_link_screen_waits_then_switches();
     test_keep_wifi_off_gives_a_wifi_dial_its_way_back_to_usb();

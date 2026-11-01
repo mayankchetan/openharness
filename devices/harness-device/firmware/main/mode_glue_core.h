@@ -73,7 +73,10 @@ typedef struct {
     bool (*restart)(void *ctx, ms_mode_t target);
     // after the table above, so a test double written for the older table still lines up
     void (*clear_crashes)(void *ctx);                        // MS_CRASH_CLEAR_MS of uptime in Wi-Fi mode: re-seal the crash record at zero
-    void (*undo)(void *ctx, ms_mode_t running, uint8_t flaps);   // a refused restart: boot_usb back to the running mode's value, the record back to `flaps`
+    void (*undo)(void *ctx, bool boot_usb_before, uint8_t flaps);   // a refused restart: boot_usb back to `boot_usb_before`, the record back to `flaps`
+    // after the table above. NVS boot_usb as it is NOW; the core reads it just before store_boot_usb and hands it to undo, so a refusal puts back what the
+    // dial held (after a radio fallback that is the CHOICE, Wi-Fi, not the mode that runs). NULL: the running mode's value, as before W15e.
+    bool (*load_boot_usb)(void *ctx);
 } mg_ops_t;
 
 typedef struct {
@@ -84,7 +87,34 @@ typedef struct {
     bool       notice_on;
     bool       done;                 // the restart has been asked for: nothing more is done (until a refused restart gives the dial back)
     uint8_t    crashes;              // the crash count; zero after MS_CRASH_CLEAR_MS in Wi-Fi mode
+    uint8_t    refusals;             // refused restarts in a row for the switch that is due; zero when none is due or one went
+    uint64_t   retry_at;             // uptime before which the sequence is not started again (valid while refusals > 0)
 } mg_t;
+
+// After a refused restart the sequence (a boot_usb commit, an undo commit, a probe stop and start) is not run again at once. The delay doubles from
+// MG_RETRY_BASE_MS to MG_RETRY_MAX_MS. Why these numbers: a refusal at the last moment means the user has just started something, or an NVS writer is
+// stuck. 10 s is short enough that a switch the user is waiting for is not noticeably late (the notice is already gone while it waits), and the
+// doubling to 120 s caps a stuck writer at about 35 attempts an hour (two flash commits each) instead of the 3,600 a one-second retry made.
+#define MG_RETRY_BASE_MS 10000u
+#define MG_RETRY_MAX_MS  120000u
+uint32_t mg_retry_delay_ms(uint8_t refusals);   // the delay after the `refusals`-th refusal in a row (0 and 1: the base)
+
+// The restart op's gate sequence, as data, so that a host test can run it (the real ops are in mode_glue.c). The order, which nothing may change:
+//   frozen on entry?  -> MG_RESTART_FROZEN: the store gate is frozen by someone else (power_off.c, before the PMIC cuts the power). The switch is
+//                        skipped and the gate is left as found: a restart would race the power-off, and a thaw would let writers into it.
+//   freeze the writers -> on failure MG_RESTART_WRITER (the gate reopened itself; nothing to thaw)
+//   the last look at the busy gate -> busy: thaw (this call froze it), MG_RESTART_BUSY
+//   restart() -> MG_RESTART_GONE (the real one does not return)
+typedef enum { MG_RESTART_GONE = 0, MG_RESTART_FROZEN, MG_RESTART_WRITER, MG_RESTART_BUSY } mg_restart_t;
+typedef struct {
+    void *ctx;
+    bool (*frozen)(void *ctx);   // store_gate_frozen()
+    bool (*freeze)(void *ctx);   // store_gate_freeze(RESTART_FREEZE_MS): true = no writer runs and none can start
+    void (*thaw)(void *ctx);     // store_gate_thaw()
+    bool (*blocked)(void *ctx);  // mode_switch_blocked()
+    void (*restart)(void *ctx);  // esp_restart()
+} mg_gate_ops_t;
+mg_restart_t mg_restart_try(const mg_gate_ops_t *g);   // missing ops: MG_RESTART_FROZEN, nothing is called
 
 // `running` is the mode that really started, `flaps` the record's count, the last two the settings as read at boot.
 void mg_init(mg_t *g, ms_mode_t running, uint8_t flaps, uint8_t wl_effective, bool stay_wl);

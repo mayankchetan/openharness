@@ -104,7 +104,7 @@ assert int(re.search(r'#define TASK_STACK (\d+)', glue)[1]) >= 4096
 ops = re.search(r'static const mg_ops_t OPS = \{(.*?)\};', glue, re.S)[1]
 for field in ('probe', 'notice', 'clear_flaps', 'log_reason', 'seal', 'store_boot_usb', 'restart', 'clear_crashes', 'undo'):
     assert re.search(r'\.' + field + r' = op_\w+', ops), field
-assert glue.count('esp_restart()') == 1 and 'esp_restart()' in body(glue, 'op_restart')
+assert glue.count('esp_restart()') == 1 and 'esp_restart()' in body(glue, 'gate_restart'), 'one esp_restart(), in the gate table (W15e)'
 assert 'last_words_note_reason(MS_REASON_SWITCH)' in body(glue, 'op_log_reason')
 assert 'mode_record_save(focus, flaps)' in body(glue, 'op_seal') and 'ui_mode_switch_busy(focus' in body(glue, 'op_seal')
 assert 'config_save_boot_usb(boot_usb)' in body(glue, 'op_store_boot_usb')
@@ -113,8 +113,10 @@ step = body(core, 'mg_step')
 order = [step.index(x) for x in ('ops->log_reason(', 'ops->seal(', 'ops->store_boot_usb(', 'ops->restart(')]
 assert order == sorted(order), 'log, seal, store, restart'
 # a refused restart is undone and the core goes on: done is cleared, so the sequence runs again at a later step
-assert re.search(r'if \(ops->restart && !ops->restart\(ops->ctx, out\.target\)\) \{\s*if \(ops->undo\) ops->undo\(ops->ctx, g->ms\.mode, g->ms\.flaps\);\s*g->done = false;', step), \
-    'a refused restart: undo, then done = false'
+assert re.search(r'if \(ops->restart && !ops->restart\(ops->ctx, out\.target\)\) \{\s*if \(ops->undo\) ops->undo\(ops->ctx, boot_usb_before, g->ms\.flaps\);\s*g->done = false;', step), \
+    'a refused restart: undo with the value NVS held before the store, then done = false'
+assert step.index('ops->load_boot_usb(') < step.index('ops->store_boot_usb('), 'W15e: the old boot_usb is read before it is overwritten'
+assert re.search(r'if \(g->refusals && w->now_ms < g->retry_at\) return;', step) and 'mg_retry_delay_ms(g->refusals)' in step, 'W15e: a refusal holds the next attempt back (behaviour: test_mode_glue.c)'
 assert 'g->ms.mode == MS_MODE_WIFI' in step and 'MS_CRASH_CLEAR_MS' in step and 'ops->clear_crashes(' in step, 'ten minutes up in Wi-Fi clear the crash count; USB time does not'
 # a probe that did not install is tried again: a dial that cannot probe cannot come back to USB
 task = body(glue, 'mode_sw_task')
@@ -122,15 +124,22 @@ assert 'PROBE_RETRY_MS' in task and 'usb_probe_running()' in task and 'usb_probe
 assert 'usb_probe_poll(' in task and task.index('usb_probe_poll(') > task.index('usb_probe_start(')
 # the probe is asked for only through the module's answer, and never while the dial runs on USB
 assert 'usb_probe_start(' in body(glue, 'op_probe') and 'usb_probe_stop()' in body(glue, 'op_probe')
-# the restart op (review finding 2): the NVS writers are frozen, THEN the busy gate is looked at (hard and soft rows, the step's own predicate), THEN
-# esp_restart() with nothing in between; a refusal thaws and returns false. The undo op puts boot_usb and the record back.
+# W15e: the order and the refusals of the restart op are mg_restart_try's (mode_glue_core.c, run on the host with a fake gate in test_mode_glue.c);
+# the glue only supplies the real gate. Already frozen (power_off.c) is skipped and never thawed; a failed freeze reopens the gate itself.
 assert re.search(r'static bool op_restart\(', glue)
 rs = body(glue, 'op_restart')
-assert rs.index('usb_probe_stop()') < rs.index('store_gate_freeze(') < rs.index('mode_switch_blocked()') < rs.index('esp_restart()')
-assert re.search(r'if \(mode_switch_blocked\(\)\) \{[^}]*store_gate_thaw\(\);[^}]*return false;\s*\}\s*esp_restart\(\);', rs), 'nothing between the last look and the restart; a refusal thaws'
-assert rs.count('return false;') == 2 and 'RESTART_FREEZE_MS' in rs
+assert rs.index('usb_probe_stop()') < rs.index('mg_restart_try(&GATE)') and 'esp_restart()' not in rs and 'store_gate_thaw' not in rs
+assert re.search(r'static const mg_gate_ops_t GATE = \{NULL, gate_frozen, gate_freeze, gate_thaw, gate_blocked, gate_restart\};', glue)
+assert 'store_gate_frozen()' in body(glue, 'gate_frozen') and 'store_gate_freeze(RESTART_FREEZE_MS)' in body(glue, 'gate_freeze')
+assert 'store_gate_thaw()' in body(glue, 'gate_thaw') and 'mode_switch_blocked()' in body(glue, 'gate_blocked') and 'esp_restart()' in body(glue, 'gate_restart')
+assert rs.count('return false;') == 1 and 'RESTART_FREEZE_MS' in rs
+cr = body(core, 'mg_restart_try')
+assert cr.index('g->frozen(') < cr.index('g->freeze(') < cr.index('g->blocked(') < cr.index('g->restart(')
+assert re.search(r'if \(g->blocked\(g->ctx\)\) \{\s*g->thaw\(g->ctx\);\s*return MG_RESTART_BUSY;\s*\}\s*g->restart\(g->ctx\);', cr), 'nothing between the last look and the restart; a refusal thaws what this call froze'
+assert cr.count('g->thaw(') == 1, 'thaw is called in one place only: after a busy look, never on entry or after a failed freeze'
 undo = body(glue, 'op_undo')
-assert 'config_save_boot_usb(running == MS_MODE_USB)' in undo and 'mode_record_save(NULL, flaps)' in undo and 'last_words_note_reason("")' in undo
+assert 'config_save_boot_usb(boot_usb_before)' in undo and 'mode_record_save(NULL, flaps)' in undo and 'last_words_note_reason("")' in undo
+assert 'config_load_boot_usb()' in body(glue, 'op_load_boot_usb')
 assert 'mode_record_crash_clear()' in body(glue, 'op_clear_crashes')
 gate = text('store_gate.h')
 assert 'store_gate_freeze' in gate.split('#else')[1] and 'store_gate_thaw' in gate.split('#else')[1], 'the build without DEVICE_BATTERY_POWEROFF has the calls too'

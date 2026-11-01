@@ -192,14 +192,31 @@ static void op_clear_crashes(void *ctx)
 }
 
 // A refused restart: the sequence had written the target's boot_usb and a raised flap count. Put both back, so a reset that comes for another reason
-// finds the dial as it was; the reason noted for last_words is blanked too (it said "mode switch"). The next step starts the sequence again.
-static void op_undo(void *ctx, ms_mode_t running, uint8_t flaps)
+// finds the dial as it was; the reason noted for last_words is blanked too (it said "mode switch"). `boot_usb_before` is what NVS held before the
+// sequence wrote it (the core read it through op_load_boot_usb): after a radio fallback that is the CHOICE (Wi-Fi), not the mode that runs. The
+// core starts the sequence again after a delay (mg_retry_delay_ms).
+static void op_undo(void *ctx, bool boot_usb_before, uint8_t flaps)
 {
     (void)ctx;
     last_words_note_reason("");
-    if (!config_save_boot_usb(running == MS_MODE_USB)) ESP_LOGW(TAG, "boot_usb could not be put back after the refused restart");
+    if (!config_save_boot_usb(boot_usb_before)) ESP_LOGW(TAG, "boot_usb could not be put back after the refused restart");
     mode_record_save(NULL, flaps);
 }
+
+static bool op_load_boot_usb(void *ctx)
+{
+    (void)ctx;
+    return config_load_boot_usb();
+}
+
+// The store gate and the busy gate behind the restart, as mg_restart_try wants them (the order and the refusals are mode_glue_core.c's and are run
+// on the host in test_mode_glue.c: already frozen by power_off.c is skipped and never thawed here; a writer that will not finish; busy at the last look).
+static bool gate_frozen(void *c) { (void)c; return store_gate_frozen(); }
+static bool gate_freeze(void *c) { (void)c; return store_gate_freeze(RESTART_FREEZE_MS); }
+static void gate_thaw(void *c) { (void)c; store_gate_thaw(); }
+static bool gate_blocked(void *c) { (void)c; return mode_switch_blocked(); }
+static void gate_restart(void *c) { (void)c; esp_restart(); }
+static const mg_gate_ops_t GATE = {NULL, gate_frozen, gate_freeze, gate_thaw, gate_blocked, gate_restart};
 
 static bool op_restart(void *ctx, ms_mode_t target)
 {
@@ -210,18 +227,21 @@ static bool op_restart(void *ctx, ms_mode_t target)
     vTaskDelay(pdMS_TO_TICKS(RESTART_FLUSH_MS));
     // The sequence before this took a display lock, an NVS commit and 150 ms, and the user may have started a voice turn, a draft or a pet upload
     // meanwhile. Stop the NVS writers first (as power_off.c does before it cuts the power: no write is half done when the reset comes), then look at
-    // the gate one last time, hard rows and soft rows by the same rule as the step (ms_blocked). Nothing but the call below follows the look.
-    if (!store_gate_freeze(RESTART_FREEZE_MS)) {
+    // the gate one last time, hard rows and soft rows by the same rule as the step (ms_blocked). Nothing but esp_restart() follows the look.
+    switch (mg_restart_try(&GATE)) {
+    case MG_RESTART_GONE:
+        break;   // not reached: esp_restart() does not return
+    case MG_RESTART_FROZEN:
+        ESP_LOGW(TAG, "restart skipped: the NVS writers are frozen for a power-off; the gate is left as found");
+        break;
+    case MG_RESTART_WRITER:
         ESP_LOGW(TAG, "restart postponed: an NVS writer did not finish in %d ms", RESTART_FREEZE_MS);
-        return false;
-    }
-    if (mode_switch_blocked()) {
-        store_gate_thaw();
+        break;
+    case MG_RESTART_BUSY:
         ESP_LOGW(TAG, "restart called off: the dial turned busy at the last moment (busy=%#x); it will try again", (unsigned)mode_switch_busy());
-        return false;
+        break;
     }
-    esp_restart();
-    return true;   // not reached
+    return false;
 }
 
 static const mg_ops_t OPS = {
@@ -235,6 +255,7 @@ static const mg_ops_t OPS = {
     .restart = op_restart,
     .clear_crashes = op_clear_crashes,
     .undo = op_undo,
+    .load_boot_usb = op_load_boot_usb,
 };
 
 static void sample(mg_world_t *w, uint64_t now)
