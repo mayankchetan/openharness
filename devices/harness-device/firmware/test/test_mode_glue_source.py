@@ -149,6 +149,13 @@ assert 'usb_probe_last_welcome(' in sample and sample.index('s_running == MS_MOD
 assert 'now - (uint32_t)((uint32_t)now - last32)' in sample
 # the mode the module sees is the effective one
 assert 'config_load_wl_effective()' in body(glue, 'mode_glue_start')
+# W16b (review of the Link screen, finding 1 and 2): the task reads wl_mode through the confirming path, so one read inside a config_net_set_mode write
+# cannot send a Wi-Fi dial to USB (behaviour: test_mode_glue.c), and a dial that RUNS Wi-Fi starts believing Wi-Fi is a target.
+task_src = body(glue, 'mode_sw_task')
+assert re.search(r'atomic_exchange\(&s_reload, false\) \|\| s_mg\.wl_pending\) mg_apply_settings\(&s_mg, config_load_wl_effective\(\), config_load_stay_wl\(\), now\)', task_src)
+assert 'mg_set_settings(' not in glue, 'the glue never applies a read of wl_mode without the confirmation'
+start_src = body(glue, 'mode_glue_start')
+assert 's_running == MS_MODE_WIFI ? MS_WL_WIFI : config_load_wl_effective()' in start_src and 'atomic_store(&s_reload, true)' in start_src
 # no BLE anywhere in the glue: no transport exists for it
 for name in ('mode_glue.c', 'mode_glue_core.c', 'app_main.c', 'usb_probe.c'):
     assert 'MS_MODE_BLE' not in code(name) and 'MS_WL_BLE' not in code(name), f'{name} names Bluetooth'

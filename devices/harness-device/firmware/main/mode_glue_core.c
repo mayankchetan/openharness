@@ -163,3 +163,23 @@ mg_restart_t mg_restart_try(const mg_gate_ops_t *g)
     g->restart(g->ctx);
     return MG_RESTART_GONE;
 }
+
+void mg_apply_settings(mg_t *g, uint8_t wl_effective, bool stay_wl, uint64_t now_ms)
+{
+    if (!g) return;
+    const uint8_t wl = wl_effective == MS_WL_WIFI ? MS_WL_WIFI : MS_WL_UNSET;
+    g->stay_wl = stay_wl;
+    if (wl == MS_WL_UNSET && g->wl_effective == MS_WL_WIFI) {
+        if (!g->wl_pending) {            // seen once: wait for the second read
+            g->wl_pending = true;
+            g->wl_pending_at = now_ms;
+            return;
+        }
+        if (now_ms < g->wl_pending_at || now_ms - g->wl_pending_at < MG_CONFIRM_MS) return;   // too soon to be a second opinion (a clock that stepped back waits too)
+        g->wl_pending = false;           // confirmed
+        g->wl_effective = MS_WL_UNSET;
+        return;
+    }
+    g->wl_pending = false;               // Wi-Fi again, or no target both before and after: nothing is waiting
+    g->wl_effective = wl;
+}

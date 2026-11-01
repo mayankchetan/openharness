@@ -93,7 +93,7 @@ static void test_link_screen_line(void)
     for (int s = 0; s < NET_STATE_COUNT; s++) {
         const char *l = net_state_line((net_state_t)s);
         CHECK(l && !strcmp(l, lines[s]));
-        CHECK(strlen(l) <= 28);   // 466 px of Inter 20 is more than 28 characters; the mono skin's 17-cell row would wrap, so it is wrapped in the UI
+        CHECK(strlen(l) <= 28);   // the Link screen draws it on one line (text_in, 336 px wide), not wrapped; the longest is 27 characters
     }
     CHECK(net_state_line((net_state_t)99) && !strcmp(net_state_line((net_state_t)99), ""));
 }

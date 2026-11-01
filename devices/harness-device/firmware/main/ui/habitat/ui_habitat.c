@@ -3315,6 +3315,12 @@ static void link_work(action_kind_t kind)
     change();
     display_unlock();
     if (kind != A_LINK_SYNC) mode_glue_settings_changed();
+    // The stack of this task (6,144 B, PSRAM) was sized without a measurement for three NVS commits: log its high-water mark after the first write.
+    static bool hwm_logged;
+    if (kind != A_LINK_SYNC && !hwm_logged) {
+        hwm_logged = true;
+        ESP_LOGI("habitat", "link_work stack free_min=%u B of 6144", (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    }
     if (!ok) ui_cable_toast("Link change not saved.");
 }
 static void worker(void *unused)

@@ -139,6 +139,9 @@ assert work.index('config_net_set_mode(') < work.index('display_lock()') and wor
 assert work.index('display_lock()') < work.index('link_ui.loaded = true') < work.index('display_unlock()')
 assert 'change()' in work
 
+# W16b: the worker's stack is measured once, after the first write (6,144 B, PSRAM, three NVS commits, not measured before)
+rawwork = body(raw, 'link_work')
+assert re.search(r'static bool hwm_logged;\s*if \(kind != A_LINK_SYNC && !hwm_logged\) \{\s*hwm_logged = true;\s*ESP_LOGI\("habitat", "link_work stack free_min=%u B of 6144", \(unsigned\)uxTaskGetStackHighWaterMark\(NULL\)\);', rawwork)
 # ── 4. stay_wl: one writer, a toggle, behind a whole configuration, and the switch is told ──────────
 writers = []
 for path in main.rglob('*.c'):

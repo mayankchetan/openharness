@@ -89,7 +89,15 @@ typedef struct {
     uint8_t    crashes;              // the crash count; zero after MS_CRASH_CLEAR_MS in Wi-Fi mode
     uint8_t    refusals;             // refused restarts in a row for the switch that is due; zero when none is due or one went
     uint64_t   retry_at;             // uptime before which the sequence is not started again (valid while refusals > 0)
+    bool       wl_pending;           // a read said "no wireless target" while Wi-Fi runs; waiting for a second one (mg_apply_settings)
+    uint64_t   wl_pending_at;        // uptime of that first read
 } mg_t;
+
+// A drop to "no target" while a wireless mode runs is the user's pick of USB, which reboots the dial at once. The value comes from NVS, and a read that
+// lands inside a config_net_set_mode write (marker removed, commit, marker written back) says "no target" for a few milliseconds. So the drop is acted
+// on only when a second read, at least MG_CONFIRM_MS after the first, says the same. 600 ms is longer than any one write window (two commits, tens
+// of milliseconds) and two steps of the 250 ms task; the cost to the user is that much delay on a pick that takes a reboot anyway.
+#define MG_CONFIRM_MS 600u
 
 // After a refused restart the sequence (a boot_usb commit, an undo commit, a probe stop and start) is not run again at once. The delay doubles from
 // MG_RETRY_BASE_MS to MG_RETRY_MAX_MS. Why these numbers: a refusal at the last moment means the user has just started something, or an NVS writer is
@@ -120,6 +128,10 @@ mg_restart_t mg_restart_try(const mg_gate_ops_t *g);   // missing ops: MG_RESTAR
 void mg_init(mg_t *g, ms_mode_t running, uint8_t flaps, uint8_t wl_effective, bool stay_wl);
 // The Settings screen (task W16) changed wl_mode or stay_wl: take the new values.
 void mg_set_settings(mg_t *g, uint8_t wl_effective, bool stay_wl);
+// What the glue task calls on a reload (mode_glue_settings_changed) and again at every loop while `wl_pending` is set: like mg_set_settings, but a drop
+// from Wi-Fi to "no target" is held until a second read at least MG_CONFIRM_MS later agrees (a read that says Wi-Fi again cancels it). stay_wl and a
+// change to Wi-Fi are applied at once. `now_ms` is the uptime of the read.
+void mg_apply_settings(mg_t *g, uint8_t wl_effective, bool stay_wl, uint64_t now_ms);
 // After mg_init(): the crash count this boot started with (mg_boot_out_t.crashes).
 void mg_note_crashes(mg_t *g, uint8_t crashes);
 void mg_step(mg_t *g, const mg_world_t *w, const mg_ops_t *ops);

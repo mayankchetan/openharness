@@ -57,6 +57,8 @@ typedef struct {
     int refuse_restarts;        // the final busy check inside the restart op finds the dial busy this many times
     int attempts;               // how many times the restart op was called (accepted or refused)
     uint64_t attempt_t[256];    // the uptime of each attempt (the first 256)
+    bool reload;                // mode_glue_settings_changed(): the task re-reads wl_mode and stay_wl at its next step
+    int glitch_reads;           // this many reads of wl_mode land inside a config_net_set_mode write (the marker is off): they see "no target"
     bool crash_usb;             // this boot took USB because of the panic loop
     uint8_t crashes;            // the crash count this boot started with
     ms_mode_t running;
@@ -172,6 +174,7 @@ static ms_mode_t boot(void)
     return D.running;
 }
 
+static void put_u8(const char *key, uint8_t v);
 // Run the dial for `ms` of uptime in 250 ms steps, or until it reboots. Returns true if it rebooted.
 static bool run(uint64_t ms)
 {
@@ -200,6 +203,22 @@ static bool run(uint64_t ms)
         w.busy = D.busy;
         w.asleep = D.asleep;
         const int before = D.reboots;
+        // The glue task, each loop: re-read wl_mode and stay_wl when asked (mode_glue_settings_changed) or while a drop to "no target" awaits its
+        // confirmation (mg_apply_settings). A read that lands inside a config_net_set_mode write sees the marker off, which reads as "no target".
+        if (D.reload || D.mg.wl_pending) {
+            D.reload = false;
+            uint8_t wl;
+            if (D.glitch_reads > 0) {
+                D.glitch_reads--;
+                nvs_handle_t h;
+                assert(nvs_open("pair", NVS_READWRITE, &h) == ESP_OK && nvs_erase_key(h, "wl_ver") == ESP_OK);   // marker_off
+                wl = config_load_wl_effective();
+                put_u8("wl_ver", 1);                                                                           // marker_on
+            } else {
+                wl = config_load_wl_effective();
+            }
+            mg_apply_settings(&D.mg, wl, config_load_stay_wl(), D.t);
+        }
         mg_step(&D.mg, &w, &OPS);
         if (D.reboots != before) return true;
     }
@@ -662,7 +681,7 @@ static void test_restart_refused_when_the_dial_turns_busy_again(void)
 }
 
 // ── W16: the Link screen's two controls reach the running glue (mode_glue_settings_changed -> mg_set_settings) ────────────────────────────
-static void link_screen_changed(void) { mg_set_settings(&D.mg, config_load_wl_effective(), config_load_stay_wl()); }
+static void link_screen_changed(void) { D.reload = true; }   // the real glue re-reads on its next step (mg_apply_settings, as in run())
 
 static void test_picking_usb_on_wifi_goes_to_usb_and_stays(void)
 {
@@ -870,6 +889,64 @@ static void test_the_restart_gate_sequence(void)
     assert(mg_restart_try(&none) == MG_RESTART_FROZEN);
 }
 
+// ── W16b: review of the Link screen (2026-11-01), finding 1 ──────────────────────────────────────────
+// config_net_set_mode removes the marker, commits, and writes it back. A read of wl_mode that lands in that window sees "no target". With the
+// reload flag of tap 1 still set when tap 2's write begins, the 250 ms task could read inside tap 2's window, take the "user picked USB" path (which
+// ignores the dwell and the flap cap) and reboot a Wi-Fi dial into USB that nobody asked for. A drop to "no target" now needs a second read at least
+// MG_CONFIRM_MS later that still says so.
+static void test_a_read_inside_a_write_window_does_not_send_the_dial_to_usb(void)
+{
+    fresh();
+    provision(1);
+    boot();
+    assert(!run(70000));                                  // past the dwell: nothing would hold a wrong switch back
+    link_screen_changed();                                // tap 1 is still waiting to be read ...
+    D.glitch_reads = 1;                                   // ... and the read lands inside tap 2's write
+    assert(!run(5 * 60 * 1000));
+    assert(D.reboots == 0 && D.mg.wl_effective == MS_WL_WIFI && !D.mg.wl_pending);
+    // two reads in a row inside windows (one step apart: less than the confirmation time): still nothing
+    link_screen_changed();
+    D.glitch_reads = 2;
+    assert(!run(5 * 60 * 1000));
+    assert(D.reboots == 0 && D.mg.wl_effective == MS_WL_WIFI && !D.mg.wl_pending);
+    // and the same read at a moment when the user HAS picked USB is not lost: the second read confirms it
+    assert(config_net_set_mode(0) == CFG_NET_OK);
+    link_screen_changed();
+    assert(!run(MS_STEP_MS));                             // the first read: seen once, not acted on
+    assert(D.mg.wl_pending && D.mg.wl_effective == MS_WL_WIFI);
+    assert(run(MG_CONFIRM_MS + 3 * MS_STEP_MS) && D.reboot_to[0] == MS_MODE_USB);
+}
+
+static void test_a_real_pick_of_usb_waits_only_for_its_confirmation(void)
+{
+    fresh();
+    provision(1);
+    boot();
+    assert(!run(20000));                                  // before the dwell: the user's pick is not held by it
+    assert(config_net_set_mode(0) == CFG_NET_OK);
+    link_screen_changed();
+    assert(run(MG_CONFIRM_MS + 3 * MS_STEP_MS));
+    assert(D.reboot_to[0] == MS_MODE_USB && D.reboot_uptime[0] < MS_T_DWELL_MS);
+    assert(D.reboot_uptime[0] >= 20000 + MG_CONFIRM_MS);  // not before the confirmation
+    // a change back to Wi-Fi is never delayed: it is applied by the first read
+    fresh();
+    provision(1);
+    assert(config_net_set_mode(0) == CFG_NET_OK);
+    assert(boot() == MS_MODE_USB);
+    assert(config_net_set_mode(1) == CFG_NET_OK);
+    link_screen_changed();
+    assert(!run(MS_STEP_MS) && D.mg.wl_effective == MS_WL_WIFI && !D.mg.wl_pending);
+    // a pending drop is cancelled when the next read says Wi-Fi again
+    fresh();
+    provision(1);
+    boot();
+    assert(!run(70000));
+    D.glitch_reads = 1;
+    link_screen_changed();
+    assert(!run(MS_STEP_MS) && D.mg.wl_pending);
+    assert(!run(MS_STEP_MS) && !D.mg.wl_pending && D.mg.wl_effective == MS_WL_WIFI);
+}
+
 // ── the panic loop (user decision 2026-10-31) ───────────────────────────────────────────────────────
 static void test_panic_loop_plan(void)
 {
@@ -1036,6 +1113,8 @@ int main(void)
     test_the_retry_count_starts_again_when_the_switch_is_no_longer_due();
     test_undo_after_a_radio_fallback_restores_the_old_boot_usb();
     test_the_restart_gate_sequence();
+    test_a_read_inside_a_write_window_does_not_send_the_dial_to_usb();
+    test_a_real_pick_of_usb_waits_only_for_its_confirmation();
     test_picking_usb_on_wifi_goes_to_usb_and_stays();
     test_a_dial_busy_on_the_link_screen_waits_then_switches();
     test_keep_wifi_off_gives_a_wifi_dial_its_way_back_to_usb();

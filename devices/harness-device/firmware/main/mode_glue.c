@@ -282,7 +282,9 @@ static void mode_sw_task(void *arg)
     uint64_t next_step = 0, next_retry = 0, next_mark = uptime_ms() + 10000;
     for (;;) {
         const uint64_t now = uptime_ms();
-        if (atomic_exchange(&s_reload, false)) mg_set_settings(&s_mg, config_load_wl_effective(), config_load_stay_wl());
+        // A reload (the Link screen wrote wl_mode or stay_wl), and again at every loop while a drop to "no target" waits for its second read: the
+        // value of a read taken inside a config_net_set_mode write is not believed alone (mg_apply_settings, MG_CONFIRM_MS).
+        if (atomic_exchange(&s_reload, false) || s_mg.wl_pending) mg_apply_settings(&s_mg, config_load_wl_effective(), config_load_stay_wl(), now);
 
         if (s_mg.probe_on) {
             // The probe is wanted. If the driver would not install, say so and try again: a dial that cannot probe cannot come back to USB.
@@ -319,7 +321,10 @@ static void mode_sw_task(void *arg)
 void mode_glue_start(ms_mode_t running)
 {
     s_running = running == MS_MODE_WIFI ? MS_MODE_WIFI : MS_MODE_USB;
-    mg_init(&s_mg, s_running, s_boot.flaps, config_load_wl_effective(), config_load_stay_wl());
+    // A dial that RUNS Wi-Fi was told by the boot decision that Wi-Fi is a target, so it starts believing that; the first loop re-reads (and a read
+    // that says "no target" has to be confirmed like any other), so one failed read of NVS here cannot send it to USB (review finding 2).
+    mg_init(&s_mg, s_running, s_boot.flaps, s_running == MS_MODE_WIFI ? MS_WL_WIFI : config_load_wl_effective(), config_load_stay_wl());
+    if (s_running == MS_MODE_WIFI) atomic_store(&s_reload, true);
     mg_note_crashes(&s_mg, s_crashes);
     mode_record_crash_seal(s_crashes, s_running);   // the mode that really started (the radio may not have come up: then USB, and a crash is not Wi-Fi's)
     if (xTaskCreate(mode_sw_task, "mode_sw", TASK_STACK, NULL, TASK_PRIO, NULL) != pdPASS)
