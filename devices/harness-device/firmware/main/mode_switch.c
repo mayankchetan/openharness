@@ -135,6 +135,7 @@ void ms_step(ms_state_t *s, const ms_in_t *in, ms_out_t *out)
     if (!mode_valid(s->mode)) return;
 
     bool due;
+    bool picked_usb = false;   // the user's own act (below): the guards that bound automatic switches do not apply to it
     ms_mode_t target;
     if (s->mode == MS_MODE_USB) {
         due = step_usb(s, in, now);
@@ -142,12 +143,19 @@ void ms_step(ms_state_t *s, const ms_in_t *in, ms_out_t *out)
     } else {
         due = step_wireless(s, in, now, out);
         target = MS_MODE_USB;
+        // A wireless mode runs and there is no wireless target any more: the user picked USB on the Link screen (the boot decision never starts a
+        // wireless mode without a target, and net.clear and the factory reset restart the dial). Go to USB through the same busy gate as any
+        // switch. A cable, the probe and a daemon play no part. USB mode with no target is the opposite case and is unchanged: it never leaves.
+        if (!wl_valid(in->wl_mode)) {
+            due = true;
+            picked_usb = true;
+        }
     }
     if (!due) return;
     out->target = target;
 
-    // The anti-flap guards hold the switch back silently: they are not something the user can act on.
-    if (now < MS_T_DWELL_MS || s->flaps >= MS_FLAP_CAP) return;
+    // The anti-flap guards hold an automatic switch back silently: they are not something the user can act on. A pick by hand is not held by them.
+    if (!picked_usb && (now < MS_T_DWELL_MS || s->flaps >= MS_FLAP_CAP)) return;
 
     // The busy gate: a notice while the user can see it, nothing on a dark screen.
     if (ms_blocked(in->busy, in->asleep)) {
@@ -156,7 +164,7 @@ void ms_step(ms_state_t *s, const ms_in_t *in, ms_out_t *out)
         return;
     }
     out->act = MS_ACT_REBOOT;
-    out->flaps = (uint8_t)(s->flaps + 1u);
+    out->flaps = picked_usb ? 0u : (uint8_t)(s->flaps + 1u);   // a change by hand restarts the count (ms_note_manual_change)
     out->boot_usb = target == MS_MODE_USB;
 }
 

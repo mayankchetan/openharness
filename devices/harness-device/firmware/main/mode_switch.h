@@ -93,6 +93,8 @@ bool ms_blocked(uint32_t busy, bool asleep);
 //   wireless (Wi-Fi or BLE): SOF absent -> nothing, no probe. SOF present (and not stay_wl) -> the probe runs, hello every 2 s. The first welcome
 //     that arrives after the probe started opens T_ENTER; SOF dropping, or the newest welcome older than 3 s, closes it. When T_ENTER has
 //     lasted 5 s -> gate -> reboot to USB.
+//     Also (task W16, user decision 2026-11-01): wl_mode no longer a target while a wireless mode runs = the user picked USB on the Link screen -> gate
+//     -> reboot to USB, at once: no cable, probe or daemon needed, and not held by the dwell or the flap cap (it is not automatic; the count restarts).
 //   USB: stay_wl (with a valid wl_mode) -> gate -> reboot to wl_mode at once, cable in or out, live daemon or not (user decision 2026-10-31).
 //     Otherwise: SOF absent for T_LEAVE (10 s), or SOF present with no daemon byte for T_LEAVE_DAEMON (60 s from the last byte, or from boot if
 //     there was none; session_up counts as a byte now) -> gate -> reboot to wl_mode. Never when wl_mode is unset.

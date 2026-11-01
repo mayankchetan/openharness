@@ -654,6 +654,79 @@ static void test_restart_refused_when_the_dial_turns_busy_again(void)
     assert(run(MS_STEP_MS * 2) && D.reboot_to[0] == MS_MODE_WIFI && !config_load_boot_usb());
 }
 
+// ── W16: the Link screen's two controls reach the running glue (mode_glue_settings_changed -> mg_set_settings) ────────────────────────────
+static void link_screen_changed(void) { mg_set_settings(&D.mg, config_load_wl_effective(), config_load_stay_wl()); }
+
+static void test_picking_usb_on_wifi_goes_to_usb_and_stays(void)
+{
+    fresh();
+    provision(1);
+    boot();
+    assert(D.running == MS_MODE_WIFI);
+    assert(!run(30000));                                  // 30 s: before the dwell; nothing on the cable
+    assert(config_net_set_mode(0) == CFG_NET_OK);         // the Link screen: USB
+    link_screen_changed();
+    D.refuse_restarts = 1000;                             // the user is mid-action when the restart op looks again
+    assert(!run(3000));
+    assert(D.reboots == 0 && !D.mg.done);
+    assert(strchr(D.order, 'r') && D.order[strlen(D.order) - 1] == 'U');
+    assert(!config_load_boot_usb());                      // put back: the running mode is Wi-Fi
+    ms_record_view_t v;
+    assert(mode_record_boot(true, &v) && v.flaps == 0);
+    D.refuse_restarts = 0;
+    assert(run(MS_STEP_MS * 2));
+    assert(D.reboots == 1 && D.reboot_to[0] == MS_MODE_USB && D.reboot_uptime[0] < MS_T_DWELL_MS);   // the user's pick is not held by the dwell
+    assert(strstr(D.order, "LSBR") != NULL);              // log, seal, boot_usb, restart: the one sequence
+    assert(config_load_boot_usb());                       // boot_usb follows the target
+    assert(boot() == MS_MODE_USB);                        // wl_mode is 0: USB, and
+    assert(strcmp(D.restored_focus, "agent-12") == 0);    // the carousel comes back
+    assert(D.mg.ms.flaps == 0);                           // a change by hand does not count as a flap
+    assert(!run(20 * 60 * 1000));                         // it never leaves
+    assert(D.reboots == 1);
+    // choosing Wi-Fi again is a plain stored choice: the USB dial leaves for it as the rules say (no cable here: after T_LEAVE and the dwell)
+    assert(config_net_set_mode(1) == CFG_NET_OK);
+    link_screen_changed();
+    assert(run(MS_T_DWELL_MS) && D.reboot_to[1] == MS_MODE_WIFI);
+}
+
+static void test_a_dial_busy_on_the_link_screen_waits_then_switches(void)
+{
+    fresh();
+    provision(1);
+    boot();
+    assert(!run(5000));
+    D.busy = MS_BUSY_VOICE;
+    assert(config_net_set_mode(0) == CFG_NET_OK);
+    link_screen_changed();
+    assert(!run(20000));
+    assert(D.reboots == 0 && D.notice_shown);             // "switching in a moment"
+    D.busy = 0;
+    assert(run(MS_STEP_MS * 2) && D.reboot_to[0] == MS_MODE_USB && !D.notice_shown);
+}
+
+static void test_keep_wifi_off_gives_a_wifi_dial_its_way_back_to_usb(void)
+{
+    // stay_wl ON: the dial runs Wi-Fi with the cable in and a live daemon, and never probes (so the cable alone cannot bring it back).
+    fresh();
+    provision(1);
+    assert(config_save_stay_wl(true));
+    D.cable = D.daemon = true;
+    assert(boot() == MS_MODE_WIFI);
+    assert(!run(5 * 60 * 1000));
+    assert(!D.probe_installed && D.reboots == 0);
+    // the Link screen turns Keep Wi-Fi off: the probe starts and the normal rule takes the dial to USB
+    assert(config_save_stay_wl(false));
+    link_screen_changed();
+    assert(run(15000));
+    assert(D.reboot_to[0] == MS_MODE_USB);
+    assert(boot() == MS_MODE_USB);
+    assert(!run(10 * 60 * 1000) && D.reboots == 1);       // with the daemon on the cable it stays
+    // and turning it ON in USB sends a USB dial to Wi-Fi after the dwell, cable in (the 2026-10-31 decision)
+    assert(config_save_stay_wl(true));
+    link_screen_changed();
+    assert(run(MS_T_DWELL_MS) && D.reboot_to[1] == MS_MODE_WIFI);
+}
+
 // ── the panic loop (user decision 2026-10-31) ───────────────────────────────────────────────────────
 static void test_panic_loop_plan(void)
 {
@@ -815,6 +888,9 @@ static void test_a_crash_loop_in_wifi_is_slowed_to_one_attempt_per_dwell(void)
 int main(void)
 {
     test_restart_refused_when_the_dial_turns_busy_again();
+    test_picking_usb_on_wifi_goes_to_usb_and_stays();
+    test_a_dial_busy_on_the_link_screen_waits_then_switches();
+    test_keep_wifi_off_gives_a_wifi_dial_its_way_back_to_usb();
     test_panic_loop_plan();
     test_third_crash_in_wifi_takes_usb_once();
     test_trip_beats_stay_wl_and_the_dwell_still_applies();

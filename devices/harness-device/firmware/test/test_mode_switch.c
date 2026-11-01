@@ -1036,6 +1036,7 @@ static void test_robustness(void)
     memset(&out, 0xA5, sizeof out);
     ms_init(&s, MS_MODE_WIFI, 0);
     memset(&in, 0, sizeof in);
+    in.wl_mode = MS_WL_WIFI;   // (a wireless mode with no target would now be the user pick of USB: H12)
     ms_step(&s, &in, &out);
     CHECK(out.act == MS_ACT_NONE && !out.waiting && !out.probe_wanted && !out.flaps_cleared && out.flaps == 0);
 
@@ -1133,6 +1134,109 @@ static void test_h11_panic_loop(void)
     CHECK(ms_crash_crc(NULL) == 0);
 }
 
+// ── H12: the user picks USB while the dial runs wireless (user decision 2026-11-01, task W16) ────────────────────────────────────────────────
+// wl_mode (as the switch sees it) turning unset while a wireless mode runs means the user picked USB on the Link screen: the dial reboots into USB
+// through the same busy gate as any automatic switch. It is the user's own act, so the dwell and the flap cap do not hold it, it does not count as a
+// flap (the count restarts from zero), and it needs no cable, no probe and no daemon. USB mode with no target is unchanged: it never leaves.
+static void test_h12_pick_usb_while_wireless(void)
+{
+    // Wi-Fi, past the dwell, nothing on the cable; the user picks USB at 100 s: reboot to USB at the next step, boot_usb stored for USB
+    {
+        sim_t m;
+        wireless_ready(&m, MS_MODE_WIFI);
+        CHECK(!run_to(&m, S(100)));
+        m.wl_mode = MS_WL_UNSET;
+        CHECK(run_to(&m, S(100) + MS_STEP_MS));
+        CHECK(m.reboot_target == MS_MODE_USB && m.reboot_boot_usb && m.reboot_flaps == 0);
+        CHECK(m.notices == 0);
+    }
+    // the same pick before the dwell: the user's act is not held back (an automatic switch would be)
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_WIFI, MS_WL_WIFI, 0);
+        CHECK(!run_to(&m, S(5)));
+        m.wl_mode = MS_WL_UNSET;
+        CHECK(run_to(&m, S(5) + MS_STEP_MS));
+        CHECK(m.reboot_target == MS_MODE_USB && m.reboot_t < MS_T_DWELL_MS);
+    }
+    // the flap cap does not hold it, and the new count is zero, not cap + 1
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_WIFI, MS_WL_WIFI, MS_FLAP_CAP);
+        CHECK(!run_to(&m, S(20)));
+        m.wl_mode = MS_WL_UNSET;
+        CHECK(run_to(&m, S(20) + MS_STEP_MS));
+        CHECK(m.reboot_target == MS_MODE_USB && m.reboot_flaps == 0);
+    }
+    // a corrupt wl_mode byte, or one the switch cannot target, is the same as unset (the accessor maps them to 0 before the switch sees them)
+    {
+        const uint8_t none[] = { 0, 3, 255 };
+        for (unsigned i = 0; i < sizeof none / sizeof none[0]; i++) {
+            sim_t m;
+            sim_init(&m, MS_MODE_WIFI, none[i], 0);
+            CHECK(run_to(&m, S(1)));
+            CHECK(m.reboot_target == MS_MODE_USB);
+        }
+    }
+    // stay_wl does not keep it on Wi-Fi: the user just said USB
+    {
+        sim_t m;
+        wireless_ready(&m, MS_MODE_WIFI);
+        m.stay_wl = true;
+        m.wl_mode = MS_WL_UNSET;
+        CHECK(run_to(&m, m.t + S(1)));
+        CHECK(m.reboot_target == MS_MODE_USB);
+    }
+    // the busy gate: an awake dial in a voice turn shows the notice and waits; it goes when the turn ends
+    {
+        sim_t m;
+        wireless_ready(&m, MS_MODE_WIFI);
+        m.busy = MS_BUSY_VOICE;
+        m.wl_mode = MS_WL_UNSET;
+        CHECK(!run_to(&m, m.t + S(30)));
+        CHECK(m.out.act == MS_ACT_NOTICE && m.out.waiting && m.out.target == MS_MODE_USB && m.notices > 0);
+        m.busy = 0;
+        CHECK(run_to(&m, m.t + MS_STEP_MS));
+        CHECK(m.reboot_target == MS_MODE_USB);
+    }
+    // asleep: silent, and an update or an upload in flight still holds it
+    {
+        sim_t m;
+        wireless_ready(&m, MS_MODE_WIFI);
+        m.asleep = true;
+        m.busy = MS_BUSY_FW_UPDATE;
+        m.wl_mode = MS_WL_UNSET;
+        CHECK(!run_to(&m, m.t + S(10)));
+        CHECK(m.out.act == MS_ACT_NONE && m.out.waiting && m.notices == 0);
+        m.busy = MS_BUSY_READER;   // a sleeping dial does not wait for a reader
+        CHECK(run_to(&m, m.t + MS_STEP_MS));
+        CHECK(m.reboot_target == MS_MODE_USB && m.notices == 0);
+    }
+    // the probe is not needed: no SOF, no welcome, and the rule still fires; with the cable in and a live daemon it fires once, to USB
+    {
+        sim_t m;
+        wireless_ready(&m, MS_MODE_WIFI);
+        sim_set_sof(&m, true);
+        m.wl_mode = MS_WL_UNSET;
+        CHECK(run_to(&m, m.t + MS_STEP_MS));
+        CHECK(m.reboot_target == MS_MODE_USB);
+    }
+    // Wi-Fi with a target never fires it: no cable, a hundred minutes
+    {
+        sim_t m;
+        wireless_ready(&m, MS_MODE_WIFI);
+        CHECK(!run_to(&m, S(6000)));
+        CHECK(m.out.act == MS_ACT_NONE && m.notices == 0);
+    }
+    // USB with no target still never leaves (the old rule), pick or no pick
+    {
+        sim_t m;
+        usb_ready(&m, MS_WL_UNSET);
+        CHECK(!run_to(&m, m.t + S(600)));
+        CHECK(m.out.act == MS_ACT_NONE);
+    }
+}
+
 int main(void)
 {
     test_h1_boot_table();
@@ -1146,6 +1250,7 @@ int main(void)
     test_h9_record();
     test_h10_boot_usb();
     test_h11_panic_loop();
+    test_h12_pick_usb_while_wireless();
     test_robustness();
     printf("test_mode_switch: %d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
