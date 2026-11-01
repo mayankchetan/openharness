@@ -76,6 +76,9 @@
     X(machines_empty,   "machines_empty",   0, 2000, "machines",      "render_list",             NULL) \
     X(settings_1,       "settings_1",       0, 2000, "settings",      "render_settings",         NULL) \
     X(settings_2,       "settings_2",       0, 2000, "settings",      "render_settings",         NULL) \
+    X(link_wifi,        "link_wifi",        0, 2000, "link",          "render_link",             NULL) \
+    X(link_keep,        "link_keep",        0, 2000, "link",          "render_link",             NULL) \
+    X(link_none,        "link_none",        0, 2000, "link",          "render_link",             NULL) \
     X(models_loading,   "models_loading",   0, 2000, "models",        "habitat_scene_take",      NULL) \
     X(models,           "models",           0, 2000, "models",        "habitat_scene_take",      NULL) \
     X(models_empty,     "models_empty",     0, 2000, "models",        "habitat_scene_take",      NULL) \

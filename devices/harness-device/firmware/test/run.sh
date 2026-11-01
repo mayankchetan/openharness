@@ -98,6 +98,8 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
 # The IDF side of that glue, as source rules: boot order and the radio gate, SOF settle, record trusted after a software reset only, internal task stack,
 # the reboot sequence, the probe retry, no Bluetooth target, no stay_wl writer, the UI busy rows, the last_words reason, the build list.
 python3 "$here/test_mode_glue_source.py"
+# The Link screen (W16): the edge swipe, no session needed, NVS on the worker only, stay_wl as a toggle with one writer.
+python3 "$here/test_link_screen.py"
 # The decoder buffer is in PSRAM (W6): only cable_link.c names it, and every consumer of a frame payload is CPU-side (no DMA).
 python3 "$here/test_decoder_psram.py"
 # IMA ADPCM voice blocks (frame type 0x07): encoder and decoder against the shared vectors, sanitizers on.

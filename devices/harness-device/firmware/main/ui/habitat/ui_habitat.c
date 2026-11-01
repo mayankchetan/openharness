@@ -30,6 +30,7 @@ static ht_gallery_t gallery;
 #include "cable_client.h"
 #include "net_link.h"
 #include "mode_switch.h"
+#include "mode_glue.h"
 #include "pet_store.h"
 #include "../../elapsed.h"
 #include "task_util.h"
@@ -109,7 +110,8 @@ typedef enum {
     STOP,
     MODELS,
     MESSAGE,
-    OTA
+    OTA,
+    LINK     // the Link screen (task W16): USB or Wi-Fi, and Keep Wi-Fi
 } view_t;
 typedef enum {
     A_NONE,
@@ -135,6 +137,10 @@ typedef enum {
     A_NAP,
     A_SETTINGS_SAVE,
     A_SETTINGS,
+    A_LINK,        // open the Link screen (the edge swipe)
+    A_LINK_SYNC,   // to the worker: read wl_mode and stay_wl into link_ui
+    A_LINK_MODE,   // to the worker: the Link row, USB <-> Wi-Fi
+    A_LINK_STAY,   // to the worker: the Keep Wi-Fi toggle (stay_wl)
     A_STOP,
     A_STOP_YES,
     A_MODELS,
@@ -2376,6 +2382,61 @@ static void render_settings(ht_scene_t *f)
     }
 }
 /*
+ * THE LINK SCREEN (task W16, user decisions 2026-11-01 and 2026-10-31).
+ *
+ * Two controls, both local to the dial, and both reachable WITHOUT a daemon: the Link row (the dial joins Wi-Fi when the cable is out, or stays
+ * on USB) and Keep Wi-Fi (stay_wl: the dial stays in Wi-Fi even with the cable in). Keep Wi-Fi has no exit from the wireless side except this
+ * screen, because a dial in Wi-Fi with stay_wl on never looks at the cable; that is why it opens from the brand screen, which is all a dial with
+ * no daemon shows, as well as from the home face.
+ *
+ * Opened by the EDGE SWIPE (link_swipe): a drag that starts in the bottom band of the glass (y >= LINK_EDGE_Y) and goes at least LINK_SWIPE_PX up,
+ * more up than sideways. It is the same stroke that closes every other screen (a swipe up from y >= 400 goes home), so the way in and the way
+ * out are one gesture. What it does not collide with on HOME or AGENT: a tap on the face talks, a tap on the recap card opens the reader, a hold
+ * opens the tabs, a sideways swipe moves to the next agent, a pull down with unread opens the inbox, and a vertical drag scrolls the desktop
+ * terminal; the scroll of a drag that STARTS in the band is not reported (nothing was scrolled from a thumb's rest at the bottom rim before this
+ * either: the footer controls there never sent a scroll).
+ *
+ * link_ui is read by the render task and written by the worker, under the display lock. The worker alone touches NVS (the same worker and the
+ * same kind of write as A_SETTINGS_SAVE). Nothing here can show the network name, the password or the key: the screen reads two flags, the
+ * mode and net_link_state().
+ */
+#define LINK_EDGE_Y 400
+#define LINK_SWIPE_PX 55
+static struct {
+    bool loaded;        // the worker has read NVS since the screen opened
+    bool provisioned;   // the Wi-Fi settings are whole (config_net_info().saved)
+    bool wifi;          // wl_mode is 1: the dial joins Wi-Fi when the cable is out
+    bool stay;          // stay_wl
+} link_ui;
+static bool link_swipe(int start_y, int dx, int dy)
+{
+    return start_y >= LINK_EDGE_Y && dy <= -LINK_SWIPE_PX && -dy > abs(dx);
+}
+static void render_link(ht_scene_t *f)
+{
+    heading(f, "link");
+    if (!link_ui.loaded) return;
+    if (!link_ui.provisioned) {
+        ui_wrap(f, FACE_CX(336), 128, 336, 5, 0, UI_FONT, FG, "No Wi-Fi is set up. On the computer run: harness dial wifi set");
+        return;
+    }
+    for (int row = 0; row < 2; row++) {
+        const bool mode = row == 0;
+        const char *label = mode ? (link_ui.wifi ? "Link: Wi-Fi" : "Link: USB only") : (link_ui.stay ? "Keep Wi-Fi: on" : "Keep Wi-Fi: off");
+        int y = TAB_TOP + row * TAB_ROW_HEIGHT, hit = s.hit_count++;
+        s.hits[hit] = (hit_t){{LIST_HIT_X, y, LIST_HIT_W, TAB_ROW_HEIGHT}, mode ? A_LINK_MODE : A_LINK_STAY, 0, true};
+        if (focus_skin()) {   // Inter, centred in the row it is tapped in
+            const ht_font_t *font = focus_face_for(UI_FONT);
+            focus_put(f, LIST_HIT_X, y + 14 + (UI_FONT->height - font->height) / 2, LIST_HIT_W, font,
+                      hit == s.pressed ? ACCENT : FG, hit == s.pressed ? SEL : BG, label, true);
+            continue;
+        }
+        ht_text(f, SET_TEXT_X, y + 14, SET_TEXT_W, UI_FONT, hit == s.pressed ? ACCENT : FG, hit == s.pressed ? SEL : BG, label);
+    }
+    ui_wrap(f, FACE_CX(336), 252, 336, 2, 0, &ht_mono_20, DIM, link_ui.stay ? "Stays on Wi-Fi with the cable plugged in." : "Plug the cable in to go back to USB.");
+    text_in(f, FACE_CX(336), 322, 336, &ht_mono_20, net_state_line(net_link_state()), DIM, true);
+}
+/*
  * WHAT THE APP ASKED FOR, waiting for the worker to write it.
  *
  * NVS is flash and a commit takes milliseconds; the finger path has always queued its writes for
@@ -2471,6 +2532,9 @@ bool habitat_scene_take(ht_scene_t *f)
     case SETTINGS:
         render_settings(f);
         break;
+    case LINK:
+        render_link(f);
+        break;
     case READER: {
         agent_t *a = active();
         heading(f, "latest result");
@@ -2554,6 +2618,7 @@ const char *habitat_view_name(void)
     case MODELS: return "models";
     case MESSAGE: return "message";
     case OTA: return "ota";
+    case LINK: return "link";
     }
     return "unknown";
 }
@@ -3145,6 +3210,17 @@ static void dispatch(action_t a)
     case A_SETTINGS:
         view(SETTINGS);
         break;
+    case A_LINK:
+        // The edge swipe, from the brand screen and the home face only (the touch handler checks the view). The screen opens at once with its
+        // title; the rows appear when the worker has read NVS (a few milliseconds), so the render task never reads flash.
+        link_ui.loaded = false;
+        view(LINK);
+        queue((action_t){.kind = A_LINK_SYNC});
+        break;
+    case A_LINK_MODE:
+    case A_LINK_STAY:
+        if (s.view == LINK) queue(a);
+        break;
     case A_STOP:
         COPY(s.stop_agent, a.id);
         view(STOP);
@@ -3201,6 +3277,7 @@ static void dispatch(action_t a)
         change();
         break;
     case A_SETTINGS_SAVE:
+    case A_LINK_SYNC:
         break;   // the worker's alone: it is queued, never dispatched from a hit rect
     case A_SUPERTAB:
     case A_QUESTION_READ:
@@ -3215,6 +3292,30 @@ static void dispatch(action_t a)
     case A_SCROLL:
         break;
     }
+}
+// The Link screen's NVS side, on the worker (PSRAM stack; NVS writes from it are the A_SETTINGS_SAVE pattern, task_util.h). One read or one write,
+// then the screen's copy is refreshed from what NVS HOLDS, and the mode switch is told so it re-reads wl_mode and stay_wl (mode_glue.h).
+// A_LINK_MODE flips wl_mode (config_net_set_mode needs a whole Wi-Fi configuration: it refuses otherwise and the screen shows no rows then);
+// picking USB while Wi-Fi runs makes the glue reboot into USB through the busy gate (mode_switch.c, H12). A_LINK_STAY flips stay_wl, and turning it
+// OFF is what lets a dial in Wi-Fi look at the cable again.
+static void link_work(action_kind_t kind)
+{
+    config_net_info_t info;
+    config_net_info(&info);
+    bool ok = true;
+    if (info.saved && kind == A_LINK_MODE) ok = config_net_set_mode(info.mode == 1 ? 0 : 1) == CFG_NET_OK;
+    if (info.saved && kind == A_LINK_STAY) ok = config_save_stay_wl(!config_load_stay_wl());
+    config_net_info(&info);
+    const bool stay = config_load_stay_wl();
+    display_lock();
+    link_ui.loaded = true;
+    link_ui.provisioned = info.saved;
+    link_ui.wifi = info.saved && info.mode == 1;
+    link_ui.stay = info.saved && stay;
+    change();
+    display_unlock();
+    if (kind != A_LINK_SYNC) mode_glue_settings_changed();
+    if (!ok) ui_cable_toast("Link change not saved.");
 }
 static void worker(void *unused)
 {
@@ -3357,6 +3458,11 @@ static void worker(void *unused)
             ui_settings_changed();
             break;
         }
+        case A_LINK_SYNC:
+        case A_LINK_MODE:
+        case A_LINK_STAY:
+            link_work(a.kind);
+            break;
         case A_QUESTION_READ:
             cable_client_question_read(a.id,a.text);
             break;
@@ -3442,8 +3548,9 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
             pressed_action.kind != A_DRAFT_APPEND && pressed_action.kind != A_DRAFT_UNDO) gesture.guarded = false; // Discard is always immediate.
         if (s.pressed >= 0 && ((!surface && s.view != VOICE) || home_footer(pressed_action.kind))) change();
         if (ui_scroll_reportable()) {
-            if (surface && home_footer(pressed_action.kind)) {
-                // Footer choices send no terminal scroll. A contact
+            if (surface && (home_footer(pressed_action.kind) || y >= LINK_EDGE_Y)) {
+                // Footer choices send no terminal scroll, and neither does a contact that starts in the bottom band: that is where the edge
+                // swipe to the Link screen begins (link_swipe). A contact
                 // that stops an existing fling still has to reach the app.
                 if (s.touch_brake) {
                     ht_scroll_begin(&scroll,x,y,now,scroll_reversed,scroll_emit,NULL);
@@ -3532,6 +3639,11 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
             change();
         } else if (result == HT_TOUCH_TAP && s.touch_brake) {
             // DOWN already stopped desktop inertia. This entire tap is only a brake.
+        } else if (surface && link_swipe(s.start_y, dx, dy)) {
+            // The edge swipe: the Link screen, from the brand screen (no daemon needed) and the home face. Ahead of the footer and
+            // face branches so a stroke that started on the bell or the face's lowest rim is still this stroke, not a cancelled press.
+            ht_gesture_guard(&gesture, now);
+            dispatch((action_t){.kind = A_LINK});
         } else if (surface && pressed_action.kind==A_TABS) {
             bool cancelled=workspace.cancelled || (workspace.touching && now-workspace.began>=5000);
             int chosen=ht_workspace_release(&workspace,x,y,gesture.axis,now);

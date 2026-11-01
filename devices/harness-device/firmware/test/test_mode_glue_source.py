@@ -7,7 +7,7 @@ the rules that keep a dial able to get back to USB.
   2. mode_glue.c: the SOF flag is read once, no earlier than MS_SOF_SETTLE_MS; the RTC record is trusted only for esp_reset_reason() == ESP_RST_SW;
      the task has an internal stack (it writes NVS and installs the USB driver); the reboot goes through the one sequence (mode_glue_core.c) in
      the order log, seal, store, restart; a probe that would not install is retried; MS_FOCUS_MAX equals ID_MAX.
-  3. No target, no switch: nothing in the firmware can set wl_mode to 2 (Bluetooth has no transport) and nothing writes stay_wl yet (the Settings
+  3. No target, no switch: nothing in the firmware can set wl_mode to 2 (Bluetooth has no transport) and nothing writes stay_wl but the Link screen's toggle, which turns it off as well as on (the Settings
      row is task W16), so no dial ends up in a wireless mode it cannot leave. boot_usb is written by the glue only.
   4. usb_probe.c: the only other installer of the USB driver besides the cable transport; small rings; hello from usb_probe_core; no JSON library;
      called only from the mode switch task; the probe is never on while the dial runs on USB.
@@ -157,7 +157,8 @@ assert 'return ok && v == 1;' in body(store, 'flag_load')
 for path in main.rglob('*.c'):
     src = path.read_text(errors='replace')
     if path.name != 'config_store.c':
-        assert 'config_save_stay_wl(' not in src, f'{path.name} writes stay_wl: it has no setter before the Settings row (W16), and a stay_wl dial never probes'
+        # W16: the one writer is the Link screen's toggle (ui_habitat.c link_work), which can turn it off again; test_link_screen.py holds that
+        assert 'config_save_stay_wl(' not in src or path.name == 'ui_habitat.c', f'{path.name} writes stay_wl: only the Link screen toggle may (test_link_screen.py)'
         if path.name != 'mode_glue.c':
             assert 'config_save_boot_usb(' not in src, f'{path.name} writes boot_usb'
 

@@ -459,6 +459,10 @@ SETUP(machines) { LOCKED(view(MACHINES)); }
 SETUP(machines_empty) { LOCKED(ui_machines_clear(); view(MACHINES)); }
 SETUP(settings_1) { LOCKED(view(SETTINGS)); }
 SETUP(settings_2) { LOCKED(view(SETTINGS); s.offset = 5); }
+// The Link screen (W16), the three states the worker can leave link_ui in: Wi-Fi with Keep Wi-Fi off, Keep Wi-Fi on, and a dial with no Wi-Fi set up.
+SETUP(link_wifi) { LOCKED(link_ui.loaded = link_ui.provisioned = link_ui.wifi = true; link_ui.stay = false; view(LINK)); }
+SETUP(link_keep) { LOCKED(link_ui.loaded = link_ui.provisioned = link_ui.wifi = link_ui.stay = true; view(LINK)); }
+SETUP(link_none) { LOCKED(link_ui.loaded = true; link_ui.provisioned = link_ui.wifi = link_ui.stay = false; view(LINK)); }
 SETUP(models_loading) { LOCKED(GCOPY(s.model_agent, g_id(0)); s.model_count = -1; view(MODELS)); }
 SETUP(models) { LOCKED(GCOPY(s.model_agent, g_id(0)); s.model_count = 8; view(MODELS)); }
 SETUP(models_empty) { LOCKED(GCOPY(s.model_agent, g_id(0)); s.model_count = 0; view(MODELS)); }
