@@ -35,6 +35,7 @@
 //   - one authenticated socket per identity: a new one, which has proved the key, replaces the old.
 // An address that holds a single pending socket is never blamed for losing it: that may be an honest dial.
 import * as net from 'node:net'
+import type { Duplex } from 'node:stream'
 import type * as tls from 'node:tls'
 
 import type { CablePort, PortOpener } from './cableSession.js'
@@ -127,15 +128,27 @@ export class AddressThrottle {
   }
 }
 
+/** Which door a dial came in by: the LAN listener below, or a stream handed to `acceptStream` (the phone bridge's tunnel). */
+export type NetTransport = 'wifi' | 'tunnel'
+
 /** A dial that proved its key: who it is, where it came from, and the TLS socket to speak cable frames over. */
 export interface NetDialConnection {
   /** The dial's MAC string, upper case. */
   id: string
-  /** The peer's IP address. */
+  /** The peer's IP address. For a tunnel: the label the caller gave (`tunnel`), never an address. */
   peer: string
-  /** The peer's TCP port. */
+  /** The peer's TCP port. 0 for a tunnel. */
   port: number
   socket: tls.TLSSocket
+  /** The door it came in by. Decides the port's `transport` label and what the session may send over it. */
+  transport: NetTransport
+}
+
+/** What the caller of `acceptStream` says about the stream. */
+export interface NetStreamInfo {
+  /** A label for logs; the stream has no address of its own (behind cloudflared every peer is loopback). */
+  peer: string
+  transport: 'tunnel'
 }
 
 export interface NetDialsOptions {
@@ -159,10 +172,11 @@ export interface NetDialsOptions {
 }
 
 interface Pending {
-  raw: net.Socket
+  raw: Duplex
   tls: tls.TLSSocket
   peer: string
   port: number
+  transport: NetTransport
   timer: ReturnType<typeof setTimeout> | undefined
   /** The handshake has ended one way or the other; nothing more is counted for this socket. */
   settled: boolean
@@ -171,6 +185,9 @@ interface Pending {
   /** The key that lookup handed the handshake: a dial whose key changed since is refused when it finishes. */
   keyUsed?: Buffer
 }
+
+/** How a log line names the door of a pending or live link. */
+const via = (entry: Pick<Pending, 'transport'>): string => (entry.transport === 'tunnel' ? 'tunnel' : 'Wi-Fi')
 
 export class NetDials {
   readonly stats = { accepted: 0, refusedPeer: 0, throttled: 0, failed: 0, evicted: 0, evictionFailures: 0, capped: 0, knownCapped: 0, revoked: 0, authenticated: 0, replaced: 0, overLimit: 0 }
@@ -238,6 +255,13 @@ export class NetDials {
     this.#off = null
     this.#reconcile()
     await this.settled()
+    // Streams from `acceptStream` do not depend on the socket above (it may never have opened): they end here.
+    this.#dropAll('listener closing')
+  }
+
+  #dropAll(why: string): void {
+    for (const entry of [...this.#pending]) this.#drop(entry, why)
+    for (const entry of [...this.#auth.values()]) this.#drop(entry, why)
   }
 
   /** Resolves when the socket is open or shut as the keystore says. */
@@ -295,8 +319,7 @@ export class NetDials {
   async #close(): Promise<void> {
     const server = this.#server
     this.#server = null
-    for (const entry of [...this.#pending]) this.#drop(entry, 'listener closing')
-    for (const entry of [...this.#auth.values()]) this.#drop(entry, 'listener closing')
+    this.#dropAll('listener closing')
     if (server) {
       await new Promise<void>((resolve) => server.close(() => resolve()))
       this.#log('cable: Wi-Fi dials are off — no provisioned dial, so no open port')
@@ -345,6 +368,41 @@ export class NetDials {
       this.#evict(victim)
     }
     raw.setNoDelay(true)
+    this.#begin(raw, peer, raw.remotePort ?? 0, 'wifi')
+  }
+
+  /**
+   * Serve TLS-PSK on a stream that is not a TCP socket: the duplex of a WebSocket the relay endpoint accepted (tunnelDials.ts).
+   * The same keystore, handshake deadline, key checks and one-link-per-identity rule as a socket from the LAN. What differs, on
+   * purpose, because behind cloudflared every peer is loopback and has no address of its own:
+   *   - no private-address filter, no per-address caps, no per-address ban, no failure charge: only the pool limit (16, the
+   *     oldest gives way), so a tunnel flood can neither lock out a Wi-Fi dial on loopback nor be locked out by one;
+   *   - the keystore's lastAddr is not written (a tunnel is not where the dial lives on the LAN);
+   *   - the link says `tunnel`, which the session reads to send no firmware and no pet pack over it.
+   * With no key in the keystore, or after stop(), the stream is destroyed unread. The Wi-Fi socket need not be open.
+   */
+  acceptStream(stream: Duplex, info: NetStreamInfo): void {
+    // An error on a stream that is being torn down must not become an uncaught exception.
+    stream.on('error', () => {})
+    if (this.#stopped || this.#opts.keys.size === 0) {
+      stream.destroy()
+      return
+    }
+    this.stats.accepted++
+    if (this.#pending.size >= NET_PENDING_MAX) {
+      const victim = this.#victim(false)
+      if (!victim) {
+        this.stats.capped++
+        stream.destroy()
+        return
+      }
+      this.#evict(victim)
+    }
+    this.#begin(stream, info.peer, 0, info.transport)
+  }
+
+  /** The handshake, for a socket or a stream that has passed its door's checks. */
+  #begin(raw: Duplex, peer: string, port: number, transport: NetTransport): void {
     let entry!: Pending
     // The lookup runs during the handshake: it records which identity the peer named and the key it was given.
     const secure = wrapPskSocket(raw, (identity) => {
@@ -353,7 +411,7 @@ export class NetDials {
       entry.keyUsed = key ? Buffer.from(key) : undefined
       return key
     })
-    entry = { raw, tls: secure, peer, port: raw.remotePort ?? 0, timer: undefined, settled: false }
+    entry = { raw, tls: secure, peer, port, transport, timer: undefined, settled: false }
     this.#pending.add(entry)
     secure.on('error', (error) => this.#failed(entry, error.message))
     secure.once('secure', () => this.#secured(entry))
@@ -366,8 +424,9 @@ export class NetDials {
     if (entry.settled) return
     this.#settle(entry)
     this.stats.failed++
-    this.#logSome(`fail:${entry.peer}`, `cable: Wi-Fi handshake from ${entry.peer} failed (${reason.split('\n')[0].slice(0, 120)})`)
-    this.#noteFailure(entry.peer)
+    this.#logSome(`fail:${entry.peer}`, `cable: ${via(entry)} handshake from ${entry.peer} failed (${reason.split('\n')[0].slice(0, 120)})`)
+    // A tunnel has no address to blame: charging its label would ban every tunnel dial for one flooder.
+    if (entry.transport === 'wifi') this.#noteFailure(entry.peer)
     entry.tls.destroy()
     entry.raw.destroy()
   }
@@ -415,7 +474,7 @@ export class NetDials {
     const crowded = this.#pendingFrom(victim.peer) >= NET_EVICTION_CHARGE_AT
     this.stats.evicted++
     this.#drop(victim, 'pool full')
-    if (crowded) {
+    if (crowded && victim.transport === 'wifi') {
       this.stats.evictionFailures++
       this.#noteFailure(victim.peer)
     }
@@ -429,7 +488,7 @@ export class NetDials {
     for (const [id, live] of this.#auth) {
       if (live !== entry) continue
       this.#auth.delete(id)
-      this.#log(`cable: Wi-Fi dial ${id} at ${entry.peer} disconnected`)
+      this.#log(`cable: ${via(entry)} dial ${id} at ${entry.peer} disconnected`)
     }
   }
 
@@ -454,7 +513,7 @@ export class NetDials {
     const revoke = (): void => {
       used?.fill(0)
       this.stats.revoked++
-      this.#log(`cable: Wi-Fi dial ${id} from ${entry.peer} refused — its key was removed or replaced during the handshake`)
+      this.#log(`cable: ${via(entry)} dial ${id} from ${entry.peer} refused — its key was removed or replaced during the handshake`)
       this.#drop(entry, 'revoked')
     }
     if (!stillTheKey()) {
@@ -463,7 +522,7 @@ export class NetDials {
     }
     if (!this.#auth.has(id) && this.#auth.size >= NET_AUTH_MAX) {
       this.stats.overLimit++
-      this.#log(`cable: Wi-Fi dial ${id} from ${entry.peer} refused — ${NET_AUTH_MAX} dials are connected`)
+      this.#log(`cable: ${via(entry)} dial ${id} from ${entry.peer} refused — ${NET_AUTH_MAX} dials are connected`)
       entry.tls.destroy()
       return
     }
@@ -474,10 +533,13 @@ export class NetDials {
     }
     this.#auth.set(id, entry)
     this.stats.authenticated++
-    try {
-      this.#opts.keys.touch(id, entry.peer)
-    } catch (error) {
-      this.#log(`cable: Wi-Fi dial ${id}: cannot record its address (${(error as NodeJS.ErrnoException).code ?? 'write failed'})`)
+    // Only a LAN address is worth remembering: it exempts the dial's home address from the throttle. A tunnel has none.
+    if (entry.transport === 'wifi') {
+      try {
+        this.#opts.keys.touch(id, entry.peer)
+      } catch (error) {
+        this.#log(`cable: Wi-Fi dial ${id}: cannot record its address (${(error as NodeJS.ErrnoException).code ?? 'write failed'})`)
+      }
     }
     // Recording the address can read the keystore file again (a second writer's change), and that may have removed this dial.
     if (entry.tls.destroyed || !stillTheKey()) {
@@ -485,13 +547,13 @@ export class NetDials {
       return
     }
     used?.fill(0)
-    this.#log(`cable: Wi-Fi dial ${id} authenticated from ${entry.peer}`)
+    this.#log(`cable: ${via(entry)} dial ${id} authenticated from ${entry.peer}`)
     let taken: void | boolean
     try {
-      taken = this.#opts.onDial({ id, peer: entry.peer, port: entry.port, socket: entry.tls })
+      taken = this.#opts.onDial({ id, peer: entry.peer, port: entry.port, socket: entry.tls, transport: entry.transport })
     } catch (error) {
       taken = false
-      this.#log(`cable: Wi-Fi dial ${id}: nobody could take the link (${error instanceof Error ? error.message.slice(0, 120) : 'error'})`)
+      this.#log(`cable: ${via(entry)} dial ${id}: nobody could take the link (${error instanceof Error ? error.message.slice(0, 120) : 'error'})`)
     }
     if (taken === false) this.#drop(entry, 'not taken')
   }
@@ -528,9 +590,10 @@ export class NetDials {
 
 /** A dial's cable link over its TLS socket, as the session sees a port. */
 export class NetPort implements CablePort {
-  readonly transport = 'wifi' as const
+  readonly transport: NetTransport
   readonly path: string
-  readonly peer: string
+  /** The dial's LAN address; a tunnel has none, so the status shows no `lan` for it. */
+  readonly peer: string | undefined
   isOpen = true
   #finished = false
 
@@ -539,8 +602,9 @@ export class NetPort implements CablePort {
     private readonly onData: (chunk: Buffer) => void,
     private readonly onClosed: (why: string) => void,
   ) {
-    this.peer = connection.peer
-    this.path = `wifi:${connection.peer}:${connection.port}`
+    this.transport = connection.transport
+    this.peer = connection.transport === 'wifi' ? connection.peer : undefined
+    this.path = connection.transport === 'wifi' ? `wifi:${connection.peer}:${connection.port}` : `${connection.transport}:${connection.id}`
     const socket = connection.socket
     socket.once('close', () => this.#finish('the dial closed the link'))
     socket.on('error', (error: NodeJS.ErrnoException) => void this.close(error.code ?? error.message))
@@ -560,7 +624,7 @@ export class NetPort implements CablePort {
   }
 
   write(bytes: Uint8Array): Promise<void> {
-    if (!this.isOpen) return Promise.reject(new Error('the Wi-Fi link is closed'))
+    if (!this.isOpen) return Promise.reject(new Error(this.transport === 'wifi' ? 'the Wi-Fi link is closed' : `the ${this.transport} link is closed`))
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new Error('write timed out'))

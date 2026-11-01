@@ -2004,6 +2004,16 @@ export class CableSession {
     return this.link?.transport === 'usb'
   }
 
+  /**
+   * A pet pack (about 1.5 MB) is never pushed over a link built for small frames: Bluetooth (460 kbit/s, on a battery) or a
+   * tunnel (a phone's data plan). The map and the drop messages are small and still go; the pack waits for the cable or Wi-Fi.
+   * A port that says nothing is the cable (CablePort.transport), so it is not refused here, unlike for a firmware image.
+   */
+  private mayOfferPetsHere(): boolean {
+    const transport = this.link?.transport
+    return transport !== 'ble' && transport !== 'tunnel'
+  }
+
   /** Wi-Fi settings (the password, the key) cross the cable and nothing else, to a dial that said it keeps them (dialNet.ts). */
   private mayNetHere(): boolean {
     return this.netCapable && this.link?.transport === 'usb'
@@ -2144,6 +2154,7 @@ export class CableSession {
     // ONE transfer at a time, and never beside a firmware image: both stream into the same reader task on the dial.
     // A firmware transfer ending (fw.error here, or the reboot after fw.done and its hello) runs this again.
     if (this.petTransfer || this.transfer) return
+    if (!this.mayOfferPetsHere()) return
     for (const id of plan.send) {
       if (this.petErrors.has(id)) continue
       // The newest version both sides know: a dial that says pets:1 gets the version 1 pack of the very same id.

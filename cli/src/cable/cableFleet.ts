@@ -387,7 +387,7 @@ export class CableFleet {
       const now = Date.now()
       if (now - (this.netRefusedAt.get(id) ?? 0) >= 60_000) {
         this.netRefusedAt.set(id, now)
-        this.host.log(`cable: ${id} is on USB — its Wi-Fi link from ${connection.peer} is refused [wifi ${id}]`)
+        this.host.log(`cable: ${id} is on USB — its ${connection.transport === 'tunnel' ? 'tunnel' : 'Wi-Fi'} link from ${connection.peer} is refused [wifi ${id}]`)
       }
       return
     }
@@ -475,7 +475,7 @@ export class CableFleet {
   private supersedeNet(mac: string | undefined): void {
     const net = mac ? this.netEntries.get(mac.toUpperCase()) : undefined
     if (!net || !(net.attached || net.slot.active)) return
-    this.host.log(`cable: ${mac} is on USB — closing its Wi-Fi link (superseded by USB) [wifi ${net.port.serialNumber}]`)
+    this.host.log(`cable: ${mac} is on USB — closing its ${net.slot.port?.transport === 'tunnel' ? 'tunnel' : 'Wi-Fi'} link (superseded by USB) [wifi ${net.port.serialNumber}]`)
     net.slot.drop('superseded by USB')
   }
 

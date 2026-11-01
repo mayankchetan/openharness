@@ -167,3 +167,37 @@ describe('the status names the link', () => {
     expect('lan' in attached).toBe(false)
   })
 })
+
+describe('pet packs go over the cable and Wi-Fi only', () => {
+  const ID = 'a'.repeat(16)
+  const pack = Buffer.alloc(20_000, 1)
+  pack[4] = 1
+  pack.writeUInt32LE(0xdeadbeef, 18)
+  const store = () => ({
+    mapping: () => ({ all: ID, engines: {} as Record<string, string> }),
+    pack: vi.fn(async () => pack),
+  })
+  const PETS = { t: 'hello', product: 'harness', fw: '0.0.1', proto: 3, mac: 'aa:bb', pets: 1, petIds: [] as string[] }
+
+  it.each(['ble', 'tunnel'] as const)('a %s port: the map is sent, the pack is never read and pet.offer is never sent', async (transport) => {
+    const s = store()
+    const { session, port } = await connect(host({ pets: () => s as never }), transport)
+    port.say(PETS)
+    await vi.waitFor(() => expect(port.types()).toContain('pet.map'))
+    port.say(PETS)
+    await settle()
+    expect(port.types()).not.toContain('pet.offer')
+    expect(s.pack).not.toHaveBeenCalled()
+    expect((session as unknown as { petTransfer: unknown }).petTransfer).toBeNull()
+    await session.stop()
+  })
+
+  it.each(['usb', 'wifi', undefined] as const)('control: a %s port (undefined: one that says nothing, the cable) is still offered the pack', async (transport) => {
+    const s = store()
+    const { session, port } = await connect(host({ pets: () => s as never }), transport, transport === 'wifi' ? '192.168.1.40' : undefined)
+    port.say(PETS)
+    await vi.waitFor(() => expect(port.types()).toContain('pet.offer'))
+    expect(port.sent.filter((m) => m.t === 'pet.offer')).toEqual([{ t: 'pet.offer', id: ID, size: 20_000, crc: 0xdeadbeef }])
+    await session.stop()
+  })
+})
