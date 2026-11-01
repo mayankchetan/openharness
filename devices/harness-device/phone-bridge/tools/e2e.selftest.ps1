@@ -91,6 +91,29 @@ $p = Mutate $dialFile '[daemon] dial B8:1F:3F:CA:E5:58 on fw' '[daemon] nope B8:
 $r = Test-M1 -DialLog $p -DaemonLog $daemonFile -Since $t0 -Mac $dialMac
 Assert-Equal (Status $r 'tunnel-session') 'FAIL' 'no hello from the dial after the link came up'
 
+Write-Host 'M1 with the daemon log as the daemon writes it (harness.log: local-time stamps, no Z)'
+function LocalStamp([datetime]$utc) { $utc.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss.fff', [Globalization.CultureInfo]::InvariantCulture) }
+$localLog = Join-Path $tmp 'harness.log'
+$lines = @(
+    ((LocalStamp ($t0.AddMinutes(-5))) + ' [cable] cable: tunnel dial B8:1F:3F:CA:E5:58 authenticated from tunnel'),
+    ((LocalStamp ($t0.AddSeconds(3.65))) + ' [cable] cable: Wi-Fi dial B8:1F:3F:CA:E5:50 authenticated from 192.168.10.166'),
+    ((LocalStamp ($t0.AddSeconds(3.65))) + ' [cable] cable: tunnel dial B8:1F:3F:CA:E5:58 authenticated from tunnel')
+)
+[IO.File]::WriteAllLines($localLog, $lines, (New-Object Text.UTF8Encoding($false)))
+$r = Test-M1 -DialLog $dialFile -DaemonLog $localLog -Since $t0 -Mac $dialMac
+Assert-Equal (Status $r 'tunnel-session') 'PASS' 'a local-time line inside the window is found (and the one 5 minutes older is ignored)'
+$onlyOld = Join-Path $tmp 'harness-old.log'
+[IO.File]::WriteAllLines($onlyOld, @($lines[0]), (New-Object Text.UTF8Encoding($false)))
+$r = Test-M1 -DialLog $dialFile -DaemonLog $onlyOld -Since $t0 -Mac $dialMac
+Assert-Equal (Status $r 'tunnel-session') 'FAIL' 'only a line before the window: no tunnel session'
+
+Write-Host 'Default daemon log path'
+$fakeHome = Join-Path $tmp 'home'
+Assert-Equal ([bool](Get-DefaultDaemonLog -HomeDir $fakeHome)) $false 'absent file: no default (the check is skipped, not failed)'
+New-Item -ItemType Directory -Path (Join-Path $fakeHome '.harness\cli\data') -Force | Out-Null
+[IO.File]::WriteAllText((Join-Path $fakeHome '.harness\cli\data\harness.log'), '')
+Assert-Equal (Get-DefaultDaemonLog -HomeDir $fakeHome) (Join-Path $fakeHome '.harness\cli\data\harness.log') 'present file: its path'
+
 Write-Host 'M1 with a missing file'
 $r = Test-M1 -DialLog (Join-Path $tmp 'absent.log') -Since $t0 -Mac $dialMac
 Assert-Equal $r.Verdict 'FAIL' 'missing dial log is a failure, not a pass'

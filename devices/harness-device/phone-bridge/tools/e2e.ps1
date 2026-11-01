@@ -1,8 +1,9 @@
 # End-to-end checks for the dial phone bridge (plan task B11). Windows PowerShell 5.1 or PowerShell 7.
 #
 # What it does, and what it does not:
-#   - It READS log files the daemon already writes (dial-YYYYMMDD.log under ~/.harness/logs/usb-<MAC>/, which holds both the
-#     dial's own lines and the daemon's "[daemon]" lines) and an optional daemon log file. It opens no serial port: no ad-hoc
+#   - It READS log files the daemon already writes: dial-YYYYMMDD.log under ~/.harness/logs/usb-<MAC>/ (the dial's own lines and
+#     the session's "[daemon]" lines, Z stamps) and the daemon log ~/.harness/cli/data/harness.log (the "[cable]" lines, local-time
+#     stamps; the default for -DaemonLog when the file exists). It opens no serial port: no ad-hoc
 #     serial scripts (workbench rule); dial lines reach the log only through the daemon.
 #   - It runs `adb reverse` for the walking skeleton (the phone reaches the desktop's loopback endpoint through the USB cable)
 #     and checks that the relay endpoint listens on loopback only. It starts no daemon and calls no network service.
@@ -16,7 +17,7 @@
 #                                   firmware offers only ECDHE-PSK-AES128-CBC-SHA256, 0xC037, cable_xport_tls.c s_suites, so
 #                                   a finished handshake is that suite: the line does not name it)
 #                   tunnel-session  the daemon says "tunnel dial <MAC> authenticated from tunnel", and the dial's session
-#                                   then said hello ("[daemon] dial <MAC> ... on fw"). Needs -DaemonLog, else SKIP.
+#                                   then said hello ("[daemon] dial <MAC> ... on fw"). Reads -DaemonLog (default: harness.log); SKIP when there is none.
 #                   vox-turn        every "vox: VOX n=" line in the window has codec=adpcm, overruns=0, dropped=0 and a
 #                                   transcript time, and no VOX DONE line shows cum_rx_overruns above 0; at least one line
 #                   int-min         int_min on those lines is reported and at least 8192 B (gate GB3 floor)
@@ -54,11 +55,26 @@ $script:Pat = @{
     Vox      = '\bvox: VOX n=(\d+)\b'
     VoxDone  = '\bvox: VOX DONE\b'
     Stamp    = '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)\s'
+    LocalStamp = '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\s'
 }
 
 function ConvertTo-Utc([string]$Text) {
     [datetime]::ParseExact($Text, "yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture,
         [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal)
+}
+
+# harness.log (the daemon's own log) stamps lines in local time, "2026-11-01 09:18:38.888", with no zone.
+function ConvertFrom-LocalStamp([string]$Text) {
+    $local = [datetime]::ParseExact($Text, 'yyyy-MM-dd HH:mm:ss.fff', [Globalization.CultureInfo]::InvariantCulture)
+    [TimeZoneInfo]::ConvertTimeToUtc([datetime]::SpecifyKind($local, [DateTimeKind]::Unspecified), [TimeZoneInfo]::Local)
+}
+
+# The daemon log that holds the "[cable] cable: ..." lines (NetDials and TunnelDials write there). Null when the file is absent,
+# so the tunnel check is skipped and not failed.
+function Get-DefaultDaemonLog([string]$HomeDir = [Environment]::GetFolderPath('UserProfile')) {
+    $path = Join-Path $HomeDir '.harness\cli\data\harness.log'
+    if (Test-Path -LiteralPath $path -PathType Leaf) { return $path }
+    $null
 }
 
 function Get-DialLogPath([string]$Mac, [datetime]$Day, [string]$LogsDir) {
@@ -93,6 +109,7 @@ function Read-Window([string[]]$Path, $Since, [ref]$Missing) {
         foreach ($line in [IO.File]::ReadAllLines($p, [Text.Encoding]::UTF8)) {
             $time = $null
             if ($line -match $script:Pat.Stamp) { $time = ConvertTo-Utc $Matches[1] }
+            elseif ($line -match $script:Pat.LocalStamp) { $time = ConvertFrom-LocalStamp $Matches[1] }
             if ($null -ne $Since) {
                 if ($null -eq $time -or $time -lt $Since) { continue }
             }
@@ -246,6 +263,8 @@ switch ($Command) {
         }
         $from = $null
         if ($Since) { $from = [datetime]::Parse($Since, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal) }
+        # Default: the daemon's own log, when it exists. An explicit -DaemonLog that is missing is a failure, not a skip.
+        if (-not $DaemonLog) { $DaemonLog = Get-DefaultDaemonLog }
         $result = Test-M1 -DialLog $paths -DaemonLog $DaemonLog -Since $from -Mac $Mac
         foreach ($c in $result.Checks) { Write-Host ('{0,-10} {1,-15} {2}' -f $c.Status, $c.Name, $c.Detail) }
         if (-not $OutDir) { $OutDir = Join-Path ([IO.Path]::GetTempPath()) 'phone-bridge-e2e' }
