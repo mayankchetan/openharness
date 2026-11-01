@@ -11,7 +11,7 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
- * WebSocket to the daemon relay endpoint. Binary messages only; a text message closes the tunnel.
+ * WebSocket to the daemon relay endpoint. Binary messages only; a text message cancels the socket.
  *
  * `headers` is where the Access service token goes (B10c). This class never logs the URL, the headers or any
  * exception message: OkHttp messages can name the host, so callers get the exception class only.
@@ -30,12 +30,13 @@ class TunnelLink(
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) = events.onBinary(bytes.toByteArray())
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                webSocket.close(CLOSE_UNSUPPORTED_DATA, null)
+                // No close handshake: the stream is already wrong, so drop the socket.
+                webSocket.cancel()
                 events.onFailure(null, IOException("text message on a binary tunnel"))
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                webSocket.close(CLOSE_NORMAL, null)
+                webSocket.close(closeEchoCode(code), null)
                 events.onClosed(code)
             }
 
@@ -55,7 +56,13 @@ class TunnelLink(
 
     companion object {
         const val CLOSE_NORMAL = 1000
-        const val CLOSE_UNSUPPORTED_DATA = 1003
+
+        /**
+         * The code to answer a peer close with: the peer's own code when a WebSocket may carry it, else 1000.
+         * An empty close frame reads as 1005 and OkHttp refuses to send that (or 1004, 1006, 1015, 1016..2999).
+         */
+        fun closeEchoCode(code: Int): Int =
+            if (code in 1000..1003 || code in 1007..1014 || code in 3000..4999) code else CLOSE_NORMAL
 
         /** One client for the process. Ping every 25 s keeps the tunnel idle timeout away (rule 9). */
         fun defaultClient(): OkHttpClient = shared

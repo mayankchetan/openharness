@@ -45,6 +45,7 @@ class BridgeService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                session++ // a late callback of the stopped session must not start anything
                 teardown()
                 BridgeState.set(Phase.IDLE, "stopped")
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -61,9 +62,22 @@ class BridgeService : Service() {
     }
 
     private fun begin() {
-        startForeground(NOTIFICATION_ID, notification("Starting"), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         teardown()
         val mySession = ++session
+
+        // Always satisfy startForegroundService() first. The manifest declares CHANGE_NETWORK_STATE, a normal
+        // permission that on its own meets the connectedDevice prerequisite, so this call cannot throw for a missing
+        // Bluetooth permission. Skipping it would risk ForegroundServiceDidNotStartInTimeException. The Bluetooth
+        // check comes right after; if it fails the service stops itself. The activity does not start the service at
+        // all without those permissions, so this is the second line of defense.
+        try {
+            startForeground(NOTIFICATION_ID, notification("Starting"), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        } catch (e: Exception) {
+            Log.w(TAG, "startForeground refused: ${e.javaClass.simpleName}")
+            BridgeState.set(Phase.FAILED, "foreground start refused: ${e.javaClass.simpleName}")
+            stopSelf()
+            return
+        }
 
         if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED ||
             checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
@@ -84,7 +98,7 @@ class BridgeService : Service() {
                 main.post { startPump(mySession, channel) }
             }
             override fun onFailed(detail: String) {
-                main.post { if (mySession == session && pump == null) finish(mySession, Phase.FAILED, detail) }
+                main.post { finish(mySession, Phase.FAILED, detail) } // also ends a running session (link lost)
             }
         })
         dialLink = link
@@ -119,6 +133,7 @@ class BridgeService : Service() {
     /** End the session and stop the service, keeping the last text on the status screen. */
     private fun finish(mySession: Int, phase: Phase, detail: String) {
         if (mySession != session) return
+        session++ // callbacks that teardown() triggers (pump closed, link closed) belong to the old session
         val up = pump?.bytesToTunnel() ?: 0
         val down = pump?.bytesToDial() ?: 0
         Log.i(TAG, "finish: $phase")

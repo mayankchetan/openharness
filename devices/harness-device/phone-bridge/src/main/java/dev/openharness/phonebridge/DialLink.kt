@@ -12,6 +12,8 @@ import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Log
 import java.io.IOException
@@ -38,6 +40,8 @@ class SocketDialChannel(private val socket: BluetoothSocket) : DialChannel {
  *
  * `allowUnbonded` is the dev flag: it uses the insecure channel call so M1 can run before pairing exists. Product
  * builds pass false and use the secure call.
+ *
+ * The listener may be called on any thread. After stop() no callback reports a failure.
  */
 @SuppressLint("MissingPermission") // The caller checks BLUETOOTH_SCAN and BLUETOOTH_CONNECT before start().
 class DialLink(
@@ -54,8 +58,21 @@ class DialLink(
 
     private val stopped = AtomicBoolean(false)
     private val found = AtomicBoolean(false)
+    private val channelStarted = AtomicBoolean(false)
+    private val main = Handler(Looper.getMainLooper())
+
     @Volatile private var gatt: BluetoothGatt? = null
     @Volatile private var scanCallback: ScanCallback? = null
+
+    /** The socket while connect() blocks, so stop() can close it and unblock that thread. */
+    @Volatile private var connecting: BluetoothSocket? = null
+
+    private val scanTimeout = Runnable {
+        if (!stopped.get() && !found.get()) {
+            stopScan()
+            listener.onFailed("dial not found")
+        }
+    }
 
     fun start() {
         val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
@@ -68,31 +85,46 @@ class DialLink(
         val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
         val cb = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
+                if (stopped.get()) return
                 val name = result.scanRecord?.deviceName
                 if (!Wire.isDialName(name) || !found.compareAndSet(false, true)) return
+                main.removeCallbacks(scanTimeout)
                 scanner.stopScan(this)
                 listener.onConnecting(name!!)
-                gatt = result.device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+                val g = result.device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+                gatt = g
+                // stop() may have run between the check above and the assignment: it saw no gatt, so close it here.
+                if (stopped.get()) g.close()
             }
 
             override fun onScanFailed(errorCode: Int) {
-                listener.onFailed("scan failed, code $errorCode")
+                if (!stopped.get()) listener.onFailed("scan failed, code $errorCode")
             }
         }
         scanCallback = cb
         listener.onScanning()
         scanner.startScan(listOf(filter), settings, cb)
+        main.postDelayed(scanTimeout, SCAN_TIMEOUT_MS)
     }
 
     fun stop() {
         if (!stopped.compareAndSet(false, true)) return
+        main.removeCallbacks(scanTimeout)
+        stopScan()
         try {
-            val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
-            scanCallback?.let { adapter?.bluetoothLeScanner?.stopScan(it) }
+            connecting?.close() // unblocks connect() on its thread
         } catch (_: Exception) {
         }
         try {
             gatt?.close()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun stopScan() {
+        try {
+            val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+            scanCallback?.let { adapter?.bluetoothLeScanner?.stopScan(it) }
         } catch (_: Exception) {
         }
     }
@@ -108,20 +140,36 @@ class DialLink(
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
-            Thread({ openChannel(g.device) }, "dial-coc-connect").start()
+            if (stopped.get()) return
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                listener.onFailed("service discovery failed, status $status")
+                return
+            }
+            if (channelStarted.compareAndSet(false, true)) {
+                Thread({ openChannel(g.device) }, "dial-coc-connect").start()
+            }
         }
     }
 
     private fun openChannel(device: BluetoothDevice) {
+        var socket: BluetoothSocket? = null
         try {
-            val socket = if (allowUnbonded) device.createInsecureL2capChannel(Wire.PSM) else device.createL2capChannel(Wire.PSM)
+            socket = if (allowUnbonded) device.createInsecureL2capChannel(Wire.PSM) else device.createL2capChannel(Wire.PSM)
+            connecting = socket
             socket.connect()
+            connecting = null
             if (stopped.get()) {
                 socket.close()
                 return
             }
             listener.onChannel(SocketDialChannel(socket))
         } catch (e: Exception) {
+            connecting = null
+            try {
+                socket?.close()
+            } catch (_: Exception) {
+            }
+            if (stopped.get()) return // stop() closed the socket on purpose
             // Class name only: messages can carry device addresses.
             Log.w(TAG, "channel open failed: ${e.javaClass.simpleName}")
             listener.onFailed("channel open failed: ${e.javaClass.simpleName}")
@@ -129,6 +177,8 @@ class DialLink(
     }
 
     companion object {
+        /** How long to scan before giving up with "dial not found". */
+        const val SCAN_TIMEOUT_MS = 30_000L
         private const val TAG = "DialLink"
     }
 }

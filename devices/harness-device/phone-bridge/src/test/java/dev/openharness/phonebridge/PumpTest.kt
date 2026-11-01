@@ -152,4 +152,62 @@ class PumpTest {
         assertEquals(1, dial.closeCount.get())
         assertEquals(listOf(1000), tunnel.closeCodes.toList())
     }
+
+    @Test
+    fun bytesAlreadyQueuedForTheDialAreWrittenBeforeTheChannelClosesOnTunnelClose() {
+        val dial = FakeDial()
+        val tunnel = FakeTunnel()
+        val listener = RecordingListener()
+        val pump = newPump(dial, tunnel, listener)
+        pump.start()
+        dial.feed(byteArrayOf(1))
+        waitUntil(what = "tunnel opened") { tunnel.openCount.get() == 1 }
+        val data = randomPayload(81, 40_000)
+        tunnel.events!!.onBinary(data)
+        tunnel.events!!.onClosed(1000) // right behind the data
+        waitUntil(what = "listener") { listener.reasons.isNotEmpty() }
+        assertEquals(listOf(CloseReason.TUNNEL_CLOSED), listener.reasons.toList())
+        assertArrayEquals("everything queued reached the dial first", data, dial.writtenBytes())
+        assertEquals(1, dial.closeCount.get())
+    }
+
+    @Test(timeout = 8000)
+    fun theDrainOnTunnelCloseIsBoundedToOneSecond() {
+        val clock = FakeClock()
+        val dial = FakeDial()
+        dial.writeBlocked = true // the dial takes nothing
+        val tunnel = FakeTunnel()
+        val listener = RecordingListener()
+        val pump = newPump(dial, tunnel, listener, clock)
+        pump.start()
+        dial.feed(byteArrayOf(1))
+        waitUntil(what = "tunnel opened") { tunnel.openCount.get() == 1 }
+        tunnel.events!!.onBinary(ByteArray(1000))
+        val t0 = clock.nowMs()
+        tunnel.events!!.onClosed(1001)
+        waitUntil(what = "listener") { listener.reasons.isNotEmpty() }
+        val waited = clock.nowMs() - t0
+        assertTrue("drain waited $waited ms, want 1000..1100", waited in 1000..1100)
+        assertEquals(1, dial.closeCount.get())
+    }
+
+    @Test
+    fun aDoubleCloseCallbackFromTheTunnelIsHarmless() {
+        val dial = FakeDial()
+        val tunnel = FakeTunnel()
+        val listener = RecordingListener()
+        val pump = newPump(dial, tunnel, listener)
+        pump.start()
+        dial.feed(byteArrayOf(1))
+        waitUntil(what = "tunnel opened") { tunnel.openCount.get() == 1 }
+        val ev = tunnel.events!!
+        ev.onClosed(1001) // onClosing
+        ev.onClosed(1001) // onClosed
+        ev.onFailure(null, RuntimeException("late"))
+        waitUntil(what = "listener") { listener.reasons.isNotEmpty() }
+        Thread.sleep(50)
+        assertEquals(listOf(CloseReason.TUNNEL_CLOSED), listener.reasons.toList())
+        assertEquals(1, dial.closeCount.get())
+        assertTrue("a tunnel that closed itself is not closed again", tunnel.closeCodes.isEmpty())
+    }
 }

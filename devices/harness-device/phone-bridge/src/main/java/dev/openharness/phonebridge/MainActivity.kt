@@ -80,9 +80,17 @@ class MainActivity : Activity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != REQUEST_PERMISSIONS) return
-        // Notifications are optional. Bluetooth is checked again by the service, which shows a state if it is denied.
-        startBridge()
+        // Notifications are optional. Without the Bluetooth permissions the service is not started at all.
+        if (bluetoothGranted()) {
+            startBridge()
+        } else {
+            BridgeState.set(Phase.NO_PERMISSION, "Bluetooth permission denied. Allow Nearby devices in the app settings.")
+        }
     }
+
+    private fun bluetoothGranted() =
+        checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED &&
+            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
 
     private fun startBridge() {
         startForegroundService(Intent(this, BridgeService::class.java).setAction(BridgeService.ACTION_START))

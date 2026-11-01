@@ -142,4 +142,32 @@ class BackpressureTest {
         assertEquals(listOf(1000), tunnel.closeCodes.toList())
         pump.stop()
     }
+
+    @Test(timeout = 5000)
+    fun stallDetectionWorksWhenTheClockIsNegative() {
+        // System.nanoTime() may be negative, so a "not blocked" marker must not be a negative number.
+        val clock = FakeClock(start = Long.MIN_VALUE / 2)
+        val q = ByteQueue(cap, clock, Wire.RELAY_FULL_CLOSE_MS)
+        assertEquals(PutResult.OK, q.put(ByteArray(cap)))
+        assertEquals(PutResult.STALLED, q.put(ByteArray(10)))
+    }
+
+    @Test(timeout = 8000)
+    fun tunnelThatNeverDrainsClosesEvenWithNothingQueuedBehindIt() {
+        // One byte only: the queue never fills, so only the writer's wait for the WebSocket can detect the stall.
+        val clock = FakeClock()
+        val dial = FakeDial()
+        val tunnel = FakeTunnel()
+        tunnel.reportedQueue = 10_000_000
+        val listener = RecordingListener()
+        val pump = Pump(dial, tunnel, listener, clock = clock)
+        pump.start()
+        dial.feed(byteArrayOf(1))
+        waitUntil(what = "stall close") { listener.reasons.isNotEmpty() }
+        assertEquals(listOf(CloseReason.STALL_TO_TUNNEL), listener.reasons.toList())
+        assertTrue("waited at least 4 s on the fake clock", clock.nowMs() >= 4000)
+        assertEquals(1, dial.closeCount.get())
+        assertEquals(listOf(1000), tunnel.closeCodes.toList())
+        assertEquals(0, tunnel.sendCalls.get())
+    }
 }

@@ -60,7 +60,7 @@ class Pump(
     private val listener: PumpListener,
     private val clock: Clock = RealClock,
     queueBytes: Int = Wire.RELAY_QUEUE_BYTES.toInt(),
-    fullCloseMs: Long = Wire.RELAY_FULL_CLOSE_MS,
+    private val fullCloseMs: Long = Wire.RELAY_FULL_CLOSE_MS,
     private val chunkBytes: Int = CHUNK_BYTES,
 ) : TunnelEvents {
 
@@ -68,6 +68,7 @@ class Pump(
     private val toDial = ByteQueue(queueBytes, clock, fullCloseMs)
     private val tunnelRef = AtomicReference<TunnelChannel?>(null)
     private val tunnelReady = CountDownLatch(1)
+    private val dialWriterDone = CountDownLatch(1)
     private val closing = AtomicBoolean(false)
     private val started = AtomicBoolean(false)
     private val upBytes = AtomicLong(0)
@@ -131,7 +132,11 @@ class Pump(
     }
 
     private fun writeTunnel() {
-        tunnelReady.await()
+        try {
+            tunnelReady.await()
+        } catch (_: InterruptedException) {
+            return
+        }
         val tunnel = tunnelRef.get() ?: return
         val buf = ByteArray(chunkBytes)
         while (true) {
@@ -142,7 +147,13 @@ class Pump(
             while (off < n) {
                 val len = minOf(n - off, Wire.MAX_WS_MESSAGE_BYTES)
                 // Hold the piece until the WebSocket has room, so the queue in front of it is the only deep one.
-                while (!closing.get() && tunnel.queueSize() >= SEND_AHEAD_BYTES) Thread.sleep(2)
+                // The same 4 s rule as a full queue: a WebSocket that never drains is a stall.
+                val waitStart = clock.nowMs()
+                while (!closing.get() && tunnel.queueSize() >= SEND_AHEAD_BYTES) {
+                    if (Thread.currentThread().isInterrupted) { closeAll(CloseReason.STOPPED); return }
+                    if (clock.nowMs() - waitStart >= fullCloseMs) { closeAll(CloseReason.STALL_TO_TUNNEL); return }
+                    clock.sleepMs(2)
+                }
                 if (closing.get()) return
                 if (!tunnel.send(buf.copyOfRange(off, off + len))) {
                     closeAll(CloseReason.TUNNEL_FAILED)
@@ -164,6 +175,8 @@ class Pump(
             }
         } catch (_: IOException) {
             closeAll(CloseReason.DIAL_CLOSED)
+        } finally {
+            dialWriterDone.countDown()
         }
     }
 
@@ -187,8 +200,8 @@ class Pump(
     private fun closeAll(reason: CloseReason) {
         if (!closing.compareAndSet(false, true)) return
         toTunnel.abort()
-        toDial.abort()
         tunnelReady.countDown()
+        if (reason == CloseReason.TUNNEL_CLOSED) drainToDial() else toDial.abort()
         // A tunnel that failed or closed itself is already gone; any other reason closes it politely.
         if (reason != CloseReason.TUNNEL_FAILED && reason != CloseReason.TUNNEL_CLOSED) {
             tunnelRef.get()?.close(NORMAL_CLOSE)
@@ -200,7 +213,19 @@ class Pump(
         listener.onClosed(reason)
     }
 
+    /**
+     * The tunnel closed in an orderly way: let what is already queued reach the dial, but wait at most DRAIN_MS, so a
+     * stuck dial cannot hold the close. The dial writer ends on its own once the closed queue is empty.
+     */
+    private fun drainToDial() {
+        toDial.close()
+        val start = clock.nowMs()
+        while (dialWriterDone.count > 0 && clock.nowMs() - start < DRAIN_MS) clock.sleepMs(5)
+        toDial.abort()
+    }
+
     companion object {
+        const val DRAIN_MS = 1000L
         const val CHUNK_BYTES = 8192
         const val SEND_AHEAD_BYTES = 8192L
         const val NORMAL_CLOSE = 1000

@@ -30,7 +30,8 @@ class ByteQueue(val capacity: Int, private val clock: Clock, private val fullClo
     fun put(src: ByteArray, off: Int = 0, len: Int = src.size): PutResult {
         var pos = off
         var left = len
-        var blockedSince = -1L
+        var blocked = false // not a negative number: System.nanoTime() may be negative
+        var blockedSince = 0L
         while (true) {
             lock.withLock {
                 if (closed || aborted) return PutResult.CLOSED
@@ -50,13 +51,14 @@ class ByteQueue(val capacity: Int, private val clock: Clock, private val fullClo
                     if (size > high) high = size
                     pos += n
                     left -= n
-                    blockedSince = -1L // room appeared, so the queue was not full for this whole time
+                    blocked = false // room appeared, so the queue was not full for this whole time
                     dataReady.signalAll()
                 }
             }
             if (left == 0) return PutResult.OK
             val now = clock.nowMs()
-            if (blockedSince < 0) {
+            if (!blocked) {
+                blocked = true
                 blockedSince = now
             } else if (now - blockedSince >= fullCloseMs) {
                 return PutResult.STALLED

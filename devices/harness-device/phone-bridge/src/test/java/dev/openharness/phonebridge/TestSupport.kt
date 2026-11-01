@@ -9,8 +9,8 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /** Fake time: sleeping advances the clock at once, so a 4 s stall test takes microseconds and is deterministic. */
-class FakeClock : Clock {
-    private val now = AtomicLong(0)
+class FakeClock(start: Long = 0) : Clock {
+    private val now = AtomicLong(start)
     @Volatile var onSleep: ((nowMs: Long) -> Unit)? = null
     override fun nowMs(): Long = now.get()
     override fun sleepMs(ms: Long) {

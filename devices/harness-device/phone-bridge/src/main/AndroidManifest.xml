@@ -10,6 +10,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- A normal permission (granted at install, no prompt). On its own it meets the Android 14 prerequisite of the
+         connectedDevice foreground type, so startForeground() cannot throw before Bluetooth permission is granted. -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <!-- Companion-device background rights. Used by B10b (presence); declared now so the manifest is final. -->
     <uses-permission android:name="android.permission.REQUEST_COMPANION_RUN_IN_BACKGROUND" />
     <uses-permission android:name="android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND" />
