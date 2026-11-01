@@ -168,6 +168,7 @@ function print(verb: string, answer: Record<string, unknown>, deps: DialWifiDeps
       out(`    daemon    ${String(answer.host)}:${String(answer.port)}   (this computer)`)
       out('')
       out('  Unplug the USB cable: after about 10 seconds the dial joins the network and connects here.')
+      out('  The dial joins 2.4 GHz Wi-Fi networks only (not 5 GHz).')
       out('  This computer\'s address must stay the same: reserve it in your router (a DHCP reservation).')
       out('  On Windows, allow the connection through the firewall once:  harness dial wifi firewall')
       out('')

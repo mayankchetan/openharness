@@ -191,6 +191,7 @@ Machine:
                                give a plugged-in dial a Wi-Fi network and the key it proves to this computer with.
                                \`set\` asks for the network name and the password (typed, never an argument);
                                \`firewall\` prints the Windows firewall command, it does not run it
+                               The dial joins 2.4 GHz networks only. Reserve this computer's address in your router.
 
 Grid (the fleet of AI engines the \`grid\` CLI serves — needs \`grid\` on PATH):
   harness grid login           sign in to your grid reusing THIS computer's Autonomous account —

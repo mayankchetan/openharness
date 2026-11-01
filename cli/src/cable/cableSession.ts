@@ -512,6 +512,12 @@ export interface DeviceSettings {
   round: boolean
   /** Harness Pro only: which interface the screen shows. Absent from round dials and older Pro firmware. */
   uiSkin?: 'classic' | 'console'
+  /**
+   * Which link the dial picked for itself when its cable is out: `usb` (stay on USB) or `wifi`. Optional: a firmware that does not
+   * report it (every build before W16) has none. Read-only here: no message of this daemon writes it, and the credentials of the
+   * network never travel in the settings (spec cable-wifi-link.md section 7).
+   */
+  linkMode?: 'usb' | 'wifi'
   voiceLang: string
   /** Presence advertises companion.set support. Omitted by older firmware. */
   followCompanion?: boolean
@@ -522,7 +528,7 @@ export interface DeviceSettings {
 }
 
 /** The fields a `settings.set` may name. Absent means unchanged — see handle_settings_set on the device. */
-export type DeviceSettingsPatch = Partial<Omit<DeviceSettings, 'round' | 'face' | 'companion' | 'companionProtocol' | 'companionDetails'>>
+export type DeviceSettingsPatch = Partial<Omit<DeviceSettings, 'round' | 'face' | 'companion' | 'companionProtocol' | 'companionDetails' | 'linkMode'>>
 
 /** What a window needs to draw the device row. `updating` names the version on its way over. */
 export interface DialStatus {
@@ -641,6 +647,7 @@ function readSettings(value: unknown): DeviceSettings | undefined {
     round: raw.round as boolean,
     voiceLang: raw.voiceLang,
     ...(raw.uiSkin === 'classic' || raw.uiSkin === 'console' ? { uiSkin: raw.uiSkin as 'classic' | 'console' } : {}),
+    ...(raw.linkMode === 'usb' || raw.linkMode === 'wifi' ? { linkMode: raw.linkMode as 'usb' | 'wifi' } : {}),
     ...(raw.companionProtocol === 2 ? {companionProtocol:2, companionDetails:readCompanionIdentity(raw.companionDetails)} : {}),
     ...(typeof raw.followCompanion === 'boolean' &&
         (raw.companion === null || typeof raw.companion === 'string')
@@ -2550,7 +2557,7 @@ export class CableSession {
 
   async setSettings(patch: DeviceSettingsPatch): Promise<boolean> {
     // `id` addresses the DEVICE; it is not one of its settings and must not be sent as one.
-    const fields = Object.entries(patch).filter(([key, value]) => value !== undefined && key !== 'id' && key !== 'companion' && key !== 'companionDetails' && key !== 'companionProtocol')
+    const fields = Object.entries(patch).filter(([key, value]) => value !== undefined && key !== 'id' && key !== 'companion' && key !== 'companionDetails' && key !== 'companionProtocol' && key !== 'linkMode')
     if (!fields.length) return true
     if (patch.uiSkin !== undefined && !this.skinReported) {
       this.log('cable: uiSkin not written — this device did not report one (older firmware)')
