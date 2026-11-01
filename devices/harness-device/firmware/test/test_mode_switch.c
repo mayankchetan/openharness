@@ -33,6 +33,7 @@ typedef struct {
     bool stay_wl;
     bool asleep;
     uint32_t busy;
+    uint64_t last_touch;       // when the user last touched the glass (the idle rule of the wireless -> USB gate); 0 = at boot
     // what the dial has seen
     bool have_welcome;
     uint64_t last_welcome;
@@ -92,6 +93,7 @@ static ms_act_t tick(sim_t *m)
     in.last_welcome_ms = m->last_welcome;
     in.busy = m->busy;
     in.asleep = m->asleep;
+    in.idle_ms = m->t - m->last_touch > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)(m->t - m->last_touch);
     ms_step(&m->s, &in, &m->out);
     if (m->out.probe_wanted) m->probes_wanted++;
     if (m->out.act == MS_ACT_NOTICE) m->notices++;
@@ -475,11 +477,13 @@ static void test_h6_busy(void)
     CHECK(ms_blocked(MS_BUSY_DRAFT | MS_BUSY_PET_UPLOAD, true));
     CHECK((MS_BUSY_HARD & MS_BUSY_FW_UPDATE) && (MS_BUSY_HARD & MS_BUSY_PET_UPLOAD));
 
-    // each row alone blocks entry and shows the notice; release switches on the next step (<= 250 ms)
-    for (unsigned i = 0; i < sizeof soft / sizeof soft[0]; i++) {
+    // each row that holds a wireless dial for as long as it lasts (H13: the question, reader and picker rows give way to 30 s of idle instead) blocks
+    // entry and shows the notice; release switches on the next step (<= 250 ms)
+    const uint32_t holding[] = { MS_BUSY_VOICE, MS_BUSY_DRAFT, MS_BUSY_MODEL_LIST, 1u << 20 };
+    for (unsigned i = 0; i < sizeof holding / sizeof holding[0]; i++) {
         sim_t m;
         wireless_ready(&m, MS_MODE_WIFI);
-        m.busy = soft[i];
+        m.busy = holding[i];
         sim_set_sof(&m, true);
         CHECK(!run_to(&m, S(70) + S(5) + 100));         // the timer has ended at +5.1 s
         CHECK(m.out.act == MS_ACT_NOTICE && m.out.waiting);
@@ -536,6 +540,7 @@ static void test_h6_busy(void)
         sim_t m;
         wireless_ready(&m, MS_MODE_WIFI);
         m.busy = MS_BUSY_READER;
+        m.last_touch = m.t;       // the user is at the glass (H13: a reader alone holds only until 30 s after the last touch)
         sim_set_sof(&m, true);
         CHECK(!run_to(&m, S(70) + S(10)));
         m.busy = MS_BUSY_VOICE;   // one action ends, another begins in the same step
@@ -563,6 +568,123 @@ static void test_h6_busy(void)
         sim_set_sof(&m, true);
         CHECK(!run_to(&m, S(30)));
         CHECK(m.notices == 0);
+    }
+}
+
+// ── H13: the wireless -> USB switch of an awake dial: soft rows give way to 30 s without a touch (user decision 2026-11-01) ──────────────────
+// Before: any row held an awake dial until its screen went off (300 s on a charger; the bench measured 297 s for a replug). Now, for a switch
+// from a wireless mode to USB: voice, draft, the model list, an unknown row, an update and an upload hold as before; the question, reader and
+// picker rows hold only while the user is touching the glass: 30 s after the last touch (a touch restarts it) the notice is shown and the dial goes.
+// USB -> wireless keeps the old rule (ms_blocked).
+static void test_h13_idle_gate(void)
+{
+    const uint32_t idle_rows[] = { MS_BUSY_QUESTION, MS_BUSY_READER, MS_BUSY_PICKER, MS_BUSY_QUESTION | MS_BUSY_READER | MS_BUSY_PICKER };
+    const uint32_t strong[] = { MS_BUSY_VOICE, MS_BUSY_DRAFT, MS_BUSY_MODEL_LIST, 1u << 20, MS_BUSY_FW_UPDATE, MS_BUSY_PET_UPLOAD,
+                                MS_BUSY_VOICE | MS_BUSY_READER };
+    CHECK(MS_T_IDLE_MS == 30000u);
+    CHECK((MS_BUSY_IDLE_OK & (MS_BUSY_VOICE | MS_BUSY_DRAFT | MS_BUSY_MODEL_LIST | MS_BUSY_HARD)) == 0);
+
+    // the pure gate
+    for (ms_mode_t from = MS_MODE_WIFI; from <= MS_MODE_BLE; from++) {
+        CHECK(!ms_gate_blocked(from, 0, false, 0) && !ms_gate_blocked(from, 0, true, 0));
+        for (unsigned i = 0; i < sizeof idle_rows / sizeof idle_rows[0]; i++) {
+            CHECK(ms_gate_blocked(from, idle_rows[i], false, 0));
+            CHECK(ms_gate_blocked(from, idle_rows[i], false, MS_T_IDLE_MS - 1));
+            CHECK(!ms_gate_blocked(from, idle_rows[i], false, MS_T_IDLE_MS));        // 30 s, not 30 s and a tick
+            CHECK(!ms_gate_blocked(from, idle_rows[i], false, 4000000000u));
+            CHECK(!ms_gate_blocked(from, idle_rows[i], true, 0));                    // asleep: silent, as before
+        }
+        for (unsigned i = 0; i < sizeof strong / sizeof strong[0]; i++) {
+            CHECK(ms_gate_blocked(from, strong[i], false, 4000000000u));             // no idle time releases these
+            CHECK(ms_gate_blocked(from, strong[i], false, MS_T_IDLE_MS));
+        }
+        CHECK(ms_gate_blocked(from, MS_BUSY_FW_UPDATE, true, 0) && ms_gate_blocked(from, MS_BUSY_PET_UPLOAD, true, 4000000000u));   // hard rows hold a dark dial
+        CHECK(!ms_gate_blocked(from, MS_BUSY_VOICE, true, 0));                       // a dark dial goes past a voice row, as before
+    }
+    // a USB dial leaving for a wireless mode keeps the old rule: idle time never releases anything
+    for (unsigned i = 0; i < sizeof idle_rows / sizeof idle_rows[0]; i++) {
+        CHECK(ms_gate_blocked(MS_MODE_USB, idle_rows[i], false, 4000000000u) == ms_blocked(idle_rows[i], false));
+        CHECK(ms_gate_blocked(MS_MODE_USB, idle_rows[i], true, 0) == ms_blocked(idle_rows[i], true));
+    }
+    CHECK(ms_gate_blocked(MS_MODE_USB, MS_BUSY_READER, false, 4000000000u));
+
+    // the dial: a reader open, the cable plugged in as the user touches the glass
+    for (unsigned i = 0; i < sizeof idle_rows / sizeof idle_rows[0]; i++) {
+        sim_t m;
+        wireless_ready(&m, MS_MODE_WIFI);
+        m.busy = idle_rows[i];
+        m.last_touch = m.t;
+        const uint64_t touched = m.t;
+        sim_set_sof(&m, true);
+        CHECK(!run_to(&m, touched + S(5) + 100));             // due: the probe has been answered for 5 s
+        CHECK(m.out.act == MS_ACT_NOTICE && m.out.waiting && m.out.target == MS_MODE_USB);
+        CHECK(!run_to(&m, touched + MS_T_IDLE_MS - 100));
+        CHECK(m.out.act == MS_ACT_NOTICE);                    // the notice stays up while it waits
+        CHECK(run_to(&m, touched + MS_T_IDLE_MS + 100));
+        CHECK(m.reboot_t == touched + MS_T_IDLE_MS && m.reboot_target == MS_MODE_USB && m.reboot_boot_usb);
+    }
+    // a touch restarts the 30 s, however many times
+    {
+        sim_t m;
+        wireless_ready(&m, MS_MODE_WIFI);
+        m.busy = MS_BUSY_READER;
+        m.last_touch = m.t;
+        sim_set_sof(&m, true);
+        for (int k = 0; k < 8; k++) {                         // a touch every 20 s for almost three minutes
+            CHECK(!run_to(&m, m.t + S(20)));
+            m.last_touch = m.t;
+        }
+        CHECK(m.out.act == MS_ACT_NOTICE);
+        const uint64_t last = m.last_touch;
+        CHECK(run_to(&m, last + MS_T_IDLE_MS + 100));
+        CHECK(m.reboot_t == last + MS_T_IDLE_MS);
+    }
+    // a strong row that starts during the wait takes the switch back; when it ends the idle rule decides (a voice turn bumps the touch timer, so the
+    // 30 s start again from its end)
+    {
+        sim_t m;
+        wireless_ready(&m, MS_MODE_WIFI);
+        m.busy = MS_BUSY_PICKER;
+        m.last_touch = m.t;
+        sim_set_sof(&m, true);
+        CHECK(!run_to(&m, m.t + S(20)));
+        m.busy = MS_BUSY_PICKER | MS_BUSY_VOICE;
+        CHECK(!run_to(&m, m.t + S(60)));                      // far past 30 s since the touch: the voice row holds
+        CHECK(m.out.act == MS_ACT_NOTICE);
+        m.last_touch = m.t;                                   // the turn ended with a touch
+        m.busy = MS_BUSY_PICKER;
+        CHECK(!run_to(&m, m.t + MS_T_IDLE_MS - 100));
+        CHECK(run_to(&m, m.t + 200));
+    }
+    // a dial that was idle for minutes when the switch came due goes at once (nothing to wait for), with no notice
+    {
+        sim_t m;
+        wireless_ready(&m, MS_MODE_WIFI);
+        m.busy = MS_BUSY_READER;                              // last_touch is 0: 70 s of idle
+        sim_set_sof(&m, true);
+        CHECK(run_to(&m, m.t + S(6)));
+        CHECK(m.reboot_t == S(70) + 100 + S(5) && m.notices == 0);
+    }
+    // the same rule for the pick of USB on the Link screen, which is itself a touch
+    {
+        sim_t m;
+        wireless_ready(&m, MS_MODE_WIFI);
+        m.busy = MS_BUSY_PICKER;                              // the Link screen is on the glass
+        m.last_touch = m.t;                                   // the pick
+        m.wl_mode = MS_WL_UNSET;
+        CHECK(!run_to(&m, m.t + MS_T_IDLE_MS - 100));
+        CHECK(m.out.act == MS_ACT_NOTICE && m.out.waiting);
+        CHECK(run_to(&m, m.t + 200));
+        CHECK(m.reboot_target == MS_MODE_USB);
+    }
+    // a Wi-Fi dial leaving the cable (USB -> Wi-Fi) is not given the idle rule: a reader still holds it for as long as it is up
+    {
+        sim_t m;
+        usb_ready(&m, MS_WL_WIFI);
+        m.busy = MS_BUSY_READER;
+        sim_set_sof(&m, false);
+        CHECK(!run_to(&m, m.t + S(300)));
+        CHECK(m.out.act == MS_ACT_NOTICE);
     }
 }
 
@@ -1251,6 +1373,7 @@ int main(void)
     test_h10_boot_usb();
     test_h11_panic_loop();
     test_h12_pick_usb_while_wireless();
+    test_h13_idle_gate();
     test_robustness();
     printf("test_mode_switch: %d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;

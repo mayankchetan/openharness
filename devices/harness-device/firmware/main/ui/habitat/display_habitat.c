@@ -292,6 +292,8 @@ void display_set_power_cb(void (*cb)(bool)) { power_cb = cb; }
 #ifdef DEVICE_BATTERY_SLEEP
 void display_set_sleep_cb(void (*cb)(bool)) { sleep_cb = cb; }
 #endif
+uint32_t display_idle_ms(void) { return elapsed_since(&last_activity); }
+
 void display_bump_activity(void)
 {
     atomic_store(&last_activity, now_ms());

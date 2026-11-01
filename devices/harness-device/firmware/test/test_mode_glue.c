@@ -48,6 +48,7 @@ typedef struct {
     bool radio_fails;           // the Wi-Fi stack does not start (net_link_start returns false)
     uint32_t busy;
     bool asleep;
+    uint64_t last_touch;        // uptime of the last touch (display_idle_ms is the difference); 0 = at boot
     char focus[MS_FOCUS_MAX];   // what the carousel shows
 
     // the dial
@@ -204,6 +205,7 @@ static bool run(uint64_t ms)
         w.last_welcome_ms = D.last_welcome;
         w.busy = D.busy;
         w.asleep = D.asleep;
+        w.idle_ms = (uint32_t)(D.t - D.last_touch);
         const int before = D.reboots;
         // The glue task, each loop: re-read wl_mode and stay_wl when asked (mode_glue_settings_changed) or while a drop to "no target" awaits its
         // confirmation (mg_apply_settings). A read that lands inside a config_net_set_mode write sees the marker off, which reads as "no target".
@@ -594,12 +596,12 @@ static void test_a_held_switch_is_logged_once_and_on_a_change(void)
     assert(D.held_calls == 1 && D.held_busy == MS_BUSY_VOICE && D.held_target == MS_MODE_USB && !D.held_asleep);
     assert(!run(30000));
     assert(D.held_calls == 1);                             // the same mask: not logged again
-    D.busy = MS_BUSY_VOICE | MS_BUSY_READER;
+    D.busy = MS_BUSY_VOICE | MS_BUSY_DRAFT;
     assert(!run(2000));
-    assert(D.held_calls == 2 && D.held_busy == (MS_BUSY_VOICE | MS_BUSY_READER));
-    D.busy = MS_BUSY_READER;                               // a row cleared: a change, so a line
+    assert(D.held_calls == 2 && D.held_busy == (MS_BUSY_VOICE | MS_BUSY_DRAFT));
+    D.busy = MS_BUSY_DRAFT;                                // a row cleared: a change, so a line
     assert(!run(2000));
-    assert(D.held_calls == 3 && D.held_busy == MS_BUSY_READER);
+    assert(D.held_calls == 3 && D.held_busy == MS_BUSY_DRAFT);
     D.busy = 0;
     assert(run(MS_STEP_MS * 2));                           // released: the switch goes, and says nothing more
     assert(D.held_calls == 3);
@@ -638,6 +640,59 @@ static void test_a_held_switch_is_logged_once_and_on_a_change(void)
     D.busy = MS_BUSY_PET_UPLOAD;
     assert(!run(10000));
     assert(D.held_calls == 1 && D.held_asleep && D.held_busy == MS_BUSY_PET_UPLOAD);
+}
+
+// User decision 2026-11-01: a Wi-Fi dial plugged in while awake switches to USB 30 s after the last touch, with the notice up meanwhile, instead of
+// waiting for the screen to go off (297 s on the bench). The glue feeds the idle time (display_idle_ms); voice and the other strong rows still hold.
+static void test_a_replug_with_a_reader_open_switches_after_30_s_of_idle(void)
+{
+    fresh();
+    provision(1);
+    boot();
+    assert(!run(70000));
+    D.cable = D.daemon = true;
+    D.busy = MS_BUSY_READER;
+    D.last_touch = D.t;
+    const uint64_t touched = D.t;
+    assert(!run(MS_T_ENTER_MS + 5000));                    // due after the 5 s of welcomes, held by the reader
+    assert(D.notice_shown && D.reboots == 0 && D.held_calls == 1 && D.held_busy == MS_BUSY_READER);
+    D.last_touch = D.t;                                    // a touch restarts the 30 s
+    const uint64_t second = D.t;
+    assert(!run(MS_T_IDLE_MS - MS_STEP_MS));
+    assert(D.notice_shown && D.reboots == 0);
+    assert(run(MS_STEP_MS * 2));
+    assert(D.reboot_to[0] == MS_MODE_USB && !D.notice_shown);
+    assert(D.reboot_uptime[0] >= second + MS_T_IDLE_MS && D.reboot_uptime[0] <= second + MS_T_IDLE_MS + MS_STEP_MS);
+    assert(D.reboot_uptime[0] > touched + MS_T_IDLE_MS);
+    assert(strcmp(D.order, "LSBR") == 0 && D.held_calls == 1);
+
+    // voice still holds, however long the glass is left alone
+    fresh();
+    provision(1);
+    boot();
+    assert(!run(70000));
+    D.cable = D.daemon = true;
+    D.busy = MS_BUSY_VOICE | MS_BUSY_READER;
+    D.last_touch = D.t;
+    assert(!run(120000));
+    assert(D.notice_shown && D.reboots == 0);
+    D.busy = MS_BUSY_READER;                               // the turn ended; the glass has been alone for 2 minutes
+    assert(run(MS_STEP_MS * 2));
+    assert(D.reboot_to[0] == MS_MODE_USB);
+
+    // a USB dial leaving for Wi-Fi keeps the old rule: a reader holds it however long the glass is left alone
+    fresh();
+    provision(1);
+    boot();
+    D.cable = D.daemon = true;
+    assert(run(70000) && D.reboot_to[0] == MS_MODE_USB);   // to USB with the cable in
+    assert(boot() == MS_MODE_USB);
+    assert(!run(70000));
+    D.busy = MS_BUSY_READER;
+    D.cable = false;                                       // the cable is pulled: a USB dial leaves for Wi-Fi after 10 s, if nothing holds it
+    D.last_touch = 0;
+    assert(!run(120000));
+    assert(D.notice_shown && D.reboots == 1);
 }
 
 static void test_the_notice_goes_when_the_reason_goes(void)
@@ -1249,6 +1304,7 @@ int main(void)
     test_busy_dial_waits_and_shows_the_notice();
     test_the_notice_goes_when_the_reason_goes();
     test_a_held_switch_is_logged_once_and_on_a_change();
+    test_a_replug_with_a_reader_open_switches_after_30_s_of_idle();
     test_power_cut_forgets_the_count();
     test_flaps_clear_after_ten_minutes();
     test_nothing_happens_after_the_restart();

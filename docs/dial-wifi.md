@@ -59,6 +59,10 @@ Wi-Fi network shows how to set one up instead of the rows.
 
 If you turned Keep Wi-Fi on and want USB back, open the Link screen and turn it off. The dial does not look at the cable while Keep Wi-Fi is on.
 
+## When the cable goes in
+
+With Keep Wi-Fi off, a Wi-Fi dial that is plugged into a computer that runs Harness goes back to USB after about 5 seconds, then restarts. It never restarts in the middle of a voice message, a draft, a firmware update or a pet upload: it waits until they end. If only a page, a question or a picker is open, it shows "Switching in a moment" and restarts 30 seconds after your last touch (each touch starts the 30 seconds again). A dial whose screen is off restarts without the notice.
+
 ## Other commands
 
 | Command | What it does |

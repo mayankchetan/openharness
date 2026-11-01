@@ -56,6 +56,7 @@ typedef struct {
     uint64_t last_welcome_ms;
     uint32_t busy;                  // MS_BUSY_*
     bool     asleep;
+    uint32_t idle_ms;               // milliseconds since the last touch (display_idle_ms()): the wireless -> USB gate's idle rule
 } mg_world_t;
 
 // What the glue can do. `ctx` goes to every call. All of them are called from the one task that calls mg_step.

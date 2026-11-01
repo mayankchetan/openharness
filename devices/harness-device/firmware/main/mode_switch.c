@@ -49,6 +49,15 @@ bool ms_blocked(uint32_t busy, bool asleep)
     return busy != 0 && !asleep;            // anything else: wait while the user can see it; a sleeping dial switches silently
 }
 
+bool ms_gate_blocked(ms_mode_t running, uint32_t busy, bool asleep, uint32_t idle_ms)
+{
+    if (running == MS_MODE_USB) return ms_blocked(busy, asleep);
+    if (busy & MS_BUSY_HARD) return true;
+    if (busy == 0 || asleep) return false;
+    if (busy & ~MS_BUSY_IDLE_OK) return true;   // voice, draft, the model list, or a row not named here: held as before
+    return idle_ms < MS_T_IDLE_MS;              // only the rows that wait on a person: until they have left the glass alone for 30 s
+}
+
 // ── state machine ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 void ms_init(ms_state_t *s, ms_mode_t running_mode, uint8_t flaps_from_record)
 {
@@ -158,7 +167,7 @@ void ms_step(ms_state_t *s, const ms_in_t *in, ms_out_t *out)
     if (!picked_usb && (now < MS_T_DWELL_MS || s->flaps >= MS_FLAP_CAP)) return;
 
     // The busy gate: a notice while the user can see it, nothing on a dark screen.
-    if (ms_blocked(in->busy, in->asleep)) {
+    if (ms_gate_blocked(s->mode, in->busy, in->asleep, in->idle_ms)) {
         out->waiting = true;
         out->act = in->asleep ? MS_ACT_NONE : MS_ACT_NOTICE;
         return;

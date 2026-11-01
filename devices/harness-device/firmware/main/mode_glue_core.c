@@ -97,6 +97,7 @@ void mg_step(mg_t *g, const mg_world_t *w, const mg_ops_t *ops)
         .last_welcome_ms = w->last_welcome_ms,
         .busy = w->busy,
         .asleep = w->asleep,
+        .idle_ms = w->idle_ms,
     };
     ms_out_t out;
     ms_step(&g->ms, &in, &out);

@@ -47,6 +47,9 @@ void display_set_power_cb(void (*cb)(bool on));
 // Reset the idle-off timer without a touch — ui_screens calls this while a voice turn is recording/
 // uploading/processing (voice uses the PWR key, not the touchscreen, so the screen must not auto-off).
 void display_bump_activity(void);
+// Milliseconds since the last touch, key or display_bump_activity(): the clock that turns the screen off. The mode switch's wireless -> USB gate releases a
+// reader or a picker 30 s after it (mode_switch.h MS_T_IDLE_MS).
+uint32_t display_idle_ms(void);
 
 #ifdef HARNESS_DEBUG_COMMANDS
 // Re-render the scene the panel is showing into `out` (HT_WIDTH x HT_HEIGHT RGB565, the renderer's own

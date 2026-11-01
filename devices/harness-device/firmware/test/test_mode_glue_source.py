@@ -240,7 +240,13 @@ for need in ('ui_mode_switch_busy(NULL, 0)', 'cable_client_models_waiting()', 'M
              'fw_update_active()', 'MS_BUSY_FW_UPDATE'):
     assert need in blocked, need
 assert re.search(r'#ifndef DEVICE_NO_OTA\s+if \(fw_update_active\(\)\)', blocked), 'the update counts where an update can exist'
-assert 'ms_blocked(mode_switch_busy(), display_is_asleep())' in body(glue, 'mode_switch_blocked')
+# the restart's last look uses the same gate as the step: the running mode decides the rule, and the idle time is the screen's own
+assert 'ms_gate_blocked(s_running, mode_switch_busy(), display_is_asleep(), display_idle_ms())' in body(glue, 'mode_switch_blocked')
+assert 'w->idle_ms = display_idle_ms();' in sample, 'the step is given the time since the last touch'
+disp = text('ui/display.h')
+assert re.search(r'uint32_t display_idle_ms\(void\);', disp), 'declared in display.h, in every build'
+dh = code('ui/habitat/display_habitat.c')
+assert 'elapsed_since(&last_activity)' in body(dh, 'display_idle_ms'), 'the same clock that turns the screen off: touches and display_bump_activity() restart it'
 client = code('cable_client.c')
 assert '((model_item_t *volatile *)&s_models_out)[0] != NULL' in body(client, 'cable_client_models_waiting')
 assert 's_pet_id[0] != 0' in body(client, 'cable_client_pet_upload_active')

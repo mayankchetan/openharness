@@ -138,7 +138,7 @@ uint32_t mode_switch_busy(void)
     return busy;
 }
 
-bool mode_switch_blocked(void) { return ms_blocked(mode_switch_busy(), display_is_asleep()); }
+bool mode_switch_blocked(void) { return ms_gate_blocked(s_running, mode_switch_busy(), display_is_asleep(), display_idle_ms()); }
 
 // ── the task ────────────────────────────────────────────────────────────────────────────────────────
 
@@ -283,6 +283,7 @@ static void sample(mg_world_t *w, uint64_t now)
     }
     w->busy = mode_switch_busy();
     w->asleep = display_is_asleep();
+    w->idle_ms = display_idle_ms();
 }
 
 static void mode_sw_task(void *arg)

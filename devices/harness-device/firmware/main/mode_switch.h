@@ -86,7 +86,17 @@ void ms_boot_decide(const ms_boot_in_t *in, ms_boot_out_t *out);
 #define MS_BUSY_HARD            (MS_BUSY_FW_UPDATE | MS_BUSY_PET_UPLOAD)
 
 // True when a switch must wait. Any bit set blocks an awake dial (an unknown bit too: unsure means wait). Asleep, only MS_BUSY_HARD blocks.
+// This is the rule of a USB dial leaving for a wireless mode.
 bool ms_blocked(uint32_t busy, bool asleep);
+
+// THE WIRELESS -> USB GATE (user decision 2026-11-01; before it a replug waited for the screen to go off: 297 s measured). For a switch from a
+// wireless mode to USB, an awake dial is held by voice, a draft, the blocking model list, a row this file does not know (unsure means wait), an update
+// and an upload exactly as before; the question, reader and picker rows (MS_BUSY_IDLE_OK) hold it only while the user is touching the glass: once
+// MS_T_IDLE_MS have passed since the last touch it goes, after showing the notice. A touch restarts the count. Asleep, or with no row set, nothing
+// changes. A USB dial (running == MS_MODE_USB) keeps ms_blocked().
+#define MS_T_IDLE_MS            30000u
+#define MS_BUSY_IDLE_OK         (MS_BUSY_QUESTION | MS_BUSY_READER | MS_BUSY_PICKER)
+bool ms_gate_blocked(ms_mode_t running, uint32_t busy, bool asleep, uint32_t idle_ms);
 
 // ── the running state machine ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 // Two modes of behaviour and no named sub-states; the timers below are the only memory.
@@ -127,6 +137,7 @@ typedef struct {
     // gate
     uint32_t busy;                // MS_BUSY_* mask
     bool     asleep;              // display_is_asleep()
+    uint32_t idle_ms;             // milliseconds since the last touch (or key, or anything that bumps the screen's idle timer): display_idle_ms()
 } ms_in_t;
 
 typedef enum {
