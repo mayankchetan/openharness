@@ -66,6 +66,10 @@ python3 "$here/test_cable_xport_tls_source.py"
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" \
    -o "$out/test_net_state" "$here/test_net_state.c" "$here/../main/net_state.c"
 "$out/test_net_state"
+# B4a: the BLE link's state machine, deadlines and accept policy; the numbers are read from the shared vector file.
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main"    -o "$out/test_ble_state" "$here/test_ble_state.c" "$here/../main/ble_state.c" "$here/../main/net_state.c"
+"$out/test_ble_state" "$here/vectors/ble_status.txt"
+python3 "$here/test_ble_state_source.py"
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -pthread -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" \
    -o "$out/test_log_ring" "$here/test_log_ring.c" "$here/../main/log_ring.c"
 "$out/test_log_ring"

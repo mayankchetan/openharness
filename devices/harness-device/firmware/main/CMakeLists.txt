@@ -30,6 +30,7 @@ set(BOARD_SRCS
     "cable_xport_tcp.c"
     "cable_xport_tls.c"
     "net_state.c"
+    "ble_state.c"
     "mode_switch.c"
     "mode_record.c"
     "mode_glue_core.c"
