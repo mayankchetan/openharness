@@ -102,7 +102,9 @@ assert re.search(r'const bool wifi_mode = mode_glue_boot\(\) == MS_MODE_WIFI && 
 assert app.index('reset_countdown();') < app.index('net_link_start('), 'the BOOT-held factory reset runs before the mode is chosen: it works in both modes'
 assert not re.search(r'\bnet_link_start\(', code('cable_client.c')), 'only app_main starts Wi-Fi mode'
 ui = code('ui/habitat/ui_habitat.c')
-assert set(re.findall(r'\bnet_link_\w+', ui)) == {'net_link_status_text'}, 'the UI reads one caption and nothing else of the link'
+# W16: the Link screen adds net_link_state (the state alone, no text of the network); nothing else of the link is reachable from the UI
+assert set(re.findall(r'\bnet_link_\w+', ui)) == {'net_link_status_text', 'net_link_state'}, 'the UI reads one caption, the state, and nothing else of the link'
+assert 'atomic_load(&s_state)' in body(code('net_link.c'), 'net_link_state'), 'net_link_state is the state and nothing else'
 
 net = code('net_link.c')
 start_fn = body(net, 'net_link_start')

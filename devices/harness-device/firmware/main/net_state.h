@@ -46,6 +46,9 @@ net_state_t net_state_next(net_state_t state, net_event_t event);
 const char *net_state_name(net_state_t state);      // for log lines: "joining", "auth_failed", ...
 // What the glass says under the wordmark, or NULL when there is nothing to say (OFF, UP). At most 24 characters.
 const char *net_state_caption(net_state_t state);
+// The one line of the Link screen (task W16): a line for every state, OFF and UP included; "" for a number out of range. It takes the state and
+// nothing else, so no network name, password or key can reach it.
+const char *net_state_line(net_state_t state);
 
 // ── reconnect timing ────────────────────────────────────────────────────────────────────────────────
 // Ordinary ladder 1, 2, 4, 8, 16, 30, 60 s (the last step repeats). A refused handshake waits longer, 30, 60, 120, 300 s: retrying a wrong

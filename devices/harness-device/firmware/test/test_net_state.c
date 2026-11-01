@@ -85,6 +85,19 @@ static void test_names_and_captions(void)
     CHECK(!strcmp(net_state_caption(NET_AUTH_FAILED), "Key refused: reset dial"));   // the USB recovery path comes back with W14
 }
 
+// The one line of the Link screen (W16): a line for EVERY state, OFF and UP included, with the names the tests and the logs use
+// (OFF, JOINING, NO_IP, DAEMON_UNREACHABLE, AUTH_FAILED, UP). No SSID, password or key can reach it: it takes the state and nothing else.
+static void test_link_screen_line(void)
+{
+    static const char *const lines[] = { "Wi-Fi: off", "Wi-Fi: joining", "Wi-Fi: no address", "Wi-Fi: daemon not reachable", "Wi-Fi: key refused", "Wi-Fi: connected" };
+    for (int s = 0; s < NET_STATE_COUNT; s++) {
+        const char *l = net_state_line((net_state_t)s);
+        CHECK(l && !strcmp(l, lines[s]));
+        CHECK(strlen(l) <= 28);   // 466 px of Inter 20 is more than 28 characters; the mono skin's 17-cell row would wrap, so it is wrapped in the UI
+    }
+    CHECK(net_state_line((net_state_t)99) && !strcmp(net_state_line((net_state_t)99), ""));
+}
+
 static void test_ladder(void)
 {
     static const uint32_t normal[] = { 1000, 2000, 4000, 8000, 16000, 30000, 60000 };
@@ -182,6 +195,7 @@ int main(void)
     test_refusal_count();
     test_table();
     test_names_and_captions();
+    test_link_screen_line();
     test_ladder();
     test_jitter();
     test_sequence();

@@ -22,6 +22,7 @@
 #include <stdbool.h>
 
 #include "cable_xport.h"
+#include "net_state.h"
 
 // True when Wi-Fi mode is on and has been started (net_init finished, net_link running). False means USB mode: nothing was started.
 bool net_link_start(void);
@@ -32,3 +33,6 @@ const cable_xport_t *net_link_xport(void);
 // What the glass says under the wordmark while the dial is not connected: a short line for the state (joining, no address, daemon not
 // reachable, key refused), or NULL (USB mode, or the link is up). Cheap; any task.
 const char *net_link_status_text(void);
+
+// The link state itself (net_state.h), for the Link screen. NET_OFF in USB mode. Cheap; any task.
+net_state_t net_link_state(void);

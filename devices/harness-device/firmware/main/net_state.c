@@ -103,3 +103,17 @@ net_event_t net_handshake_event(net_refusal_t *r, bool refused)
     if (r->refusals < NET_REFUSALS_TO_AUTH_FAILED) r->refusals++;   // saturates: a long run of refusals stays a refusal
     return r->refusals >= NET_REFUSALS_TO_AUTH_FAILED ? NET_EV_TLS_REFUSED : NET_EV_TLS_FAIL;
 }
+
+const char *net_state_line(net_state_t state)
+{
+    switch (state) {
+    case NET_OFF:                return "Wi-Fi: off";
+    case NET_JOINING:            return "Wi-Fi: joining";
+    case NET_NO_IP:              return "Wi-Fi: no address";
+    case NET_DAEMON_UNREACHABLE: return "Wi-Fi: daemon not reachable";
+    case NET_AUTH_FAILED:        return "Wi-Fi: key refused";
+    case NET_UP:                 return "Wi-Fi: connected";
+    case NET_STATE_COUNT:        break;
+    }
+    return "";
+}
