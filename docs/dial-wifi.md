@@ -43,6 +43,22 @@ While the dial has no link to this computer it shows the word "Harness". On Wi-F
 
 When the link is up the line goes away.
 
+## The Link screen on the dial
+
+Swipe up from the very bottom of the glass (start on the lowest part of the circle and drag up a thumb's width) to open the Link screen. It works on
+the "Harness" screen as well as on the agent face, so you can reach it even when the dial cannot find this computer. The same swipe, a sideways
+swipe or the arrow at the top closes it. It shows two rows when the dial has a Wi-Fi network:
+
+| Row | Tap | Meaning |
+|---|---|---|
+| Link: Wi-Fi, Link: USB only | Switch | Wi-Fi: the dial joins the network when the cable is unplugged. USB only: it never leaves USB. If the dial is on Wi-Fi when you pick USB only, it restarts into USB (it waits while you are in the middle of something). |
+| Keep Wi-Fi: on, Keep Wi-Fi: off | Switch | On: the dial stays on Wi-Fi even with the cable plugged in (the cable then only charges it). Off: plugging in the cable brings it back to USB. |
+
+Under the rows it shows one line of link state: Wi-Fi: off, joining, no address, daemon not reachable, key refused, or connected. A dial with no
+Wi-Fi network shows how to set one up instead of the rows.
+
+If you turned Keep Wi-Fi on and want USB back, open the Link screen and turn it off. The dial does not look at the cable while Keep Wi-Fi is on.
+
 ## Other commands
 
 | Command | What it does |

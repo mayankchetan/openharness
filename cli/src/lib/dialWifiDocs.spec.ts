@@ -12,6 +12,7 @@ const REPO = resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const NOTE = join(REPO, 'docs', 'dial-wifi.md')
 const SPEC = join(REPO, 'docs', 'specs', 'cable-wifi-link.md')
 const NET_STATE_C = join(REPO, 'devices', 'harness-device', 'firmware', 'main', 'net_state.c')
+const UI_HABITAT_C = join(REPO, 'devices', 'harness-device', 'firmware', 'main', 'ui', 'habitat', 'ui_habitat.c')
 
 const read = (path: string) => readFileSync(path, 'utf8').replace(/\r\n/g, '\n')
 
@@ -73,16 +74,32 @@ describe('docs for the dial on Wi-Fi (W16)', () => {
 
   it('the lines the note says the dial shows are the lines the firmware draws', () => {
     const source = read(NET_STATE_C)
-    const body = source.slice(source.indexOf('const char *net_state_caption'))
+    const body = source.slice(source.indexOf('const char *net_state_caption'), source.indexOf('const char *net_state_line'))
     const captions = [...body.matchAll(/return "([^"]+)";/g)].map((m) => m[1])
     expect(captions).toHaveLength(4)
     const note = read(NOTE)
     for (const caption of captions) expect(note, caption).toContain(`| ${caption} |`)
   })
 
-  it('names no network, password or key, and no stay_wl control', () => {
+  it('the Link screen rows and state lines in the note are the ones the firmware draws', () => {
+    const ui = read(UI_HABITAT_C)
+    const render = ui.slice(ui.indexOf('static void render_link('), ui.indexOf('WHAT THE APP ASKED FOR'))
+    const labels = [...render.matchAll(/"((?:Link|Keep Wi-Fi)[^"]*)"/g)].map((m) => m[1])
+    expect(labels.sort()).toEqual(['Keep Wi-Fi: off', 'Keep Wi-Fi: on', 'Link: USB only', 'Link: Wi-Fi'])
     const note = read(NOTE)
-    expect(note).not.toMatch(/stay_wl/i)
+    for (const label of labels) expect(note, label).toContain(label)
+    const state = read(NET_STATE_C)
+    const lines = [...state.slice(state.indexOf('const char *net_state_line')).matchAll(/return "(Wi-Fi: [^"]+)";/g)].map((m) => m[1])
+    expect(lines).toHaveLength(6)
+    const sentence = note.split('\n').find((line) => line.startsWith('Under the rows it shows one line of link state:'))
+    expect(sentence).toBeTruthy()
+    for (const line of lines) expect(sentence, line).toContain(line.replace(/^Wi-Fi: /, ''))
+  })
+
+  it('says how to leave Keep Wi-Fi, and names no internal flag, network, password or key', () => {
+    const note = read(NOTE)
+    expect(note).toMatch(/turn it off/i)
+    expect(note).not.toMatch(/stay_wl|wl_mode/i)
     expect(note).not.toMatch(/psk|passphrase/i)
   })
 })

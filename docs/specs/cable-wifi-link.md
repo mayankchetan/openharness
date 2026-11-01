@@ -314,7 +314,7 @@ if the decision is Wi-Fi, the link, the focus restored, the `mode_sw` task start
 (`last_words`: "mode switch"), seal the focus and the flap count in the RTC record, store `boot_usb`, restart. Three switches in a row, then none until 10
 minutes of uptime in one mode; none before 60 s of uptime.
 
-## 7. The settings report, the link-state text, the Settings screen and the CLI (task W16)
+## 7. The settings report, the link-state text, the Link screen and the CLI (task W16)
 
 Settings report. A dial may add `linkMode` to the `settings` object of `hello` and `settings.state`: the string `"usb"` or `"wifi"`, the link the
 dial chose for the time its cable is out (`wl_mode` 0 or 1). The daemon keeps it as `DeviceSettings.linkMode` for those two strings only. Any other
@@ -323,17 +323,26 @@ daemon drops it from a `settings.set` patch, and no firmware reports it yet. The
 the daemon (section 3).
 
 `stay_wl` is on no wire path. No message of this protocol and no CLI verb sets or reads it (`dialWifiHelp.spec.ts` checks the help and the usage
-text). It lives in the dial's NVS (section 6) and is written by nothing yet: the on-dial toggle that must be able to turn it off is not built (see
-"Open" below).
+text). It lives in the dial's NVS (section 6) and has one writer: the Keep Wi-Fi toggle on the dial's Link screen (below), which turns it off as well
+as on. That is deliberate: a dial in Wi-Fi with `stay_wl` on never looks at the cable, so the only way back to USB is the toggle on the dial.
 
 Link-state text. While the dial is not connected it shows the wordmark and, in Wi-Fi mode, one dim line under it from `net_state_caption`
 (`net_state.c`, task W11; drawn by `render_brand` in `ui_habitat.c`): `Joining Wi-Fi` (JOINING), `Wi-Fi: no address` (NO_IP), `Daemon not reachable`
 (DAEMON_UNREACHABLE), `Key refused: reset dial` (AUTH_FAILED). OFF and UP show nothing. The line never shows the network name, the password or the key.
 
 CLI. `harness dial wifi set|show|forget|rotate|on|off|firewall` was built in W9. W16 added only the sentence that the dial joins 2.4 GHz networks
-only (the help and the output of `set`). The user note is `docs/dial-wifi.md`.
+only (the help and the output of `set`). There is no `stay_wl` verb. The user note is `docs/dial-wifi.md`.
 
-Open (decision for the lead, found in W16). The Settings list ("controls") has no touch path in the current firmware: `A_SETTINGS` occurs only in
-the action enum, its `dispatch` case and the UI gallery, and `settings_item()` rows such as Nap and Machines are reached only through it (workbench
-`briefs/research/2026-10-28-dial-ui-map.md`, fact 3). A Link row and a `stay_wl` toggle added to that list could not be reached on the glass, and a
-`stay_wl` that has been switched on could not be switched off. Until a way to reach them is chosen, nothing writes `stay_wl`.
+The Link screen (user decisions 2026-10-31 and 2026-11-01). One screen on the dial (`LINK` in `ui_habitat.c`), two rows, shown only when the Wi-Fi
+settings are whole: `Link: Wi-Fi` or `Link: USB only` (tap flips `wl_mode`, `config_net_set_mode`) and `Keep Wi-Fi: on` or `off` (tap flips `stay_wl`).
+Under them a hint and one line of link state (`net_state_line`: `Wi-Fi: off`, `joining`, `no address`, `daemon not reachable`, `key refused`,
+`connected`). A dial with no Wi-Fi set up shows one sentence that says how to set it up. The screen opens with the EDGE SWIPE: a drag that starts
+in the bottom band of the glass (y >= 400) and goes 55 px or more up, more up than sideways. It works from the brand screen, so a dial that cannot
+reach its daemon can still be reached, and from the home face. The same stroke, a sideways swipe and the back arrow close it. A drag that starts in the
+band is not reported as a terminal scroll. The worker task (not the render or touch task) reads and writes NVS and then calls
+`mode_glue_settings_changed()`, so the running mode switch re-reads `wl_mode` and `stay_wl`.
+
+Picking USB while Wi-Fi runs. `wl_mode` unset while a wireless mode runs is the user's pick of USB: `ms_step` (`mode_switch.c`, test H12) reboots into
+USB through the same busy gate and glue sequence as an automatic switch (log reason, seal, `boot_usb` = USB, restart; a refused restart is undone). It
+needs no cable, no probe and no daemon; the dwell and the flap cap do not hold it, and it restarts the flap count. USB with no target still never leaves.
+Turning Keep Wi-Fi off on a dial in Wi-Fi with the cable in lets the probe run again, and the normal rule (5 s of welcomes) takes it to USB.
