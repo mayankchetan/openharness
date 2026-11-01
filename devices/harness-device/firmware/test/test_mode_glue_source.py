@@ -90,7 +90,7 @@ assert boot.index('mode_record_boot(') < boot.index('mg_boot('), 'the record is 
 assert 'mode_record_crash_boot(reset_class(esp_reset_reason()), &in.crashes)' in boot and boot.index('mode_record_crash_boot(') < boot.index('mg_boot(')
 assert 'in.crash_trip = mode_record_crash_boot(' in boot, 'the answer of the crash record is the decision input'
 assert 'mode_record_crash_seal(s_boot.crashes, s_boot.mode)' in boot and boot.index('mg_boot(') < boot.index('mode_record_crash_seal('), 'sealed with the decided mode'
-assert 'Wi-Fi mode crashed %u times; started in USB' in raw_glue
+assert 'Wireless mode crashed %u times; started in USB' in raw_glue and 'Wi-Fi mode crashed' not in raw_glue, 'the panic loop counts Wi-Fi and BLE runs alike: the message does not say Wi-Fi'
 assert 's_boot.crash_usb' in boot
 assert 'config_load_wl_effective()' in boot and 'config_load_stay_wl()' in boot and 'config_load_boot_usb()' in boot
 assert 'config_save_boot_usb(s_boot.boot_usb_new)' in boot and 's_boot.write_boot_usb' in boot, 'boot_usb is rewritten only when the plan says so'
@@ -117,7 +117,7 @@ assert re.search(r'if \(ops->restart && !ops->restart\(ops->ctx, out\.target\)\)
     'a refused restart: undo with the value NVS held before the store, then done = false'
 assert step.index('ops->load_boot_usb(') < step.index('ops->store_boot_usb('), 'W15e: the old boot_usb is read before it is overwritten'
 assert re.search(r'if \(g->refusals && w->now_ms < g->retry_at\) return;', step) and 'mg_retry_delay_ms(g->refusals)' in step, 'W15e: a refusal holds the next attempt back (behaviour: test_mode_glue.c)'
-assert 'g->ms.mode == MS_MODE_WIFI' in step and 'MS_CRASH_CLEAR_MS' in step and 'ops->clear_crashes(' in step, 'ten minutes up in Wi-Fi clear the crash count; USB time does not'
+assert 'ms_mode_is_wireless(g->ms.mode)' in step and 'MS_CRASH_CLEAR_MS' in step and 'ops->clear_crashes(' in step, 'ten minutes up in a wireless mode (Wi-Fi or BLE) clear the crash count; USB time does not'
 # a probe that did not install is tried again: a dial that cannot probe cannot come back to USB
 task = body(glue, 'mode_sw_task')
 assert 'PROBE_RETRY_MS' in task and 'usb_probe_running()' in task and 'usb_probe_start(' in task
@@ -176,9 +176,20 @@ task_src = body(glue, 'mode_sw_task')
 assert re.search(r'atomic_exchange\(&s_reload, false\) \|\| s_mg\.wl_pending\) mg_apply_settings\(&s_mg, config_load_wl_effective\(\), config_load_stay_wl\(\), now\)', task_src)
 assert 'mg_set_settings(' not in glue, 'the glue never applies a read of wl_mode without the confirmation'
 start_src = body(glue, 'mode_glue_start')
-assert 's_running == MS_MODE_WIFI ? MS_WL_WIFI : config_load_wl_effective()' in start_src and 'atomic_store(&s_reload, true)' in start_src
-# no BLE anywhere in the glue: no transport exists for it
-for name in ('mode_glue.c', 'mode_glue_core.c', 'app_main.c', 'usb_probe.c'):
+# B8a: a wireless mode that really started (Wi-Fi now, BLE once B4b starts it) is believed to be a target; USB asks NVS. The glue passes the mode through
+# instead of collapsing everything but Wi-Fi to USB.
+assert 'ms_mode_is_wireless(running) ? running : MS_MODE_USB' in start_src
+assert 'ms_mode_is_wireless(s_running) ? (uint8_t)s_running : config_load_wl_effective()' in start_src
+assert 'if (ms_mode_is_wireless(s_running)) atomic_store(&s_reload, true)' in start_src
+assert 's_running == MS_MODE_WIFI' not in start_src, 'no Wi-Fi-only test left in mode_glue_start'
+assert 'ms_mode_is_wireless' in code('mode_switch.h') and 'MS_MODE_BLE' in code('mode_switch.h')
+# Bluetooth is named by the pure core and the mode module only. Everything that would START it (app_main.c, B4b), read its transport (usb_probe.c) or store
+# its target (config_store.c, B6) still does not: until those land no dial can reach a Bluetooth boot, and a BLE boot result falls back to USB.
+core = code('mode_glue_core.c')
+assert 'MS_WL_BLE' in core and 'wl != MS_WL_BLE' in body(core, 'mg_boot'), 'the boot decision accepts the Bluetooth target'
+assert 'MS_MODE_WIFI' not in body(core, 'mg_boot') and 'MS_MODE_WIFI' not in body(core, 'mg_step'), 'no Wi-Fi-only test left in the boot or the step'
+assert 'MS_MODE_WIFI' not in body(core, 'mg_apply_settings') and 'MS_WL_WIFI ?' not in core, 'the settings path keeps either wireless target'
+for name in ('mode_glue.c', 'app_main.c', 'usb_probe.c'):
     assert 'MS_MODE_BLE' not in code(name) and 'MS_WL_BLE' not in code(name), f'{name} names Bluetooth'
 assert 'MS_WL_BLE' not in code('config_store.c') and 'MS_MODE_BLE' not in code('config_store.c')
 

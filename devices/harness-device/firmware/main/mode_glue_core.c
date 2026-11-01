@@ -11,11 +11,11 @@ void mg_boot(const mg_boot_in_t *in, mg_boot_out_t *out)
     out->boot_usb_new = true;
     if (!in) return;
 
-    // The target the mode switch sees is Wi-Fi or nothing. Bluetooth (2), and any number a corrupt byte or a later build could name, has no
-    // transport in this firmware: it must read as "no target", never as a mode that boots into a dead end. The NVS accessor already maps
-    // everything but a whole Wi-Fi configuration to 0; this keeps the glue safe whatever it is handed.
+    // The target the mode switch sees is Wi-Fi, Bluetooth or nothing. Any other number (a corrupt byte, a later build) has no transport in this
+    // firmware: it must read as "no target", never as a mode that boots into a dead end. The NVS accessor already maps everything but a whole
+    // configuration to 0 or a known mode; this keeps the glue safe whatever it is handed.
     uint8_t wl = in->wl_effective;
-    if (wl != MS_WL_WIFI && wl != MS_WL_UNSET) {
+    if (wl != MS_WL_WIFI && wl != MS_WL_BLE && wl != MS_WL_UNSET) {
         out->unsupported = true;
         wl = MS_WL_UNSET;
     }
@@ -29,16 +29,16 @@ void mg_boot(const mg_boot_in_t *in, mg_boot_out_t *out)
     };
     ms_boot_out_t r;
     ms_boot_decide(&b, &r);
-    out->mode = r.mode == MS_MODE_WIFI ? MS_MODE_WIFI : MS_MODE_USB;
+    out->mode = ms_mode_is_wireless(r.mode) ? r.mode : MS_MODE_USB;
     out->write_boot_usb = r.write_boot_usb;
     out->boot_usb_new = r.boot_usb_new;
     out->sof_ignored = r.sof_ignored;
     out->crashes = in->crashes;
 
-    // The panic loop: the third abnormal reset in a row that ended a Wi-Fi run (and every one after it) sends this boot to USB. It ranks above the
+    // The panic loop: the third abnormal reset in a row that ended a wireless run, Wi-Fi or BLE (and every one after it), sends this boot to USB. It ranks above the
     // table (stay_wl, a stale boot_usb) and below nothing; it leaves the flap count alone, and it keeps boot_usb honest (boot_usb follows the
     // boot choice) so the boot after it reads the table as usual. It speaks only when it changed the answer.
-    if (in->crash_trip && out->mode == MS_MODE_WIFI) {
+    if (in->crash_trip && ms_mode_is_wireless(out->mode)) {
         out->crash_usb = true;
         out->mode = MS_MODE_USB;
         out->boot_usb_new = true;
@@ -53,19 +53,23 @@ void mg_boot(const mg_boot_in_t *in, mg_boot_out_t *out)
 }
 
 // ── running ─────────────────────────────────────────────────────────────────────────────────────────
+// The wireless targets the glue knows; the same two numbers ms_boot_decide() accepts. Anything else is "no target".
+static uint8_t wl_known(uint8_t wl) { return wl == MS_WL_WIFI || wl == MS_WL_BLE ? wl : (uint8_t)MS_WL_UNSET; }
+_Static_assert(MS_WL_WIFI == (uint8_t)MS_MODE_WIFI && MS_WL_BLE == (uint8_t)MS_MODE_BLE, "the stored wl_mode byte is also the target mode (mode_switch.h)");
+
 void mg_init(mg_t *g, ms_mode_t running, uint8_t flaps, uint8_t wl_effective, bool stay_wl)
 {
     if (!g) return;
     memset(g, 0, sizeof *g);
     ms_init(&g->ms, running, flaps);
-    g->wl_effective = wl_effective == MS_WL_WIFI ? MS_WL_WIFI : MS_WL_UNSET;
+    g->wl_effective = wl_known(wl_effective);
     g->stay_wl = stay_wl;
 }
 
 void mg_set_settings(mg_t *g, uint8_t wl_effective, bool stay_wl)
 {
     if (!g) return;
-    g->wl_effective = wl_effective == MS_WL_WIFI ? MS_WL_WIFI : MS_WL_UNSET;
+    g->wl_effective = wl_known(wl_effective);
     g->stay_wl = stay_wl;
 }
 
@@ -107,8 +111,8 @@ void mg_step(mg_t *g, const mg_world_t *w, const mg_ops_t *ops)
         if (ops->probe) ops->probe(ops->ctx, out.probe_wanted);
     }
     if (out.flaps_cleared && ops->clear_flaps) ops->clear_flaps(ops->ctx);
-    // 10 minutes up in Wi-Fi mode: it works, and the crashes before it were not "in a row" with the next one. USB time does not count.
-    if (g->crashes && g->ms.mode == MS_MODE_WIFI && w->now_ms >= MS_CRASH_CLEAR_MS) {
+    // 10 minutes up in a wireless mode: it works, and the crashes before it were not "in a row" with the next one. USB time does not count.
+    if (g->crashes && ms_mode_is_wireless(g->ms.mode) && w->now_ms >= MS_CRASH_CLEAR_MS) {
         g->crashes = 0;
         if (ops->clear_crashes) ops->clear_crashes(ops->ctx);
     }
@@ -167,9 +171,9 @@ mg_restart_t mg_restart_try(const mg_gate_ops_t *g)
 void mg_apply_settings(mg_t *g, uint8_t wl_effective, bool stay_wl, uint64_t now_ms)
 {
     if (!g) return;
-    const uint8_t wl = wl_effective == MS_WL_WIFI ? MS_WL_WIFI : MS_WL_UNSET;
+    const uint8_t wl = wl_known(wl_effective);
     g->stay_wl = stay_wl;
-    if (wl == MS_WL_UNSET && g->wl_effective == MS_WL_WIFI) {
+    if (wl == MS_WL_UNSET && g->wl_effective != MS_WL_UNSET) {
         if (!g->wl_pending) {            // seen once: wait for the second read
             g->wl_pending = true;
             g->wl_pending_at = now_ms;
@@ -180,6 +184,6 @@ void mg_apply_settings(mg_t *g, uint8_t wl_effective, bool stay_wl, uint64_t now
         g->wl_effective = MS_WL_UNSET;
         return;
     }
-    g->wl_pending = false;               // Wi-Fi again, or no target both before and after: nothing is waiting
+    g->wl_pending = false;               // a wireless target again (either one), or no target both before and after: nothing is waiting
     g->wl_effective = wl;
 }

@@ -19,7 +19,8 @@
 
 // Decide which mode this boot starts in. Once, after config_store_init and after the factory-reset countdown (which can wipe the values it reads).
 // Reads the RTC record (trusted only after a software reset), waits until MS_SOF_SETTLE_MS of uptime if it has to, reads the SOF flag once, runs
-// ms_boot_decide, and stores boot_usb when the choice changes it. Returns MS_MODE_USB or MS_MODE_WIFI, never BLE.
+// ms_boot_decide, and stores boot_usb when the choice changes it. Returns MS_MODE_USB, MS_MODE_WIFI or (B8a) MS_MODE_BLE. A caller that cannot start
+// the wireless mode it was given runs USB in that boot and says so to mode_glue_start(); app_main starts only Wi-Fi until the BLE link exists (B4b).
 ms_mode_t mode_glue_boot(void);
 
 // Put the carousel back on the agent the dial showed before an automatic switch (ui_focus_project; an agent that is not on the carousel yet is
