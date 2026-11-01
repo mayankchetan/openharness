@@ -1323,6 +1323,16 @@ export class CableSession {
           this.link = null
           return
         }
+        // THE USB PROBE OF A WIRELESS DIAL (task W15; design MS section 2). While a cable is in, a dial that runs on Wi-Fi says hello every 2 s with
+        // `probe: 1` and looks for one thing: a `welcome`, which proves a daemon reads and writes this port. The whole answer is that welcome.
+        // Nothing here is a greeting: no capability is read, no dial is attached or reported, no roster, machine list, pets or firmware offer is
+        // pushed, and `greetedMac` stays as it was, so the syncs in the tick stay quiet and the real hello of a dial that then reboots into USB
+        // mode is greeted in full. Only the number 1 counts (a stray `true` or "1" is an ordinary hello). The welcome is minimal on purpose: the
+        // dial's probe reads one frame of at most 1 KB, and a welcome too big for it would be a dial that never comes back from Wi-Fi to USB.
+        if (msg.probe === 1) {
+          await this.send({ t: 'welcome', proto: CABLE_PROTO_VERSION, app: this.host.appName(), probe: 1 })
+          return
+        }
         // Named before the welcome, which advertises the library only to a device that asked for it.
         this.swarmMembers = str('swarms') === 'members-v1'
         this.longRecap = str('recap') === 'long-v1'

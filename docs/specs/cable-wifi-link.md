@@ -281,3 +281,19 @@ the daemon's is always 5 s later than the dial's. The dial answers every ping wi
 Configuration. The daemon reads `CABLE_KEEPALIVE_MS` (`cli/src/config/env.ts`); 0 or unset (the default) is off and the welcome has no field.
 Nothing in the repository sets it: the battery plan decides the value. The dial applies the field in `session_up` (every welcome) and goes
 back to 5000 when the session ends.
+
+## 5. The USB probe of a wireless dial (task W15)
+
+A dial that runs on Wi-Fi watches the USB port. While a host sends start-of-frame packets it installs a small USB driver and says
+`{"t":"hello","product":"harness","proto":N,"probe":1}` every 2 s. It looks for exactly one answer: a JSON frame whose top-level `t` is
+`"welcome"`. Nothing else is read; every other frame is dropped.
+
+The daemon answers a hello whose `probe` is the number 1 (not `true`, not `"1"`) with `{"t":"welcome","proto":N,"app":"...","probe":1}` and
+nothing more. That hello is not a greeting: no capability is read, no dial is attached or reported, no agent list, machine list, pet or
+firmware offer is sent, and the state the daemon keeps for a greeted dial is not touched. The dial that then reboots into USB mode sends a
+normal hello and is greeted in full. A daemon older than this change ignores the field and answers with its full welcome and pushes; the
+probe still finds the welcome, and drops the rest.
+
+The probe's decoder holds one frame of at most 1,024 bytes. A frame over that is noise to it, so the daemon's probe welcome is kept
+under 256 bytes whatever the machine is called (`cableSession.probe.spec.ts`). The rule that turns welcomes into a switch to USB (5 s of
+fresh welcomes, none older than 3 s) is `firmware/main/mode_switch.c`.
