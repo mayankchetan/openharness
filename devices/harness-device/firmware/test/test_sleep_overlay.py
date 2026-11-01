@@ -58,8 +58,8 @@ block = re.search(r'if\(DEVICE_BATTERY_SLEEP\)\n    if\(NOT CONFIG_PM_ENABLE.*?\
 assert block, 'DEVICE_BATTERY_SLEEP block'
 assert 'FATAL_ERROR' in block[0] and 'sdkconfig.defaults.sleep' in block[0]
 assert 'DEVICE_BATTERY_SLEEP=1' in block[0]
-assert re.search(r'target_sources\(\$\{COMPONENT_LIB\} PRIVATE "power_policy\.c" "power_sleep\.c"\)', block[0])
-for src in ('power_policy.c', 'power_sleep.c'):
+assert re.search(r'target_sources\(\$\{COMPONENT_LIB\} PRIVATE "power_policy\.c" "power_sleep\.c" "usb_bounce\.c" "sleep_wdt\.c"\)', block[0])
+for src in ('power_policy.c', 'power_sleep.c', 'usb_bounce.c', 'sleep_wdt.c'):
     assert cmake.count(f'"{src}"') == 1, f'{src} must be listed once, inside the flag block only'
 assert re.search(r'if\(DEVICE_BATTERY_SLEEP\)\n    list\(APPEND BOARD_PRIV_REQUIRES esp_pm\)', cmake)
 assert 'PRIV_REQUIRES ${BOARD_PRIV_REQUIRES}' in cmake

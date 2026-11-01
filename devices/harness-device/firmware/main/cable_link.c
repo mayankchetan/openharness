@@ -118,6 +118,7 @@ static EXT_RAM_BSS_ATTR uint8_t s_tx_frame[CABLE_MAX_FRAME];
 // the previous function valid for their whole lifetime; never clear it to NULL.
 static _Atomic(vprintf_like_t) s_prev_vprintf = vprintf;
 static atomic_bool s_log_framing;
+static atomic_bool s_hook_installed;   // installed once, never taken off: see cable_link_set_log_framing()
 static atomic_uint s_dropped_logs;
 
 static bool send_locked(uint8_t type, const uint8_t *payload, size_t payload_len, int wait_ms)
@@ -127,12 +128,37 @@ static bool send_locked(uint8_t type, const uint8_t *payload, size_t payload_len
     return s_xport->write(s_xport, s_tx_frame, (size_t)len, wait_ms) == len;
 }
 
+// The hook with framing off (before the first session and after every session): the line still goes into the RTC ring, so a hang or a reset after the
+// cable or the link went away has last words (the ring was blind here; 2026-11-01 sleep watchdog hang). A short buffer of its own and a try-lock:
+// a task that finds it busy skips the ring for that one line and never waits; nothing is allocated, no mutex is taken, so any task may log.
+#define UNFRAMED_LINE_MAX 160
+static atomic_flag s_unframed_busy = ATOMIC_FLAG_INIT;
+
+static void note_unframed(const char *fmt, va_list args)
+{
+    static char line[UNFRAMED_LINE_MAX];   // guarded by s_unframed_busy
+    if (atomic_flag_test_and_set(&s_unframed_busy)) return;
+    va_list copy;
+    va_copy(copy, args);   // the console still needs the original list
+    const int n = vsnprintf(line, sizeof line, fmt, copy);
+    va_end(copy);
+    if (n > 0) {
+        size_t len = (size_t)n < sizeof line - 1 ? (size_t)n : sizeof line - 1;
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) len--;
+        if (len > 0) last_words_add(line, len);
+    }
+    atomic_flag_clear(&s_unframed_busy);
+}
+
 static int log_vprintf(const char *fmt, va_list args)
 {
     // ESP_EARLY_LOG/panic output bypasses this hook. Ordinary logs from an ISR
     // cannot take a mutex or safely fall back to the libc console.
     if (xPortInIsrContext()) return 0;
-    if (!atomic_load(&s_log_framing)) return atomic_load(&s_prev_vprintf)(fmt, args);
+    if (!atomic_load(&s_log_framing)) {
+        note_unframed(fmt, args);
+        return atomic_load(&s_prev_vprintf)(fmt, args);
+    }
 
     // USB formats and writes under the tx lock. A radio link formats under s_fmt_lock and only queues the line (s_log_ring): no socket, no lwIP,
     // no mbedTLS is reachable from this function in that mode, whatever task it runs in.
@@ -168,16 +194,15 @@ void cable_link_set_log_framing(bool on)
     if (!s_running) return;
     if (on) {
         if (!atomic_load(&s_log_framing)) {
-            atomic_store(&s_prev_vprintf, esp_log_set_vprintf(log_vprintf));
+            if (!atomic_exchange(&s_hook_installed, true)) atomic_store(&s_prev_vprintf, esp_log_set_vprintf(log_vprintf));
             atomic_store(&s_log_framing, true);
         }
         return;
     }
-    // Restore the plain console FIRST, then say so — so the line explaining what happened is written the
-    // way whoever is now watching the port with a serial monitor can read it.
-    if (atomic_exchange(&s_log_framing, false)) {
-        esp_log_set_vprintf(atomic_load(&s_prev_vprintf));
-    }
+    // Plain console again FIRST, then say so — so the line explaining what happened is written the way whoever is now watching the port with a
+    // serial monitor can read it. The hook stays installed (it is the only place the RTC ring is fed): with framing off it hands every line to the
+    // previous hook unchanged, after copying it into the ring (note_unframed).
+    atomic_store(&s_log_framing, false);
 }
 
 // ── link ────────────────────────────────────────────────────────────────────────────────────────────

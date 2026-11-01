@@ -274,7 +274,7 @@ if(DEVICE_BATTERY_SLEEP)
                 "-DSDKCONFIG_DEFAULTS=\"sdkconfig.defaults;sdkconfig.defaults.esp32s3;sdkconfig.defaults.sleep\" (and a fresh sdkconfig)")
     endif()
     target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_BATTERY_SLEEP=1)
-    target_sources(${COMPONENT_LIB} PRIVATE "power_policy.c" "power_sleep.c")
+    target_sources(${COMPONENT_LIB} PRIVATE "power_policy.c" "power_sleep.c" "usb_bounce.c" "sleep_wdt.c")
 endif()
 
 # PMIC power-off (power_off.c, store_gate.c): -DDEVICE_BATTERY_POWEROFF=1, default OFF, needs DEVICE_BATTERY_SLEEP=1. From S2 (battery, screen off) the dial

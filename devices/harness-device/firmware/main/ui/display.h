@@ -26,6 +26,8 @@ void display_unlock(void);
 // Stop (run = false) or start (true) the render stall guard, a 1 s periodic timer that would cap every light sleep at one second.
 // Called by the sleep policy on the render task only, when the chip may sleep and when the screen comes back.
 void display_render_guard(bool run);
+// The render task's current stage (display_habitat.c RENDER_*), for the sleep breadcrumb the ptt task writes every wake (last_words.h).
+unsigned display_render_stage(void);
 // A second power hook beside display_set_power_cb(), for the sleep policy: cb(true) is called FIRST on every wake, from whichever
 // task woke the screen (touch, ptt, render), cb(false) on every sleep. It must be quick and must not take display_lock.
 void display_set_sleep_cb(void (*cb)(bool on));

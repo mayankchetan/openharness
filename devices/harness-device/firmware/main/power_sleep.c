@@ -33,6 +33,9 @@
 #include "ui/display.h"
 #include "ui/habitat/runtime.h"
 #include "ui/touch.h"
+#include "last_words.h"
+#include "sleep_wdt.h"
+#include "usb_bounce.h"
 #include <stdatomic.h>
 #ifdef DEVICE_BATTERY_POWEROFF
 #include "power_off.h"
@@ -64,6 +67,10 @@ static esp_err_t IRAM_ATTR on_light_sleep_exit(int64_t slept_us, void *arg)
 }
 #endif
 
+// The RTC watchdog while the chip may sleep (sleep_wdt.h): 60 s, fed by every ptt wake (every 250 ms in S2). The task watchdog counts awake time
+// only (the 2026-11-01 hang on dial :50 was found after 62 h), and a chip that never wakes from a light sleep trips nothing else.
+#define SLEEP_WDT_MS 60000u
+
 // 1: the S0 to S1 step also turns automatic light sleep on (CPU and cache retention RAM, about 13.4 KB, allocated once for the whole
 // battery session and freed when external power returns); 0: frequency scaling only. If the RAM is not there the dial stays on 1.
 #define POWER_SLEEP_LIGHT 1
@@ -71,6 +78,7 @@ static esp_err_t IRAM_ATTR on_light_sleep_exit(int64_t slept_us, void *arg)
 static esp_pm_lock_handle_t s_awake;   // ESP_PM_NO_LIGHT_SLEEP: held in S0 and S1, released in S2
 static atomic_bool s_lock_held;        // who owns the lock right now: flipped by exchange, so one acquire pairs with one release
 static atomic_bool s_relaxed;          // the pollers run at their S2 rates (set when S2 is entered, cleared the moment it is left)
+static atomic_bool s_wdt_armed;        // the RTC watchdog is armed (S2 entered, not yet left): the ptt task feeds it on every wake
 static atomic_bool s_in_s2;            // S2 is applied (render task) or being applied: the screen hook takes the lock back while this is set
 static atomic_int  s_want;             // the policy's state (pp_state_t), written by the ptt task
 static atomic_uint s_link_holds;       // PP_HOLD_LINK and friends, set by transports through power_sleep_hold()
@@ -83,6 +91,7 @@ static pp_state_t  s_applied;          // what the render task has applied
 static bool        s_pm_battery;       // power management is configured for battery (frequency scaling, maybe light sleep)
 static bool        s_audio_idle;       // the I2S channels are stopped (audio_capture_idle)
 static bool        s_s2_live;          // the S2 steps that let the chip sleep are done: touch wake armed, pollers relaxed, lock released
+static uint32_t    s_bounced_sleeps;   // s_slept_count at the last D+ bounce: the chip has not slept since then when the two are equal
 static int         s_last_status0 = -1, s_last_status1 = -1;   // the raw AXP2101 bytes of the last fresh read (-1: it failed), for the log
 #if PP_TOUCH_WAKE_ON_BATTERY
 static bool        s_touch_warned;     // "touch wake not armed" is logged once per boot, not once per retry
@@ -222,6 +231,12 @@ void power_sleep_poll(void)
         .screen_asleep = display_is_asleep(),
         .holds = holds_now(),
     };
+    if (atomic_load(&s_wdt_armed)) sleep_wdt_feed();
+    {   // the breadcrumb: where everything was at this wake, for the report after a hang (last_words.h)
+        const last_words_crumb_t crumb = {.tick_ms = in.now_ms, .sleeps = s_slept_count, .holds = in.holds, .want = (uint8_t)atomic_load(&s_want),
+                                          .applied = (uint8_t)s_applied, .in_s2 = (uint8_t)atomic_load(&s_in_s2), .stage = (uint8_t)display_render_stage()};
+        last_words_crumb(&crumb);
+    }
     int status1 = -1;
     if (pp_wants_read(&s_pp, &in)) {
         // One fresh read of REG 0x00 (VBUS good, battery present) and REG 0x01 (battery current direction), on this task's own I2C
@@ -303,6 +318,18 @@ static void leave_battery(void)
     s_pm_battery = false;
 }
 
+// External power is back and the chip has light-slept since the last bounce (or since boot): the USB block may be dead to a host that was plugged
+// in meanwhile, so drop the D+ pull-up for 100 ms and let the host enumerate afresh (usb_bounce.h). Needs the PMIC's own word that VBUS is good in
+// the last fresh read: a host with no VBUS is not there. Called on the render task, after the clocks are back at 240 MHz.
+static void usb_bounce_after_sleep(void)
+{
+    if (s_slept_count == s_bounced_sleeps) return;
+    if (s_last_status0 < 0 || !(s_last_status0 & PP_PMU_VBUS_GOOD)) return;
+    s_bounced_sleeps = s_slept_count;
+    ESP_LOGI(TAG, "external power back after %u light sleeps: D+ bounce", (unsigned)(s_slept_count));
+    usb_dp_bounce();
+}
+
 // Let the chip sleep: relax the pollers, release the awake lock. With PP_TOUCH_WAKE_ON_BATTERY (off under D1, "PWR only") the touch
 // wake is armed first, and the function returns false, with the lock kept and the pollers as they were, if that cannot be done (no
 // pin lock, the touch controller is not up): without a wake source the dial could not be woken by a touch, so it behaves as in S1
@@ -334,6 +361,8 @@ static void enter_s2(void)
     atomic_store(&s_in_s2, true);                // from here the screen hook takes the lock back on a wake
     s_audio_idle = audio_capture_idle(true);     // the I2S clocks stop; refused (and retried) while a beep plays
     display_render_guard(false);                 // the 1 s stall-guard timer would cap every sleep at one second
+    sleep_wdt_arm(SLEEP_WDT_MS);                 // before the lock goes: from here a chip that does not wake is reset within a minute
+    atomic_store(&s_wdt_armed, true);
     s_s2_live = s2_go_live();
 }
 
@@ -348,6 +377,7 @@ static void exit_s2(void)
     if (s_audio_idle) audio_capture_idle(false);
     s_audio_idle = false;
     display_render_guard(true);
+    if (atomic_exchange(&s_wdt_armed, false)) sleep_wdt_disarm();   // after the lock is back: the chip is awake again
     atomic_store(&s_in_s2, false);
 }
 
@@ -362,6 +392,7 @@ void power_sleep_render_service(void)
     }
     if (want == PP_S0 && have != PP_S0) {
         leave_battery();
+        usb_bounce_after_sleep();
         have = PP_S0;
     } else if (want != PP_S0 && have == PP_S0) {
         enter_battery();

@@ -114,6 +114,8 @@ typedef int gpio_num_t;
 esp_err_t gpio_sleep_sel_dis(gpio_num_t g);
 ''',
 'driver/usb_serial_jtag.h': '#pragma once\n#include "../fake_idf.h"\nbool usb_serial_jtag_is_connected(void);\n',
+'usb_bounce.h': '#pragma once\nvoid usb_dp_bounce(void);\n',
+'sleep_wdt.h': '#pragma once\n#include <stdint.h>\nvoid sleep_wdt_arm(uint32_t ms);\nvoid sleep_wdt_feed(void);\nvoid sleep_wdt_disarm(void);\n',
 'board/board.h': '''
 #pragma once
 #include "../fake_idf.h"
@@ -133,6 +135,7 @@ const board_t *board(void);
 bool display_is_asleep(void);
 void display_set_sleep_cb(void (*cb)(bool on));
 void display_render_guard(bool run);
+unsigned display_render_stage(void);
 ''',
 'ui/habitat/runtime.h': '#pragma once\nvoid habitat_render_notify(void);\n',
 'ui/touch.h': '''
@@ -153,6 +156,7 @@ HARNESS = r'''
 #include "driver/gpio.h"
 #include "board/board.h"
 #include "cable_link.h"
+#include "last_words.h"
 #include <assert.h>
 
 char g_events[8192];
@@ -175,6 +179,15 @@ static int pmu0 = 0x08;               // REG 0x00 the PMIC would answer: bit 5 V
 static bool usb_host, asleep, voice, session, audio_idle_ok = true, audio_stopped;
 static void (*sleep_cb)(bool);
 static esp_pm_light_sleep_cb_t exit_cb;
+static int wdt_arms, wdt_feeds, wdt_disarms; static uint32_t wdt_armed_ms;   // the RTC watchdog (sleep_wdt.h)
+void sleep_wdt_arm(uint32_t ms) { wdt_arms++; wdt_armed_ms = ms; ev("WDT+"); }
+void sleep_wdt_feed(void) { wdt_feeds++; }
+void sleep_wdt_disarm(void) { wdt_disarms++; ev("WDT-"); }
+static last_words_crumb_t last_crumb; static int crumbs; static unsigned fake_stage = 3;                       // the breadcrumb (last_words.h) and the render stage
+void last_words_crumb(const last_words_crumb_t *c) { last_crumb = *c; crumbs++; }
+unsigned display_render_stage(void) { return fake_stage; }
+static int bounces;                   // usb_dp_bounce(): the D+ pull-up was dropped and restored
+void usb_dp_bounce(void) { bounces++; ev("BOUNCE"); }
 static int notifies, guard_stops, guard_starts, audio_idles, audio_resumes, touch_arms, touch_disarms;
 static bool arm_fails, touch_armed;   // the touch wake cannot be armed (no pin lock, controller not ready) / is armed now (PP_TOUCH_WAKE_ON_BATTERY=1 only)
 
@@ -260,7 +273,7 @@ static void reset_world(void) {
     configure_calls = configure_battery = configure_usb = 0; pads_kept = 0; pmic_reads = 0;
     cache_chg = -1; usb_host = asleep = voice = session = false; transport = CABLE_XPORT_USB; audio_stopped = false; audio_idle_ok = true; pmu0 = 0x08; g_logs[0] = 0;
     guard_stops = guard_starts = audio_idles = audio_resumes = touch_arms = touch_disarms = 0; pmic_state = 0; retention_result = ESP_OK;
-    release_wakes_screen = false; release_plugs_usb = false; arm_fails = false; touch_armed = false; touch_pokes = 0;
+    wdt_arms = wdt_feeds = wdt_disarms = 0; crumbs = 0; fake_stage = 3; bounces = 0; release_wakes_screen = false; release_plugs_usb = false; arm_fails = false; touch_armed = false; touch_pokes = 0;
     off_calls = off_first_reason = off_last_reason = 0; off_last_force = false; off_accept = true;
     clear_events();
 }
@@ -565,6 +578,97 @@ static void scenario_wifi_holds(void) {
     power_sleep_release(PP_HOLD_LINK);
 }
 
+static void scenario_usb_bounce(void) {
+    // ---------- the D+ bounce when external power returns after the chip has slept (the host may not re-enumerate otherwise) ----------
+    reset_world();
+    power_sleep_init();
+    unplug(); tick(4000);
+    screen(false); tick(4000);
+    assert(power_sleep_relaxed());
+    assert(exit_cb(5000, NULL) == ESP_OK && exit_cb(5000, NULL) == ESP_OK);          // the chip really slept (the exit callback counts it)
+    clear_events();
+    plug_in();
+    for (int waited = 0; !strcmp(power_sleep_state_name(), "S2") && waited < 4000; waited += 100) tick(100);
+    tick(300);
+    assert(!strcmp(power_sleep_state_name(), "S0") && bounces == 1);
+    assert(in_order("PM240", "BOUNCE"));                                              // the clocks are back to 240 first, then the pull-up is dropped and restored
+    tick(5000);
+    assert(bounces == 1);                                                              // once per plug-in, not once per poll
+    // a spell on the battery in which the chip never slept (S1 only, or S2 without a sleep) is not followed by a bounce
+    unplug(); tick(14000 + 4000);
+    screen(false); tick(4000);
+    assert(!strcmp(power_sleep_state_name(), "S2"));
+    plug_in(); tick(4000);
+    assert(!strcmp(power_sleep_state_name(), "S0") && bounces == 1);
+    // the next spell with sleeps in it gets its own bounce
+    unplug(); tick(14000 + 4000);
+    screen(false); tick(4000);
+    exit_cb(8000, NULL);
+    plug_in(); tick(4000);
+    assert(!strcmp(power_sleep_state_name(), "S0") && bounces == 2);
+    // a host that shows up when the PMIC did not say VBUS is good (no external power in the last read): nothing to enumerate, no bounce
+    unplug(); tick(14000 + 4000);
+    screen(false); tick(4000);
+    exit_cb(8000, NULL);
+    usb_host = true; tick(1000);
+    assert(!strcmp(power_sleep_state_name(), "S0") && bounces == 2);
+    // a charger with no battery-side change (VBUS good, direction discharge) still counts as external power: bounce
+    usb_host = false; tick(14000 + 4000);
+    unplug(); tick(4000);
+    screen(false); tick(4000);
+    exit_cb(8000, NULL);
+    pmic_state = 2; cache_chg = 2; pmu0 = 0x28; tick(4000);
+    assert(!strcmp(power_sleep_state_name(), "S0") && bounces == 3);
+}
+
+static void scenario_watchdog(void) {
+    // ---------- the RTC watchdog in S2, and the breadcrumb every ptt wake (the 2026-11-01 hang on dial :50) ----------
+    reset_world();
+    power_sleep_init();
+    assert(wdt_arms == 0 && crumbs == 0);
+    tick(100);
+    assert(crumbs == 1 && last_crumb.want == PP_S0 && last_crumb.applied == PP_S0 && last_crumb.in_s2 == 0 && last_crumb.tick_ms == 100);
+    unplug(); tick(4000);
+    screen(false); tick(2800);
+    assert(wdt_arms == 0 && wdt_feeds == 0 && last_crumb.want == PP_S1 && last_crumb.applied == PP_S1);        // S1 does not arm it
+    fake_stage = 4;
+    clear_events();
+    tick(500);
+    assert(!strcmp(power_sleep_state_name(), "S2"));
+    assert(wdt_arms == 1 && wdt_armed_ms == 60000 && wdt_disarms == 0);                                       // 60 s, armed once
+    assert(in_order("WDT+", "LOCK-"));                                                                         // armed before the chip may sleep
+    int fed = wdt_feeds;
+    tick(1000);
+    assert(wdt_feeds - fed == 10);                                                                             // fed by every ptt wake in S2
+    assert(last_crumb.want == PP_S2 && last_crumb.applied == PP_S2 && last_crumb.in_s2 == 1 && last_crumb.stage == 4);
+    exit_cb(5000, NULL); exit_cb(5000, NULL);
+    voice = true; tick(100);                                                                                   // a hold at the next wake
+    assert(last_crumb.holds == PP_HOLD_VOICE && last_crumb.sleeps == 2);
+    tick(500);
+    assert(!strcmp(power_sleep_state_name(), "S1") && wdt_disarms == 1 && in_order("LOCK+", "WDT-"));         // back in S1: disarmed after the lock is taken back
+    fed = wdt_feeds; tick(1000);
+    assert(wdt_feeds == fed && wdt_arms == 1);                                                                 // not fed when not armed
+    voice = false; tick(3500);
+    assert(!strcmp(power_sleep_state_name(), "S2") && wdt_arms == 2);                                          // S2 again: armed again
+    // a screen wake disarms it too
+    screen(true); tick(300);
+    assert(wdt_disarms == 2 && the_lock.count == 1);
+    // external power while asleep disarms it (S2 straight to S0)
+    screen(false); tick(4000);
+    assert(!strcmp(power_sleep_state_name(), "S2") && wdt_arms == 3);
+    plug_in(); tick(4000);
+    assert(!strcmp(power_sleep_state_name(), "S0") && wdt_disarms == 3);
+    fed = wdt_feeds; tick(1000);
+    assert(wdt_feeds == fed && last_crumb.want == PP_S0 && last_crumb.in_s2 == 0);
+    // a hold in S2 that keeps the lock (the S2 steps are applied, the chip is not free to sleep) still feeds it: it stays armed until S2 is left
+    unplug(); tick(14000 + 4000);
+    screen(false); tick(4000);
+    int arms = wdt_arms, disarms = wdt_disarms;
+    power_sleep_hold(PP_HOLD_LINK);
+    fed = wdt_feeds; tick(300);
+    assert(wdt_feeds > fed && wdt_arms == arms && wdt_disarms == disarms + 1);                                 // the policy left S2 within a poll: disarmed once, no double arm
+}
+
 static void scenario_audio_retry(void) {
     // ---------- an audio stop that was refused (a beep) is retried ----------
     reset_world();
@@ -747,6 +851,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "host")) scenario_usb_host();
     else if (!strcmp(argv[1], "holds")) scenario_holds();
     else if (!strcmp(argv[1], "wifi_holds")) scenario_wifi_holds();
+    else if (!strcmp(argv[1], "usb_bounce")) scenario_usb_bounce();
+    else if (!strcmp(argv[1], "watchdog")) scenario_watchdog();
     else if (!strcmp(argv[1], "audio")) scenario_audio_retry();
     else if (!strcmp(argv[1], "input")) scenario_input_gate();
     else if (!strcmp(argv[1], "stats")) scenario_stats();
@@ -786,7 +892,7 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
                         '-I', str(main), str(folder / 'harness.c'), str(folder / 'power_sleep.c'), str(folder / 'power_policy.c'),
                         '-o', str(folder / exe)], check=True)
     build('glue')
-    scenarios = ('boot', 'cycles', 'noret', 'race', 'policy', 'facts', 'boards', 'host', 'holds', 'wifi_holds', 'audio', 'input', 'stats')
+    scenarios = ('boot', 'cycles', 'noret', 'race', 'policy', 'facts', 'boards', 'host', 'holds', 'wifi_holds', 'usb_bounce', 'watchdog', 'audio', 'input', 'stats')
     for name in scenarios:
         subprocess.run([str(folder / 'glue'), name], check=True)
     # the arming code D1 turns off still has to work for a later mode: build it in and run its two scenarios
@@ -798,5 +904,5 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
     for name in ('off_s2_timeout_0', 'off_s2_timeout_1', 'off_low_battery_0', 'off_low_battery_1', 'off_low_battery_2', 'off_drain_0', 'off_drain_1', 'off_never_on_external_power_0', 'off_never_on_external_power_1', 'off_never_on_external_power_2', 'off_never_on_external_power_3'):
         subprocess.run([str(folder / 'glue_off'), name], check=True)
     print('power sleep glue: ' + ', '.join(scenarios) + ' PASS (boot order, unplug, S2 entry and wake order without a touch wake, plug-in, 200 cycles balanced, '
-          'no retention RAM, PWR wake during entry, other boards, host, holds, Wi-Fi session and link holds, audio retry, D1 input gate, sleep statistics); '
+          'no retention RAM, PWR wake during entry, other boards, host, holds, Wi-Fi session and link holds, the D+ bounce after a sleep, the RTC watchdog and the breadcrumb in S2, audio retry, D1 input gate, sleep statistics); '
           'noarm, lost PASS with PP_TOUCH_WAKE_ON_BATTERY=1; the S3 triggers PASS with DEVICE_BATTERY_POWEROFF=1')

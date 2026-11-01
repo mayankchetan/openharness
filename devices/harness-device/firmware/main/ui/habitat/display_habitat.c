@@ -149,6 +149,8 @@ static void render_watch(void *arg)
 // The stall guard is a 1 s periodic esp_timer, and an esp_timer alarm caps every light sleep at its period. While the chip may
 // sleep (power_sleep.c, state S2) the render task stops it, and starts it again, on its own task, when the screen comes back.
 // The task watchdog (10 s, feeding on every loop of the render task) still watches this task.
+unsigned display_render_stage(void) { return atomic_load(&render_stage); }
+
 void display_render_guard(bool run)
 {
     static bool running = true;   // render_task starts it

@@ -26,13 +26,15 @@ code = r'''
 #include <string.h>
 #define LOG_WRITE_WAIT_MS 5
 #define LOG_LINE_MAX 512
+#define UNFRAMED_LINE_MAX 160
 #define pdTRUE 1
 #define pdMS_TO_TICKS(ms) (ms)
 typedef int TickType_t;
 typedef int SemaphoreHandle_t;
 typedef int (*vprintf_like_t)(const char *,va_list);
 static bool isr, lock_busy, recurse, stalled;
-static atomic_bool s_running, s_log_framing, s_async_logs;
+static atomic_bool s_running, s_log_framing, s_async_logs, s_hook_installed;
+static atomic_flag s_unframed_busy = ATOMIC_FLAG_INIT;
 static log_ring_t s_log_ring;
 static uint8_t ring_store[1024];
 static bool forbid_write;
@@ -73,7 +75,7 @@ static vprintf_like_t esp_log_set_vprintf(vprintf_like_t next) {
     vprintf_like_t old=hook;hook=next;installed++;return old;
 }
 '''
-code += function('send_locked') + function('log_vprintf') + function('cable_link_set_log_framing')
+code += function('send_locked') + function('note_unframed') + function('log_vprintf') + function('cable_link_set_log_framing')
 code += r'''
 static void received(uint8_t version,uint8_t type,const uint8_t *p,size_t n,void *ctx) {
     (void)ctx;assert(version==CABLE_FRAME_VERSION&&type==CABLE_TYPE_LOG);
@@ -101,12 +103,18 @@ int main(void) {
     cable_decoder_t decoder;cable_decoder_init(&decoder);
     cable_decoder_feed(&decoder,wire,wire_bytes,received,NULL);
     assert(framed==3&&!decoder.corrupt_frames&&!decoder.discarded_bytes);
-    cable_link_set_log_framing(false);assert(hook==plain&&installed==2);
-    // A previously captured hook may still execute after removal on another core.
-    assert(log_line("late callback")==1&&plain_calls==1);
-    cable_link_set_log_framing(false);assert(installed==2);
-    cable_link_set_log_framing(true);assert(hook==log_vprintf&&installed==3);
-    puts("USB logging: bounded contention, same-task recursion, ISR, late hook, truncation; exact framed bytes PASS");
+    // Framing off (the session ended): the hook STAYS, so the RTC ring keeps filling and a hang after the cable or the link goes away has last words
+    // (the 2026-11-01 watchdog hang left the ring blind here). The console gets the line exactly as before, through the previous hook.
+    cable_link_set_log_framing(false);assert(hook==log_vprintf&&installed==1);
+    saved[0]=0;assert(log_line("after the session %d\r\n",5)==1&&plain_calls==1&&!strcmp(saved,"after the session 5"));
+    assert(log_line("%s",long_line)==1&&plain_calls==2&&strlen(saved)==UNFRAMED_LINE_MAX-1);   /* short buffer: the tail of a long line is cut */
+    saved[0]=0;isr=true;assert(!log_line("ISR")&&saved[0]==0);isr=false;                         /* an ISR is still left alone */
+    saved[0]=0;atomic_flag_test_and_set(&s_unframed_busy);                                      /* another task is formatting: this line skips the ring, never waits */
+    assert(log_line("busy")==1&&plain_calls==3&&saved[0]==0);atomic_flag_clear(&s_unframed_busy);
+    assert(log_line("\r\n")==1&&saved[0]==0);                                                   /* an empty line is not stored */
+    cable_link_set_log_framing(false);assert(installed==1);
+    cable_link_set_log_framing(true);assert(hook==log_vprintf&&installed==1);                    /* installed once, ever */
+    puts("USB logging: bounded contention, same-task recursion, ISR, truncation; exact framed bytes; the ring keeps filling after framing is off PASS");
 
     // Wi-Fi mode: the same hook, but the line goes into the ring under the formatting lock. The transport is never written (fake_write asserts),
     // the tx lock is never taken (EXPECT_LOCK), and the ring hands the lines back in order.

@@ -7,6 +7,9 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
+#ifdef DEVICE_BATTERY_SLEEP
+#include "esp_task_wdt.h"
+#endif
 
 static const char *TAG = "boot";
 
@@ -29,6 +32,63 @@ static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static esp_reset_reason_t s_reason;
 static bool s_abnormal;
+
+#ifdef DEVICE_BATTERY_SLEEP
+// The sleep breadcrumb (last_words.h). RTC_NOINIT like the ring, believed only with the magic and a checksum over its fixed fields, used once. The
+// starved text and its flag are written by the task watchdog's interrupt, so they sit outside the checksum (an interrupt can land in the middle of a
+// ptt write; the worst case is a record the next boot calls unreadable).
+#define CRUMB_MAGIC 0x43525542u   // "CRUB"
+#define STARVED_MAX 80
+typedef struct {
+    uint32_t magic;
+    uint32_t check;
+    uint32_t seq;                 // wakes written since this record was started (this boot)
+    last_words_crumb_t at;
+    uint8_t  wdt_seen;            // the watchdog handler ran
+    char     starved[STARVED_MAX];
+} crumb_rec_t;
+static RTC_NOINIT_ATTR crumb_rec_t s_crumb;
+static crumb_rec_t s_crumb_prev;                      // this boot's copy of the previous boot's record, for the report
+static EXT_RAM_BSS_ATTR char s_crumb_prev_starved[STARVED_MAX];
+static bool s_crumb_have, s_crumb_torn;
+
+static uint32_t crumb_check(const crumb_rec_t *r)
+{
+    uint32_t h = 2166136261u ^ r->magic;   // FNV-1a over the sequence number and the record
+    const uint8_t *p = (const uint8_t *)&r->seq;
+    for (size_t i = 0; i < sizeof r->seq + sizeof r->at; i++) h = (h ^ p[i]) * 16777619u;
+    return h;
+}
+
+void last_words_crumb(const last_words_crumb_t *c)
+{
+    if (!c) return;
+    if (s_crumb.magic != CRUMB_MAGIC) { memset(&s_crumb, 0, sizeof s_crumb); s_crumb.magic = CRUMB_MAGIC; }
+    s_crumb.seq++;
+    s_crumb.at = *c;
+    s_crumb.check = crumb_check(&s_crumb);
+}
+
+// Which entries starved the task watchdog, as text, into the RTC record: the IDF prints them with ESP_EARLY_LOGE, to a console that may be the very
+// USB port that is dead. Runs in the watchdog's interrupt just before the panic: no log, no lock, no allocation.
+typedef struct { char *dst; size_t cap; size_t len; bool first; } starved_sink_t;
+static void starved_add(void *opaque, const char *msg)
+{
+    starved_sink_t *s = opaque;
+    if (s->first) { s->first = false; return; }   // the first message is the IDF's caption
+    for (const char *p = msg; *p && s->len + 1 < s->cap; p++) s->dst[s->len++] = (*p == '\n') ? ' ' : *p;
+    s->dst[s->len] = '\0';
+}
+
+void esp_task_wdt_isr_user_handler(void)
+{
+    if (s_crumb.magic != CRUMB_MAGIC) { memset(&s_crumb, 0, sizeof s_crumb); s_crumb.magic = CRUMB_MAGIC; s_crumb.check = crumb_check(&s_crumb); }
+    starved_sink_t sink = {.dst = s_crumb.starved, .cap = sizeof s_crumb.starved, .len = 0, .first = true};
+    s_crumb.starved[0] = '\0';
+    (void)esp_task_wdt_print_triggered_tasks(starved_add, &sink, NULL);
+    s_crumb.wdt_seen = 1;
+}
+#endif
 
 // The reason a software reset was asked for (last_words_note_reason). Same memory, same rule as the ring: it survives esp_restart(), a power cut
 // leaves it as anything, so it is believed only after a software reset and only with the right magic and checksum, and it is used once.
@@ -98,6 +158,23 @@ void last_words_boot(void)
         memcpy(s_note_text, s_note.text, NOTE_MAX);
     }
     s_note.magic = 0;   // used once, whatever kind of reset this was
+#ifdef DEVICE_BATTERY_SLEEP
+    s_crumb_have = s_crumb_torn = false;
+    if (s_reason == ESP_RST_PANIC || s_reason == ESP_RST_INT_WDT || s_reason == ESP_RST_TASK_WDT || s_reason == ESP_RST_WDT || s_reason == ESP_RST_BROWNOUT ||
+        s_reason == ESP_RST_UNKNOWN) {
+        if (s_crumb.magic == CRUMB_MAGIC) {
+            if (s_crumb.check == crumb_check(&s_crumb)) {
+                s_crumb_prev = s_crumb;
+                s_crumb_have = true;
+                s_crumb_prev.starved[STARVED_MAX - 1] = '\0';
+                memcpy(s_crumb_prev_starved, s_crumb_prev.starved, STARVED_MAX);
+            } else {
+                s_crumb_torn = true;
+            }
+        }
+    }
+    s_crumb.magic = 0;   // used once, whatever kind of reset this was
+#endif
     s_abnormal = s_reason == ESP_RST_PANIC || s_reason == ESP_RST_INT_WDT || s_reason == ESP_RST_TASK_WDT
               || s_reason == ESP_RST_WDT || s_reason == ESP_RST_BROWNOUT || s_reason == ESP_RST_UNKNOWN;
     if (s_abnormal && ring_valid() && s_ring.len) {
@@ -136,6 +213,17 @@ void last_words_report(void)
     s_reported = true;
     if (s_abnormal) ESP_LOGW(TAG, "reset reason: %s", reason_name(s_reason));
     else            ESP_LOGI(TAG, "reset reason: %s%s%s", reason_name(s_reason), s_note_text[0] ? ": " : "", s_note_text);
+#ifdef DEVICE_BATTERY_SLEEP
+    if (s_crumb_torn) ESP_LOGW(TAG, "last sleep breadcrumb unreadable (torn write)");
+    if (s_crumb_have) {
+        const last_words_crumb_t *a = &s_crumb_prev.at;
+        ESP_LOGW(TAG, "last sleep breadcrumb: wake #%u at %u ms: want S%u applied S%u in_s2=%u sleeps=%u holds=0x%x render_stage=%u",
+                 (unsigned)s_crumb_prev.seq, (unsigned)a->tick_ms, (unsigned)a->want, (unsigned)a->applied, (unsigned)a->in_s2, (unsigned)a->sleeps,
+                 (unsigned)a->holds, (unsigned)a->stage);
+        if (s_crumb_prev.wdt_seen) ESP_LOGW(TAG, "starved at the watchdog: %s", s_crumb_prev_starved[0] ? s_crumb_prev_starved : "no entry");
+    }
+    s_crumb_have = s_crumb_torn = false;
+#endif
     if (!s_previous_len) return;
     ESP_LOGW(TAG, "last %u bytes of log before that reset follow", (unsigned)s_previous_len);
     // The first line is very likely a fragment (the ring wrapped through it); everything after is whole.
