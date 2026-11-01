@@ -25,6 +25,7 @@ import {
   NET_PENDING_MAX,
   NET_PENDING_PER_ADDR,
   NET_PENDING_PER_KNOWN_ADDR,
+  NET_TUNNEL_PENDING_MAX,
   NetDials,
   NetSlot,
   isPrivatePeer,
@@ -1035,11 +1036,11 @@ describe('NetDials.acceptStream: a dial over a tunnel', () => {
     expect(r.dials.stats.failed).toBe(1)
   })
 
-  it('100 idle streams never keep a real dial out: the pool holds 16 and the oldest give way', async () => {
+  it('100 idle streams never keep a real dial out: the tunnel pool holds 8 and the oldest give way', async () => {
     const key = randomBytes(32)
     const r = rig({}, [[A, key]])
     const idle = Array.from({ length: 100 }, () => tunnelStream(r))
-    expect(r.dials.pending).toBeLessThanOrEqual(NET_PENDING_MAX)
+    expect(r.dials.pending).toBeLessThanOrEqual(NET_TUNNEL_PENDING_MAX)
     await until(() => idle.slice(0, 80).every((s) => s.closed()), 'the oldest were evicted')
     const client = await tunnelConnect(r, A, key)
     client.on('error', () => {})
@@ -1164,5 +1165,54 @@ describe('NetDials.acceptStream: a dial over a tunnel', () => {
     await until(() => chunks.length > 0, 'the hello reaches the session')
     await port!.write(encodeCableFrame(CableType.Json, Buffer.from('{"t":"welcome"}')))
     await port!.close('done')
+  })
+})
+
+describe('NetDials.acceptStream: the tunnel has a pending pool of its own (review B3 medium 1)', () => {
+  it('holds at most NET_TUNNEL_PENDING_MAX not-yet-authenticated tunnel streams; the oldest tunnel stream gives way', async () => {
+    const r = rig({}, [[A, randomBytes(32)]])
+    const streams = Array.from({ length: 40 }, () => tunnelStream(r))
+    expect(r.dials.pending).toBe(NET_TUNNEL_PENDING_MAX)
+    await until(() => streams.slice(0, 40 - NET_TUNNEL_PENDING_MAX).every((s) => s.closed()), 'the oldest 32 were evicted')
+    expect(streams.slice(40 - NET_TUNNEL_PENDING_MAX).some((s) => s.closed())).toBe(false)
+    expect(NET_TUNNEL_PENDING_MAX).toBe(8)
+  })
+
+  it('a tunnel flood takes no Wi-Fi slot: 16 pending Wi-Fi sockets all survive 100 tunnel streams', async () => {
+    const r = await listening(rig({}, [[A, randomBytes(32)]]))
+    const wifi: Array<ReturnType<typeof rawClient>> = []
+    for (const host of ['127.0.0.2', '127.0.0.3', '127.0.0.4', '127.0.0.5']) {
+      for (let i = 0; i < NET_PENDING_PER_ADDR; i++) wifi.push(rawClient(r, host))
+    }
+    await until(() => r.dials.pending === NET_PENDING_MAX, 'the Wi-Fi pool is full')
+    for (let i = 0; i < 100; i++) tunnelStream(r)
+    expect(r.dials.pending).toBe(NET_PENDING_MAX + NET_TUNNEL_PENDING_MAX)
+    expect(wifi.some((c) => c.closed())).toBe(false)
+    expect(r.dials.stats.evicted).toBe(100 - NET_TUNNEL_PENDING_MAX)
+  })
+
+  it('a full Wi-Fi pool takes no tunnel slot: a tunnel dial still finishes its handshake', async () => {
+    const key = randomBytes(32)
+    const r = await listening(rig({}, [[A, key]]))
+    for (const host of ['127.0.0.2', '127.0.0.3', '127.0.0.4', '127.0.0.5']) {
+      for (let i = 0; i < NET_PENDING_PER_ADDR; i++) rawClient(r, host)
+    }
+    await until(() => r.dials.pending === NET_PENDING_MAX, 'the Wi-Fi pool is full')
+    const client = await tunnelConnect(r, A, key)
+    client.on('error', () => {})
+    await until(() => r.conns.length === 1, 'the tunnel dial got in')
+    expect(r.dials.stats.evicted).toBe(0)
+  })
+
+  it('a Wi-Fi newcomer on a full Wi-Fi pool never evicts a tunnel stream', async () => {
+    const r = await listening(rig({}, [[A, randomBytes(32)]]))
+    const tunnels = Array.from({ length: NET_TUNNEL_PENDING_MAX }, () => tunnelStream(r))
+    for (const host of ['127.0.0.2', '127.0.0.3', '127.0.0.4', '127.0.0.5']) {
+      for (let i = 0; i < NET_PENDING_PER_ADDR; i++) rawClient(r, host)
+    }
+    await until(() => r.dials.pending === NET_PENDING_MAX + NET_TUNNEL_PENDING_MAX, 'both pools are full')
+    for (let i = 0; i < 10; i++) rawClient(r, '127.0.0.6')
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(tunnels.some((s) => s.closed())).toBe(false)
   })
 })

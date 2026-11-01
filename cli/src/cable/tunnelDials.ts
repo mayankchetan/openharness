@@ -13,11 +13,19 @@
 //   GATE parse     Node's HTTP parser (header size capped at TUNNEL_MAX_HEADER_BYTES, so a request that is bigger is dropped by
 //                  the parser) and `ws`'s frame parser (TUNNEL_MAX_MESSAGE_BYTES, no compression). Nothing here parses a body,
 //                  a header value or a query: the path must equal TUNNEL_PATH exactly and no `Origin` header may be present.
-//   GATE allocate  at most TUNNEL_CONNECTIONS_MAX sockets at once (`server.maxConnections`); a socket that has not finished its
-//                  upgrade TUNNEL_UPGRADE_DEADLINE_MS after connect is destroyed; an upgraded stream holds at most
+//   GATE allocate  at most TUNNEL_PREUPGRADE_MAX connections that have not upgraded (a newcomer ends the oldest of them), and
+//                  at most TUNNEL_CONNECTIONS_MAX sockets in all (`server.maxConnections`, a backstop); a socket that has not
+//                  finished its upgrade TUNNEL_UPGRADE_DEADLINE_MS after connect is destroyed; an upgraded stream holds at most
 //                  TUNNEL_STREAM_BUFFER_BYTES unread (then the socket is paused, so a fast sender waits); an upgraded stream
-//                  that has not finished the TLS-PSK handshake in NET_HANDSHAKE_DEADLINE_MS is destroyed by NetDials, which
-//                  also holds at most 16 such streams (the oldest gives way) and 8 live dials.
+//                  that has not finished the TLS-PSK handshake in NET_HANDSHAKE_DEADLINE_MS is destroyed by NetDials, which holds
+//                  at most NET_TUNNEL_PENDING_MAX (8) such streams in a pool apart from Wi-Fi's (the oldest gives way), and 8 live dials.
+//   GATE liveness  every upgraded connection is pinged each TUNNEL_PING_MS; one that has sent nothing (no data, ping or pong)
+//                  for a whole interval is terminated at the next one, so a phone that vanished frees its slot in 20 to 40 s.
+//                  Pings from the peer get one pong per TUNNEL_PONG_MIN_MS, so a ping flood is not echoed.
+//
+// A limit of this design, said plainly: behind cloudflared every peer is loopback, so no limit here can tell one stranger
+// from another. Someone who passes Cloudflare Access can still keep the pools busy and delay the phone; the pools only keep that
+// from reaching Wi-Fi or USB dials. The rate-limit rule at the Cloudflare edge (cloudflare-runbook, step C-3b) is the control for it.
 //
 // What it does not do: authenticate. Cloudflare Access is the first lock, the dial's key the second, and only the second is
 // ours. A request that reaches here has therefore proved nothing; it gets a bare 404 for every refusal (no banner, no hint,
@@ -43,8 +51,17 @@ export const TUNNEL_UPGRADE_DEADLINE_MS = 3_000
  * data plus about 330 of header, MAC and padding, so this holds four full records. A bigger message closes the connection (1009).
  */
 export const TUNNEL_MAX_MESSAGE_BYTES = 64 * 1024
-/** Sockets open at once, before and after the upgrade. Node closes the surplus at accept. */
+/**
+ * Connections that have not yet upgraded. A newcomer over this number ends the oldest one (not itself), so a flood of silent
+ * connections cannot hold every slot for 3 s at a time: the phone's own upgrade, which takes a round trip, is not the one dropped.
+ */
+export const TUNNEL_PREUPGRADE_MAX = 16
+/** Sockets open at once, before and after the upgrade: a backstop above the pools (16 + 8 + 8 live). Node closes the surplus at accept. */
 export const TUNNEL_CONNECTIONS_MAX = 64
+/** A ping to every upgraded connection this often (under every Cloudflare idle figure, TUN Q1: 100, 125, 900 s). */
+export const TUNNEL_PING_MS = 20_000
+/** A pong to the peer's pings at most this often; the extra pings are counted as life and not answered. */
+export const TUNNEL_PONG_MIN_MS = 1_000
 /** The HTTP parser's header budget; a bigger request is refused by the parser before any of it reaches this file. */
 export const TUNNEL_MAX_HEADER_BYTES = 8 * 1024
 /** Bytes an upgraded stream buffers unread before the socket is paused. */
@@ -82,11 +99,16 @@ export interface TunnelDialsOptions {
  * stream as bytes.
  */
 class WsStream extends Duplex {
+  /** We sent a close frame of our own (not an error from `ws`): it has to leave before the socket does. */
+  #lingering = false
+
   constructor(private readonly ws: WebSocket) {
     super({ allowHalfOpen: false, readableHighWaterMark: TUNNEL_STREAM_BUFFER_BYTES, writableHighWaterMark: TUNNEL_STREAM_BUFFER_BYTES })
     ws.on('message', (data, isBinary) => {
       if (this.destroyed) return
       if (!isBinary) {
+        // The close frame must leave before the socket is cut: _destroy waits for the peer's reply, then cuts.
+        this.#lingering = true
         ws.close(1003, 'binary only')
         this.destroy()
         return
@@ -114,9 +136,9 @@ class WsStream extends Duplex {
   }
 
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
-    if (error) {
-      // `ws` has already queued its own close frame for a protocol error (1009 too big, 1002, 1007): let it leave, then
-      // cut the socket if the peer does not finish the close within a second.
+    if (error || this.#lingering) {
+      // `ws` has already queued its own close frame for a protocol error (1009 too big, 1002, 1007), or we queued 1003: let it
+      // leave, then cut the socket if the peer does not finish the close within a second.
       const cut = setTimeout(() => this.ws.terminate(), 1_000)
       cut.unref?.()
       this.ws.once('close', () => clearTimeout(cut))
@@ -131,6 +153,8 @@ export class TunnelDials {
   readonly #opts: TunnelDialsOptions
   readonly #now: () => number
   readonly #live = new Set<WebSocket>()
+  /** Connections that have not upgraded, oldest first. */
+  readonly #preUpgrade = new Set<net.Socket>()
   readonly #deadlines = new WeakMap<net.Socket, ReturnType<typeof setTimeout>>()
   readonly #loggedAt = new Map<string, number>()
   #server: http.Server | null = null
@@ -203,7 +227,7 @@ export class TunnelDials {
     server.on('upgrade', (req, socket, head) => this.#upgrade(req, socket, head))
     // A request the parser rejects (too large, malformed): closed, nothing said.
     server.on('clientError', (_error, socket) => socket.destroy())
-    const wss = new WebSocketServer({ noServer: true, maxPayload: TUNNEL_MAX_MESSAGE_BYTES, perMessageDeflate: false, clientTracking: false })
+    const wss = new WebSocketServer({ noServer: true, maxPayload: TUNNEL_MAX_MESSAGE_BYTES, perMessageDeflate: false, clientTracking: false, autoPong: false })
     return new Promise<void>((resolve) => {
       let done = false
       const failed = (error: NodeJS.ErrnoException) => {
@@ -260,7 +284,17 @@ export class TunnelDials {
     const timer = setTimeout(() => socket.destroy(), TUNNEL_UPGRADE_DEADLINE_MS)
     timer.unref?.()
     this.#deadlines.set(socket, timer)
-    socket.once('close', () => clearTimeout(timer))
+    // Its own pool: a newcomer ends the oldest connection that has not upgraded.
+    this.#preUpgrade.add(socket)
+    if (this.#preUpgrade.size > TUNNEL_PREUPGRADE_MAX) {
+      const oldest = this.#preUpgrade.values().next().value as net.Socket
+      this.#preUpgrade.delete(oldest)
+      oldest.destroy()
+    }
+    socket.once('close', () => {
+      clearTimeout(timer)
+      this.#preUpgrade.delete(socket)
+    })
   }
 
   /** A request that is not an upgrade: a bare 404 and the connection closes. Nothing of the request is read or logged. */
@@ -280,6 +314,7 @@ export class TunnelDials {
   #upgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
     // At runtime it is the accepted net.Socket; the type of the event is the wider Duplex.
     clearTimeout(this.#deadlines.get(socket as net.Socket))
+    this.#preUpgrade.delete(socket as net.Socket)
     const wss = this.#wss
     if (!wss || this.#stopped) return this.#refuse(socket, 'closing')
     if (req.method !== 'GET' || req.url !== TUNNEL_PATH) return this.#refuse(socket, 'wrong method or path')
@@ -291,7 +326,34 @@ export class TunnelDials {
 
   #relay(ws: WebSocket): void {
     this.#live.add(ws)
-    ws.once('close', () => this.#live.delete(ws))
+    // GATE liveness. Any data, ping or pong is a sign of life; a whole interval without one ends the connection.
+    let alive = true
+    let lastPong = Number.NEGATIVE_INFINITY
+    const seen = () => {
+      alive = true
+    }
+    ws.on('message', seen)
+    ws.on('pong', seen)
+    ws.on('ping', () => {
+      alive = true
+      const now = this.#now()
+      if (now - lastPong < TUNNEL_PONG_MIN_MS) return
+      lastPong = now
+      ws.pong()
+    })
+    const beat = setInterval(() => {
+      if (!alive) {
+        ws.terminate()
+        return
+      }
+      alive = false
+      ws.ping()
+    }, TUNNEL_PING_MS)
+    beat.unref?.()
+    ws.once('close', () => {
+      clearInterval(beat)
+      this.#live.delete(ws)
+    })
     // From here the stream is NetDials's: its pool, its 3 s handshake deadline, its key checks.
     this.#opts.dials.acceptStream(new WsStream(ws), { peer: 'tunnel', transport: 'tunnel' })
   }

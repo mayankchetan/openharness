@@ -14,9 +14,12 @@ import { env } from '../config/env.js'
 import { pskConnect } from './__fixtures__/pskClient.js'
 import { CableDecoder, CableType, encodeCableFrame } from './cableFrame.js'
 import { DIAL_KEY_FILE, DialKeys } from './dialKeys.js'
-import { NET_HANDSHAKE_DEADLINE_MS, NetDials, type NetDialConnection } from './netDials.js'
+import { NET_HANDSHAKE_DEADLINE_MS, NET_TUNNEL_PENDING_MAX, NetDials, type NetDialConnection } from './netDials.js'
 import {
-  TUNNEL_CONNECTIONS_MAX,
+  TUNNEL_PING_MS,
+  TUNNEL_PONG_MIN_MS,
+  TUNNEL_PREUPGRADE_MAX,
+  TUNNEL_STREAM_BUFFER_BYTES,
   TUNNEL_MAX_MESSAGE_BYTES,
   TUNNEL_PATH,
   TUNNEL_UPGRADE_DEADLINE_MS,
@@ -131,8 +134,8 @@ function phonePump(ws: WebSocket): Duplex {
 }
 
 /** A PSK client over a `ws` client: the phone, in a test. */
-async function dialOver(r: Rig, id: string, psk: Buffer) {
-  const ws = await wsOpen(r)
+async function dialOver(r: Rig, id: string, psk: Buffer, options: ConstructorParameters<typeof WebSocket>[2] = {}) {
+  const ws = await wsOpen(r, options)
   const stream = phonePump(ws)
   stream.on('error', () => {})
   const tls = await pskConnect({ port: 0, identity: id, psk, socket: stream })
@@ -318,8 +321,9 @@ describe('TunnelDials: a dial through the endpoint', () => {
       cleanup.push(() => ws.terminate())
       idle.push(ws)
     }
-    await until(() => r.dials.stats.accepted >= 60, 'upgrades accepted')
-    expect(r.dials.pending).toBeLessThanOrEqual(16)
+    // Of 100 at once, those that arrive while 16 others still wait for their upgrade end the oldest of them: fewer than 100 upgrade.
+    await until(() => r.dials.stats.accepted >= 16, 'upgrades accepted')
+    expect(r.dials.pending).toBeLessThanOrEqual(NET_TUNNEL_PENDING_MAX)
     const { tls } = await dialOver(r, A, key)
     tls.on('error', () => {})
     await until(() => r.conns.length === 1, 'the real dial got in')
@@ -462,11 +466,176 @@ describe('TunnelDials: what the endpoint refuses', () => {
     await linkClosed
   })
 
-  it(`closes connections beyond ${TUNNEL_CONNECTIONS_MAX} at once`, async () => {
+  it(`holds at most ${TUNNEL_PREUPGRADE_MAX} connections that have not upgraded; the oldest gives way (review B3 medium 1)`, async () => {
     const r = await listening(rig())
-    const clients = Array.from({ length: TUNNEL_CONNECTIONS_MAX + 20 }, () => rawClient(r))
-    await until(() => clients.filter((c) => c.closed()).length >= 20, 'the surplus was closed')
-    expect(clients.filter((c) => c.closed()).length).toBeLessThanOrEqual(30)
+    const clients = Array.from({ length: 40 }, () => rawClient(r))
+    await until(() => clients.filter((c) => c.closed()).length >= 40 - TUNNEL_PREUPGRADE_MAX, 'the surplus was closed')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(clients.filter((c) => c.closed()).length).toBe(40 - TUNNEL_PREUPGRADE_MAX)
+    const last = rawClient(r)
+    await until(() => clients.filter((c) => c.closed()).length === 40 - TUNNEL_PREUPGRADE_MAX + 1, 'one more gave way')
+    expect(last.closed()).toBe(false)
+    expect(TUNNEL_PREUPGRADE_MAX).toBe(16)
+  })
+
+  it('a real upgrade still gets in after a flood of 100 silent connections', async () => {
+    const key = randomBytes(32)
+    const r = await listening(rig([[A, key]]))
+    for (let i = 0; i < 100; i++) rawClient(r)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const { tls } = await dialOver(r, A, key)
+    tls.on('error', () => {})
+    await until(() => r.conns.length === 1, 'the real dial got in')
+  })
+})
+
+describe('TunnelDials: a silent peer is cut off, and a ping flood is not echoed (review B3 low 2 and 3)', () => {
+  const fakeTimers = () => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+
+  it('pings an authenticated link every TUNNEL_PING_MS and ends one that answers nothing, and the dial link ends with it', async () => {
+    fakeTimers()
+    const key = randomBytes(32)
+    const r = await listening(rig([[A, key]]))
+    const { ws } = await dialOver(r, A, key, { autoPong: false })
+    await until(() => r.conns.length === 1)
+    let pings = 0
+    ws.on('ping', () => pings++)
+    const linkClosed = new Promise<void>((resolve) => r.conns[0].socket.once('close', () => resolve()))
+    await vi.advanceTimersByTimeAsync(TUNNEL_PING_MS)
+    await until(() => pings === 1, 'the first ping')
+    expect(ws.readyState).toBe(WebSocket.OPEN)
+    await vi.advanceTimersByTimeAsync(TUNNEL_PING_MS)
+    await linkClosed
+    expect(r.dials.authenticated).toBe(0)
+    expect(TUNNEL_PING_MS).toBe(20_000)
+  })
+
+  it('keeps a link whose peer answers pings, over five intervals', async () => {
+    fakeTimers()
+    const key = randomBytes(32)
+    const r = await listening(rig([[A, key]]))
+    const { ws } = await dialOver(r, A, key)
+    await until(() => r.conns.length === 1)
+    let pings = 0
+    ws.on('ping', () => pings++)
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(TUNNEL_PING_MS)
+      await until(() => pings === i + 1, `ping ${i + 1}`)
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+    expect(ws.readyState).toBe(WebSocket.OPEN)
+    expect(r.conns[0].socket.destroyed).toBe(false)
+  })
+
+  it('counts any data from the peer as a sign of life, even with pongs off', async () => {
+    fakeTimers()
+    const key = randomBytes(32)
+    const r = await listening(rig([[A, key]]))
+    const { ws, tls } = await dialOver(r, A, key, { autoPong: false })
+    await until(() => r.conns.length === 1)
+    let got = 0
+    r.conns[0].socket.on('data', (c: Buffer) => {
+      got += c.length
+    })
+    for (let i = 0; i < 4; i++) {
+      await vi.advanceTimersByTimeAsync(TUNNEL_PING_MS)
+      tls.write('x')
+      await until(() => got === i + 1, `data ${i + 1}`)
+    }
+    expect(ws.readyState).toBe(WebSocket.OPEN)
+  })
+
+  it('answers a flood of 1,000 pings with one pong a second, and stays open', async () => {
+    const clock = { t: 1_000_000 }
+    const r = await listening(rig([[A, randomBytes(32)]], { now: () => clock.t }))
+    const ws = await wsOpen(r)
+    let pongs = 0
+    ws.on('pong', () => pongs++)
+    for (let i = 0; i < 1000; i++) ws.ping()
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    expect(pongs).toBe(1)
+    expect(ws.readyState).toBe(WebSocket.OPEN)
+    clock.t += TUNNEL_PONG_MIN_MS
+    ws.ping()
+    await until(() => pongs === 2, 'a ping a second later is answered')
+    expect(TUNNEL_PONG_MIN_MS).toBe(1000)
+  })
+})
+
+describe('TunnelDials: the limits that each guard sets', () => {
+  it('does not negotiate compression, even when the client asks for it', async () => {
+    const r = await listening(rig())
+    const ws = await wsOpen(r, { perMessageDeflate: true })
+    expect(ws.extensions).toBe('')
+  })
+
+  it('closes on a message sent as fragments that add up to more than the limit (1009)', async () => {
+    const r = await listening(rig())
+    const ws = await wsOpen(r)
+    const code = new Promise<number>((resolve) => ws.once('close', (c) => resolve(c)))
+    const part = Buffer.alloc(30 * 1024, 7)
+    ws.send(part, { binary: true, fin: false })
+    ws.send(part, { binary: true, fin: false })
+    ws.send(part, { binary: true, fin: true })
+    expect(await code).toBe(1009)
+  })
+
+  it('stops reading a peer that sends faster than the stream is read: the buffer stays under 4 x 64 KiB, and nothing is lost when reading resumes', async () => {
+    const held: Duplex[] = []
+    const r = await listening(
+      rig([[A, randomBytes(32)]], {
+        dials: {
+          acceptStream: (stream) => {
+            stream.on('error', () => {})
+            held.push(stream)
+          },
+        },
+      }),
+    )
+    const ws = await wsOpen(r)
+    await until(() => held.length === 1, 'the stream reached the acceptor')
+    const total = 1024
+    const message = Buffer.alloc(16 * 1024, 5)
+    for (let i = 0; i < total; i++) ws.send(message, { binary: true })
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    expect(held[0].readableLength).toBeLessThan(4 * TUNNEL_STREAM_BUFFER_BYTES)
+    let got = 0
+    held[0].on('data', (c: Buffer) => {
+      got += c.length
+    })
+    await until(() => got === total * message.length, 'every byte arrived once reading resumed', 2_000_000)
+  })
+
+  it('binds ::1 when asked to (skipped where IPv6 loopback is missing)', async (ctx) => {
+    const ok = await new Promise<boolean>((resolve) => {
+      const probe = net.createServer()
+      probe.once('error', () => resolve(false))
+      probe.listen(0, '::1', () => probe.close(() => resolve(true)))
+    })
+    if (!ok) return ctx.skip()
+    const r = await listening(rig([[A, randomBytes(32)]], { bind: '::1' }))
+    expect(r.tunnel.address()?.address).toBe('::1')
+  })
+
+  it('refuses to stay open when the system reports a bound address that is not loopback', async () => {
+    const port = await freePort()
+    const spy = vi.spyOn(net.Server.prototype, 'address').mockReturnValue({ address: '0.0.0.0', family: 'IPv4', port })
+    const r = rig([[A, randomBytes(32)]], { port })
+    await r.tunnel.settled()
+    spy.mockRestore()
+    expect(r.tunnel.listening).toBe(false)
+    expect(r.logs.filter((l) => /bound address is not loopback/.test(l))).toHaveLength(1)
+    expect(await connectRefused(port)).toBe(true)
+  })
+
+  it('sends the 1003 close frame to a peer that sent text, every time (review B3 low 4)', async () => {
+    const r = await listening(rig())
+    for (let i = 0; i < 25; i++) {
+      const ws = await wsOpen(r)
+      const code = new Promise<number>((resolve) => ws.once('close', (c) => resolve(c)))
+      ws.send('text')
+      expect(await code).toBe(1003)
+    }
   })
 })
 

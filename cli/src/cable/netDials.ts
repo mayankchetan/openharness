@@ -46,6 +46,12 @@ import { pskIdentityOf, wrapPskSocket } from './tlsPsk.js'
 export const NET_HANDSHAKE_DEADLINE_MS = 3_000
 /** Sockets that have not yet proved a key. */
 export const NET_PENDING_MAX = 16
+/**
+ * Sockets from `acceptStream` (the tunnel) that have not yet proved a key. A pool of its own, apart from NET_PENDING_MAX:
+ * behind cloudflared every peer is loopback, so no per-address rule can tell strangers apart, and a shared pool would let a tunnel
+ * flood push Wi-Fi sockets out (and a Wi-Fi flood push the phone out). The oldest tunnel stream gives way to a newcomer.
+ */
+export const NET_TUNNEL_PENDING_MAX = 8
 /** Of those, from one unknown address. */
 export const NET_PENDING_PER_ADDR = 4
 /** Of those, from one known address. */
@@ -356,7 +362,7 @@ export class NetDials {
       raw.destroy()
       return
     }
-    if (this.#pending.size >= NET_PENDING_MAX) {
+    if (this.#pendingOf('wifi') >= NET_PENDING_MAX) {
       const victim = this.#victim(known)
       if (!victim) {
         // Only known dials wait, and the newcomer is not one: it is the one turned away.
@@ -375,8 +381,8 @@ export class NetDials {
    * Serve TLS-PSK on a stream that is not a TCP socket: the duplex of a WebSocket the relay endpoint accepted (tunnelDials.ts).
    * The same keystore, handshake deadline, key checks and one-link-per-identity rule as a socket from the LAN. What differs, on
    * purpose, because behind cloudflared every peer is loopback and has no address of its own:
-   *   - no private-address filter, no per-address caps, no per-address ban, no failure charge: only the pool limit (16, the
-   *     oldest gives way), so a tunnel flood can neither lock out a Wi-Fi dial on loopback nor be locked out by one;
+   *   - no private-address filter, no per-address caps, no per-address ban, no failure charge: only a pool of its own
+   *     (NET_TUNNEL_PENDING_MAX, the oldest gives way), so a tunnel flood can neither take a Wi-Fi slot nor be locked out by one;
    *   - the keystore's lastAddr is not written (a tunnel is not where the dial lives on the LAN);
    *   - the link says `tunnel`, which the session reads to send no firmware and no pet pack over it.
    * With no key in the keystore, or after stop(), the stream is destroyed unread. The Wi-Fi socket need not be open.
@@ -389,14 +395,13 @@ export class NetDials {
       return
     }
     this.stats.accepted++
-    if (this.#pending.size >= NET_PENDING_MAX) {
-      const victim = this.#victim(false)
-      if (!victim) {
-        this.stats.capped++
-        stream.destroy()
-        return
+    // The tunnel's own pool: a newcomer takes the place of the oldest tunnel stream, never of a Wi-Fi socket.
+    if (this.#pendingOf('tunnel') >= NET_TUNNEL_PENDING_MAX) {
+      for (const entry of this.#pending) {
+        if (entry.transport !== 'tunnel') continue
+        this.#evict(entry)
+        break
       }
-      this.#evict(victim)
     }
     this.#begin(stream, info.peer, 0, info.transport)
   }
@@ -438,6 +443,12 @@ export class NetDials {
     }
   }
 
+  #pendingOf(transport: NetTransport): number {
+    let count = 0
+    for (const entry of this.#pending) if (entry.transport === transport) count++
+    return count
+  }
+
   #pendingFrom(peer: string): number {
     let count = 0
     for (const entry of this.#pending) if (entry.peer === peer) count++
@@ -452,6 +463,8 @@ export class NetDials {
     const unknown = new Map<string, Pending[]>()
     const known = new Map<string, Pending[]>()
     for (const entry of this.#pending) {
+      // The tunnel's streams are another pool (NET_TUNNEL_PENDING_MAX): a Wi-Fi newcomer never makes room by ending one.
+      if (entry.transport !== 'wifi') continue
       const groups = this.#opts.keys.isKnownAddr(entry.peer) ? known : unknown
       const list = groups.get(entry.peer) ?? []
       list.push(entry)
@@ -467,7 +480,9 @@ export class NetDials {
     // Only known addresses wait: one that holds two gives up its oldest and keeps the one a dial needs.
     const spare = biggest(known, 2)
     if (spare) return spare[0]
-    return newcomerKnown ? (this.#pending.values().next().value as Pending) : undefined
+    if (!newcomerKnown) return undefined
+    for (const entry of this.#pending) if (entry.transport === 'wifi') return entry
+    return undefined
   }
 
   #evict(victim: Pending): void {
