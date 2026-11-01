@@ -1,0 +1,8 @@
+# Build outputs, local SDK path and Gradle state never go in git.
+build/
+.gradle/
+local.properties
+*.apk
+*.aab
+.idea/
+.kotlin/
