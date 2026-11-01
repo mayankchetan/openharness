@@ -21,6 +21,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "net_state.h"
@@ -86,6 +87,17 @@ ble_event_t ble_poll(const ble_t *b, uint64_t now_ms);
 // and returns the event it posted. `refused` = the daemon answered with a fatal alert (net_hs_class.h). Outside CHANNEL_UP no handshake is running:
 // BLE_EV_NONE, nothing counted.
 ble_event_t ble_handshake_failed(ble_t *b, bool refused, uint64_t now_ms);
+
+// ── what goes on the air (docs/specs/cable-ble-link.md section 2; the bytes of test/vectors/ble_status.txt) ──────────────────────────────────────
+// The 128-bit service UUID e70301f0-bbe6-4d70-801c-657c8e99501d, last byte first, as the scan response and the GATT table carry it.
+extern const uint8_t BLE_SERVICE_UUID_LE[16];
+// "harness-dial-<mac2>": the last two bytes of the BASE MAC (the PSK identity, "B8:1F:3F:CA:E5:58", either case in) as four lower-case hex digits.
+// `cap` must hold 17 characters and the NUL (18). False, and out[0] = 0 when it can, for anything that is not six hex pairs with colons.
+bool ble_adv_name(const char *mac, char *out, size_t cap);
+// The advertising packet: flags 02 01 06, then the complete local name (AD type 0x09): 22 bytes. 0 when the MAC is bad or `cap` is under 22.
+size_t ble_adv_data(const char *mac, uint8_t *out, size_t cap);
+// The scan response: the service UUID as a complete 128-bit list (AD type 0x07): 18 bytes. 0 when `cap` is under 18.
+size_t ble_scan_rsp_data(uint8_t *out, size_t cap);
 
 // ── admission ───────────────────────────────────────────────────────────────────────────────────────
 // Only an encrypted, bonded peer gets the channel; one channel at a time. `dev_unbonded` is the build flag BLE_DEV_ALLOW_UNBONDED (off in every product

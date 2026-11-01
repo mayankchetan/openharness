@@ -64,11 +64,16 @@ i_net = app_main.index('net_link_start()')
 i_start_link = app_main.index('cable_client_start_with(')
 i_focus = app_main.index('mode_glue_restore_focus()')
 i_task = app_main.index('mode_glue_start(')
-assert i_countdown < i_boot < i_net < i_start_link < i_focus < i_task, 'order: factory reset, boot decision, radio, link, focus, task'
-assert re.search(r'const bool wifi_mode = mode_glue_boot\(\) == MS_MODE_WIFI && net_link_start\(\);', app_main), \
+assert i_countdown < i_boot < i_net < app_main.index('ble_link_start()') < i_start_link < i_focus < i_task, 'order: factory reset, boot decision, radio, link, focus, task'
+assert re.search(r'const ms_mode_t boot_mode = mode_glue_boot\(\);', app_main), 'one boot decision'
+assert re.search(r'const bool wifi_mode = boot_mode == MS_MODE_WIFI && net_link_start\(\);', app_main), \
     'net_link_start() runs only when the boot decision is Wi-Fi (a dial that decided USB never starts the radio)'
-assert re.search(r'mode_glue_start\(wifi_mode \? MS_MODE_WIFI : MS_MODE_USB\);', app_main), 'the task gets the mode that really started'
-assert app.count('net_link_start(') == 1 and app.count('mode_glue_boot(') == 1 and app.count('mode_glue_start(') == 1
+assert re.search(r'const bool ble_mode = boot_mode == MS_MODE_BLE && ble_link_start\(\);', app_main), \
+    'ble_link_start() runs only when the boot decision is Bluetooth (B4b); on an image without NimBLE it is the inline stub that returns false'
+assert 'wifi_mode ? net_link_xport() : ble_mode ? ble_link_xport() : cable_xport_usb()' in app_main, 'the link is the transport of the mode that started'
+assert re.search(r'mode_glue_start\(wifi_mode \? MS_MODE_WIFI : ble_mode \? MS_MODE_BLE : MS_MODE_USB\);', app_main), 'the task gets the mode that really started'
+assert app.count('net_link_start(') == 1 and app.count('ble_link_start(') == 1 and app.count('mode_glue_boot(') == 1 and app.count('mode_glue_start(') == 1
+assert '#include "ble_link.h"' in text('app_main.c')
 # the gallery boot (a diagnostic image) has no mode switch
 assert 'mode_glue' not in body(app, 'gallery_main')
 # nothing but app_main calls the three entry points
@@ -189,7 +194,9 @@ core = code('mode_glue_core.c')
 assert 'MS_WL_BLE' in core and 'wl != MS_WL_BLE' in body(core, 'mg_boot'), 'the boot decision accepts the Bluetooth target'
 assert 'MS_MODE_WIFI' not in body(core, 'mg_boot') and 'MS_MODE_WIFI' not in body(core, 'mg_step'), 'no Wi-Fi-only test left in the boot or the step'
 assert 'MS_MODE_WIFI' not in body(core, 'mg_apply_settings') and 'MS_WL_WIFI ?' not in core, 'the settings path keeps either wireless target'
-for name in ('mode_glue.c', 'app_main.c', 'usb_probe.c'):
+# app_main.c starts it since B4b; the glue (mode_glue.c) is mode-agnostic, and the USB probe has no transport of its own to name
+assert 'MS_MODE_BLE' in code('app_main.c')
+for name in ('mode_glue.c', 'usb_probe.c'):
     assert 'MS_MODE_BLE' not in code(name) and 'MS_WL_BLE' not in code(name), f'{name} names Bluetooth'
 assert 'MS_WL_BLE' not in code('config_store.c') and 'MS_MODE_BLE' not in code('config_store.c')
 

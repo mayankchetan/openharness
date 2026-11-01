@@ -70,6 +70,10 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main"    -o "$out/test_ble_state" "$here/test_ble_state.c" "$here/../main/ble_state.c" "$here/../main/net_state.c"
 "$out/test_ble_state" "$here/vectors/ble_status.txt"
 python3 "$here/test_ble_state_source.py"
+# B4b: the BLE transport (ring, credits, all-or-nothing write) against a fake port, under the address and undefined-behaviour sanitizers; the source rules of the link
+cc -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -O1 -g -pthread -fsanitize=address,undefined -DCABLE_XPORT_BLE_WRITE_CAP_MS=300 -I "$here/host_tls" -I "$here/../main" -o "$out/test_cable_xport_ble" "$here/test_cable_xport_ble.c" "$here/../main/cable_xport_ble.c"
+ASAN_OPTIONS=detect_leaks=0 "$out/test_cable_xport_ble"
+python3 "$here/test_ble_link_source.py"
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -pthread -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" \
    -o "$out/test_log_ring" "$here/test_log_ring.c" "$here/../main/log_ring.c"
 "$out/test_log_ring"

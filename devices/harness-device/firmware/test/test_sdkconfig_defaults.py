@@ -124,12 +124,26 @@ BLE_EXPECTED = {
     'CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL': 'y',          # host pools in PSRAM
     'CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT': 'n',               # with this off the dial must not request the 2M PHY
     'CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY': 'y',                  # plan C12: +20,288 B internal RAM at run time
+    # Phone mode (B4b; plan section 4 row 7, QQ6): two bonds kept across a restart, LE Secure Connections and security on, one connection, one channel.
+    'CONFIG_BT_NIMBLE_MAX_BONDS': '2',
+    'CONFIG_BT_NIMBLE_NVS_PERSIST': 'y',
+    'CONFIG_BT_NIMBLE_SM_SC': 'y',
+    'CONFIG_BT_NIMBLE_SECURITY_ENABLE': 'y',
+    'CONFIG_BT_NIMBLE_MAX_CONNECTIONS': '1',
+    'CONFIG_BT_NIMBLE_ROLE_PERIPHERAL': 'y',
+    'CONFIG_BT_NIMBLE_ROLE_CENTRAL': 'n',
 }
 for symbol, value in BLE_EXPECTED.items():
     assert ble.get(symbol) == value, f'{symbol}: sdkconfig.defaults.ble says {ble.get(symbol)!r}, expected {value!r}'
 assert not (set(ble) & set(defaults)) or all(ble[s] == defaults[s] for s in set(ble) & set(defaults)), 'no conflict with the defaults'
 assert not [s for s in ble if 'BENCH' in s or s.startswith('CONFIG_FREERTOS_')], 'nothing bench-only'
 assert not any('BT_' in s for s in defaults), 'the default files stay Bluetooth-free'
+# No 2M PHY and no coded PHY, ever (finding FB1 of the phone-bridge spec): BLE 5 features off, and no symbol that turns a PHY on.
+assert ble.get('CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT') == 'n'
+assert not [s for s in ble if re.search(r'2M|CODED|_PHY|EXT_ADV|PERIODIC', s) and ble[s] == 'y'], 'no PHY or extended-advertising symbol is on'
+# The development flag of the walking skeleton (QQ5) is a command-line CMake variable and lives in no defaults file, ever.
+for name in sorted(p.name for p in firmware.glob('sdkconfig.defaults*')):
+    assert 'BLE_DEV_ALLOW_UNBONDED' not in (firmware / name).read_text(), f'{name} sets the unbonded development flag'
 assert 'sdkconfig.defaults.ble' not in (firmware / 'CMakeLists.txt').read_text().split('file(GLOB')[0], 'not added to the load list'
 ble_checked = 'no BLE build config given (set SDKCONFIG_BLE=path to a build made with the BLE defaults list)'
 ble_build = os.environ.get('SDKCONFIG_BLE')

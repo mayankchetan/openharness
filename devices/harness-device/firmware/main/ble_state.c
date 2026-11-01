@@ -121,3 +121,58 @@ ble_accept_t ble_accept_check(bool encrypted, bool bonded, bool dev_unbonded, bo
 }
 
 bool ble_encryption_required(bool dev_unbonded) { return !dev_unbonded; }
+
+// ── what goes on the air ────────────────────────────────────────────────────────────────────────────
+const uint8_t BLE_SERVICE_UUID_LE[16] = {0x1d, 0x50, 0x99, 0x8e, 0x7c, 0x65, 0x1c, 0x80, 0x70, 0x4d, 0xe6, 0xbb, 0xf0, 0x01, 0x03, 0xe7};
+
+static int hex_digit(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+#define BLE_NAME_PREFIX "harness-dial-"
+#define BLE_NAME_LEN    17   // 13 + 4
+
+bool ble_adv_name(const char *mac, char *out, size_t cap)
+{
+    if (out && cap) out[0] = 0;
+    if (!mac || !out || cap < BLE_NAME_LEN + 1) return false;
+    // exactly "XX:XX:XX:XX:XX:XX"
+    if (strlen(mac) != 17) return false;
+    for (int i = 0; i < 17; i++) {
+        if (i % 3 == 2) { if (mac[i] != ':') return false; }
+        else if (hex_digit(mac[i]) < 0) return false;
+    }
+    static const char LOWER[] = "0123456789abcdef";
+    memcpy(out, BLE_NAME_PREFIX, 13);
+    // the last two bytes: characters 12-13 and 15-16
+    out[13] = LOWER[hex_digit(mac[12])];
+    out[14] = LOWER[hex_digit(mac[13])];
+    out[15] = LOWER[hex_digit(mac[15])];
+    out[16] = LOWER[hex_digit(mac[16])];
+    out[17] = 0;
+    return true;
+}
+
+size_t ble_adv_data(const char *mac, uint8_t *out, size_t cap)
+{
+    char name[BLE_NAME_LEN + 1];
+    if (!out || cap < 22 || !ble_adv_name(mac, name, sizeof name)) return 0;
+    size_t n = 0;
+    out[n++] = 0x02; out[n++] = 0x01; out[n++] = 0x06;                     // flags: general discoverable, no BR/EDR
+    out[n++] = (uint8_t)(BLE_NAME_LEN + 1); out[n++] = 0x09;               // complete local name
+    memcpy(out + n, name, BLE_NAME_LEN);
+    return n + BLE_NAME_LEN;
+}
+
+size_t ble_scan_rsp_data(uint8_t *out, size_t cap)
+{
+    if (!out || cap < 18) return 0;
+    out[0] = 17;     // type byte + 16
+    out[1] = 0x07;   // complete list of 128-bit service UUIDs
+    memcpy(out + 2, BLE_SERVICE_UUID_LE, 16);
+    return 18;
+}

@@ -98,7 +98,9 @@ for path in sorted(main.rglob('*')):
 app = code('app_main.c')
 assert len(re.findall(r'\bnet_link_start\(', app)) == 1
 # W15: the boot decision (mode_glue_boot) gates it: a dial that decided USB (boot_usb with a host on the port, no wireless target) never starts the radio
-assert re.search(r'const bool wifi_mode = mode_glue_boot\(\) == MS_MODE_WIFI && net_link_start\(\);\s*if \(!cable_client_start_with\(wifi_mode \? net_link_xport\(\) : cable_xport_usb\(\)\)\)', app)
+# B4b: the one boot decision feeds both radios; Wi-Fi mode starts only when it says Wi-Fi, and the link is the transport of the mode that started
+assert re.search(r'const ms_mode_t boot_mode = mode_glue_boot\(\);\s*const bool wifi_mode = boot_mode == MS_MODE_WIFI && net_link_start\(\);', app)
+assert re.search(r'if \(!cable_client_start_with\(wifi_mode \? net_link_xport\(\) : ble_mode \? ble_link_xport\(\) : cable_xport_usb\(\)\)\)', app)
 assert app.index('reset_countdown();') < app.index('net_link_start('), 'the BOOT-held factory reset runs before the mode is chosen: it works in both modes'
 assert not re.search(r'\bnet_link_start\(', code('cable_client.c')), 'only app_main starts Wi-Fi mode'
 ui = code('ui/habitat/ui_habitat.c')

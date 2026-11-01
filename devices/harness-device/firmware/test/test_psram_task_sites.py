@@ -21,9 +21,12 @@ MOVED = [  # (file, task name, macro, plain create that the #else branch keeps)
     # Wi-Fi mode (W11): the connect / TLS / socket / backoff task. Its call graph holds no flash operation (test_net_link_source.py walks it);
     # the Wi-Fi bring-up, which may write the PHY calibration to NVS, runs on net_init, which is internal and short-lived.
     ('net_link.c', 'net_link', 'TASK_STACK_PSRAM_NET', 'xTaskCreate'),
+    # Phone mode (B4b): the same shape. ble_link's call graph holds NimBLE host calls (they queue to the host task), the TLS wrapper and log drain, and no
+    # flash operation (test_ble_link_source.py walks it); the controller bring-up, which may read the PHY data from NVS, runs on ble_init (internal).
+    ('ble_link.c', 'ble_link', 'TASK_STACK_PSRAM_NET', 'xTaskCreate'),
 ]
 # mode_sw (W15, mode_glue.c): writes NVS (boot_usb) and installs and removes the USB driver, so its stack is internal
-STAYS_INTERNAL = ['habitat_render', 'habitat_touch', 'voice_capture', 'net_init', 'net_store', 'mode_sw']
+STAYS_INTERNAL = ['habitat_render', 'habitat_touch', 'voice_capture', 'net_init', 'net_store', 'mode_sw', 'ble_init']
 
 header = (main / 'task_util.h').read_text()
 # The cable_link reader is the one conditional task: in PSRAM only with the OTA path compiled out (DEVICE_NO_OTA), because

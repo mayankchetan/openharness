@@ -131,7 +131,8 @@ endif()
 
 # spi_flash esp_mm: esp_private/flash_mmap.h: flash_mmap_remain() in the alive line (ram_telemetry.c); esp_private/esp_cache_private.h:
 # esp_cache_get_alignment() (draw_buffer.c). esp_pm: the power-management locks and esp_pm_configure (power_sleep.c, battery sleep only).
-set(BOARD_PRIV_REQUIRES spi_flash esp_mm)
+# `bt` is required always so that an image built with NimBLE (sdkconfig.defaults.ble) finds its headers; with Bluetooth off the component has no sources.
+set(BOARD_PRIV_REQUIRES spi_flash esp_mm bt)
 if(DEVICE_BATTERY_SLEEP)
     list(APPEND BOARD_PRIV_REQUIRES esp_pm)
 endif()
@@ -146,6 +147,17 @@ idf_component_register(
     PRIV_REQUIRES ${BOARD_PRIV_REQUIRES}
     EMBED_FILES ${COMPANION_ART}
 )
+
+# The phone mode (task B4b) is in the image exactly when NimBLE is: sdkconfig.defaults.ble turns it on, the default image has none of this code. A build
+# with BLE_DEV_ALLOW_UNBONDED (the walking skeleton, plan question QQ5: `idf.py -DBLE_DEV_ALLOW_UNBONDED=1 ...`) accepts the phone without a bond; nothing in
+# this repository sets it (test_ble_link_source.py), it exists only on a command line.
+if(CONFIG_BT_NIMBLE_ENABLED)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_BLE_LINK=1)
+    target_sources(${COMPONENT_LIB} PRIVATE "ble_link.c" "cable_xport_ble.c")
+    if(BLE_DEV_ALLOW_UNBONDED)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE BLE_DEV_ALLOW_UNBONDED=1)
+    endif()
+endif()
 
 # snprintf() is bounded (it truncates, never overflows), but -O2 enables a noisy
 # format-truncation analysis that errors on safe same-size copies. Keep it as a warning, not error.

@@ -262,9 +262,80 @@ static void test_accept_policy(void)
     CHECK(ble_encryption_required(false) && !ble_encryption_required(true));
 }
 
+// ── the advertising bytes, against the vector file ──────────────────────────────────────────────────
+static size_t unhex(const char *hex, uint8_t *out, size_t cap)
+{
+    size_t n = 0;
+    while (hex[0] && hex[0] != '\t' && hex[0] != '\n' && hex[1]) {
+        assert(n < cap);
+        unsigned v;
+        assert(sscanf(hex, "%2x", &v) == 1);
+        out[n++] = (uint8_t)v;
+        hex += 2;
+    }
+    return n;
+}
+
+static void test_advertising_against_the_vectors(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    assert(f);
+    char line[512];
+    unsigned adv_lines = 0, uuid_lines = 0;
+    uint8_t want[64];
+    while (fgets(line, sizeof line, f)) {
+        if (strncmp(line, "uuid\tservice\t", 13) == 0) {
+            // uuid <role> <uuid> <little-endian bytes>
+            const char *le = strrchr(line, '\t') + 1;
+            const size_t n = unhex(le, want, sizeof want);
+            CHECK(n == 16 && memcmp(want, BLE_SERVICE_UUID_LE, 16) == 0);
+            uuid_lines++;
+        } else if (strncmp(line, "adv\t", 4) == 0) {
+            // adv <mac> <name> <adv-hex> <scan-response-hex>
+            char *fields[5] = {0};
+            unsigned k = 0;
+            for (char *s = line; k < 5; ) {
+                fields[k++] = s;
+                char *tab = strchr(s, '\t');
+                if (!tab) break;
+                *tab = 0;
+                s = tab + 1;
+            }
+            assert(k == 5);
+            char name[32];
+            CHECK(ble_adv_name(fields[1], name, sizeof name));
+            CHECK(strcmp(name, fields[2]) == 0);
+            uint8_t adv[31], rsp[31];
+            const size_t adv_n = ble_adv_data(fields[1], adv, sizeof adv), rsp_n = ble_scan_rsp_data(rsp, sizeof rsp);
+            const size_t want_adv = unhex(fields[3], want, sizeof want);
+            CHECK(adv_n == want_adv && memcmp(adv, want, want_adv) == 0);
+            const size_t want_rsp = unhex(fields[4], want, sizeof want);
+            CHECK(rsp_n == want_rsp && memcmp(rsp, want, want_rsp) == 0);
+            adv_lines++;
+        }
+    }
+    fclose(f);
+    CHECK(uuid_lines == 1 && adv_lines >= 5);
+    // bad input: no name, no bytes, never past the buffer
+    char name[32];
+    uint8_t buf[31];
+    CHECK(!ble_adv_name(NULL, name, sizeof name) && !ble_adv_name("B8:1F:3F:CA:E5:58", NULL, 10) && !ble_adv_name("B8:1F:3F:CA:E5:58", name, 17));
+    CHECK(ble_adv_name("B8:1F:3F:CA:E5:58", name, 18) && strcmp(name, "harness-dial-e558") == 0);
+    CHECK(!ble_adv_name("B8:1F:3F:CA:E5", name, sizeof name) && name[0] == 0);          // five bytes
+    CHECK(!ble_adv_name("B8:1F:3F:CA:E5:5", name, sizeof name));                         // a short last byte
+    CHECK(!ble_adv_name("B8:1F:3F:CA:E5:5G", name, sizeof name));                        // not hex
+    CHECK(!ble_adv_name("B8-1F-3F-CA-E5-58", name, sizeof name));                        // wrong separator
+    CHECK(!ble_adv_name("B8:1F:3F:CA:E5:58:00", name, sizeof name));                     // too long
+    CHECK(ble_adv_name("b8:1f:3f:ca:e5:5A", name, sizeof name) && strcmp(name, "harness-dial-e55a") == 0);   // either case in, lower case out
+    CHECK(ble_adv_data("nope", buf, sizeof buf) == 0 && ble_adv_data("B8:1F:3F:CA:E5:58", buf, 21) == 0 && ble_adv_data("B8:1F:3F:CA:E5:58", buf, 22) == 22);
+    CHECK(ble_adv_data("B8:1F:3F:CA:E5:58", NULL, 31) == 0);
+    CHECK(ble_scan_rsp_data(buf, 17) == 0 && ble_scan_rsp_data(buf, 18) == 18 && ble_scan_rsp_data(NULL, 31) == 0);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2 && "usage: test_ble_state <vectors/ble_status.txt>");
+    test_advertising_against_the_vectors(argv[1]);
     test_table();
     test_constants_match_the_vectors(argv[1]);
     test_deadlines();
