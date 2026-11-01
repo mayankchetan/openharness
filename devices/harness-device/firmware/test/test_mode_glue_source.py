@@ -149,6 +149,27 @@ assert 'usb_probe_last_welcome(' in sample and sample.index('s_running == MS_MOD
 assert 'now - (uint32_t)((uint32_t)now - last32)' in sample
 # the mode the module sees is the effective one
 assert 'config_load_wl_effective()' in body(glue, 'mode_glue_start')
+# W16c (bench, 2026-11-01): every writer of wl_mode, the marker or the key tells the running mode switch. `net.set` over the cable stored wl_mode = 1 and the
+# dial never left USB, because the glue keeps "USB, no target, never leaves" until it is told to read again. Writers of those NVS values are the net_store
+# task (the cable) and the Link screen's worker; each calls mode_glue_settings_changed() after its write, on success and on failure (a failed write can
+# leave the marker off, which the glue should see). Nothing else may write them.
+WRITES = re.compile(r'\bconfig_net_(?:set|clear|set_key|set_host|set_mode)\(')
+allowed = {'cable_client.c': 'net_store_task', 'ui/habitat/ui_habitat.c': 'link_work'}
+for path in main.rglob('*.c'):
+    rel = path.relative_to(main).as_posix()
+    if rel == 'config_store.c':
+        continue
+    src = code(rel)
+    if rel in allowed:
+        fn = body(src, allowed[rel])
+        assert WRITES.search(fn), f'{rel}: {allowed[rel]} writes the Wi-Fi settings'
+        last_write = max(m.start() for m in WRITES.finditer(fn))
+        assert 'mode_glue_settings_changed()' in fn[last_write:], f'{rel}: {allowed[rel]} must call mode_glue_settings_changed() after its last wl write'
+        src = src.replace(fn, '')
+    assert not WRITES.search(src), f'{rel} writes the Wi-Fi settings outside {allowed.get(rel, "any allowed function")}'
+assert '#include "mode_glue.h"' in text('cable_client.c')
+net_store = body(code('cable_client.c'), 'net_store_task')
+assert net_store.index('mode_glue_settings_changed()') < net_store.index('net_reply('), 'the glue is told before the reply that the daemon waits for'
 # W16b (review of the Link screen, finding 1 and 2): the task reads wl_mode through the confirming path, so one read inside a config_net_set_mode write
 # cannot send a Wi-Fi dial to USB (behaviour: test_mode_glue.c), and a dial that RUNS Wi-Fi starts believing Wi-Fi is a target.
 task_src = body(glue, 'mode_sw_task')

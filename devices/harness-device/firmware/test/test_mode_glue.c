@@ -947,6 +947,49 @@ static void test_a_real_pick_of_usb_waits_only_for_its_confirmation(void)
     assert(!run(MS_STEP_MS) && !D.mg.wl_pending && D.mg.wl_effective == MS_WL_WIFI);
 }
 
+// ── W16c: bench finding 2026-11-01. `net.set` over the cable writes wl_mode = 1 into a dial that runs USB with no target. The glue keeps "no target:
+// never leave" until it is told to read again, so the cable handler must call mode_glue_settings_changed() after its write (cable_client.c,
+// net_store_task; test_mode_glue_source.py pins that). Here is the contract on the glue side, with the call and without it.
+static void test_provisioning_at_runtime_needs_the_reload_and_then_leaves_on_t_leave(void)
+{
+    fresh();
+    assert(boot() == MS_MODE_USB);                        // never provisioned: USB, no target
+    assert(!run(70000));
+    provision(1);                                         // net.set over the cable: the NVS now holds a whole configuration and wl_mode = 1
+    D.cable = true;                                       // the cable is in while it happens
+    D.daemon = true;
+    assert(!run(5000));
+    D.cable = D.daemon = false;                           // unplugged
+    // WITHOUT the call the glue never learns: the bench saw 75 s and then a replug without a reboot; here five minutes
+    assert(!run(5 * 60 * 1000) && D.reboots == 0);
+    // WITH it (what net_store_task now does): it leaves for Wi-Fi when T_LEAVE has passed, and no later than that
+    link_screen_changed();                                // = mode_glue_settings_changed()
+    assert(run(MS_T_LEAVE_MS + MG_CONFIRM_MS + 4 * MS_STEP_MS) && D.reboot_to[0] == MS_MODE_WIFI);
+    assert(D.reboot_uptime[0] >= 5 * 60 * 1000 + MS_T_LEAVE_MS);   // not before the cable had been out for T_LEAVE
+}
+
+static void test_net_clear_and_net_mode_at_runtime_are_seen_too(void)
+{
+    // net.mode 0 over the cable while USB runs: no target, nothing to leave to (and no reboot)
+    fresh();
+    provision(1);
+    config_save_boot_usb(true);
+    D.cable = D.daemon = true;
+    D.reset_sw = true;
+    assert(boot() == MS_MODE_USB);
+    assert(!run(30000));
+    assert(config_net_set_mode(0) == CFG_NET_OK);
+    link_screen_changed();
+    D.cable = D.daemon = false;
+    assert(!run(5 * 60 * 1000) && D.reboots == 0);
+    // net.clear: the same, and stay_wl goes with the network (config_net_clear takes it)
+    assert(config_net_set_mode(1) == CFG_NET_OK && config_save_stay_wl(true));
+    link_screen_changed();
+    assert(config_net_clear() == CFG_NET_OK && !config_load_stay_wl());
+    link_screen_changed();
+    assert(!run(5 * 60 * 1000) && D.reboots == 0);
+}
+
 // ── the panic loop (user decision 2026-10-31) ───────────────────────────────────────────────────────
 static void test_panic_loop_plan(void)
 {
@@ -1115,6 +1158,8 @@ int main(void)
     test_the_restart_gate_sequence();
     test_a_read_inside_a_write_window_does_not_send_the_dial_to_usb();
     test_a_real_pick_of_usb_waits_only_for_its_confirmation();
+    test_provisioning_at_runtime_needs_the_reload_and_then_leaves_on_t_leave();
+    test_net_clear_and_net_mode_at_runtime_are_seen_too();
     test_picking_usb_on_wifi_goes_to_usb_and_stays();
     test_a_dial_busy_on_the_link_screen_waits_then_switches();
     test_keep_wifi_off_gives_a_wifi_dial_its_way_back_to_usb();

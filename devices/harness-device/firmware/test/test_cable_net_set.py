@@ -171,6 +171,9 @@ typedef int BaseType_t;
 typedef void *TaskHandle_t;
 typedef void (*TaskFunction_t)(void *);
 static const char *TAG = "cable_client";
+// The mode switch (mode_glue.c), reduced to the one call the net handler makes: it must come after the write and before the reply.
+static unsigned glue_told, glue_sends_at_told;
+static void mode_glue_settings_changed(void) { glue_told++; glue_sends_at_told = (unsigned)sends; }
 // FreeRTOS, reduced to what net_store needs: a task runs inline when it is created (the default), or is held until the test runs it.
 static unsigned tasks_created, task_stack, task_prio;
 static char task_name[16];
@@ -367,6 +370,30 @@ static void test_the_other_messages(void)
     r = ask("{\"t\":\"net.state\",\"ok\":true}");
     assert(!ok_of(r) && !strcmp(err_of(r), "op"));
     assert(s_unknown == 3);
+}
+
+// W16c (bench 2026-11-01): net.set stored wl_mode = 1 and the running mode switch was never told, so the dial stayed on USB when unplugged. Every write
+// (set, key, host, mode, clear) now tells it, after the write and before the reply; a failed write too (it may have left the marker off); a request
+// that was refused before any write does not.
+static void test_the_mode_switch_is_told_after_every_write(void)
+{
+    fresh();
+    glue_told = 0;
+    sends = 0;
+    assert(ok_of(ask(SET)) && glue_told == 1 && glue_sends_at_told == 0);
+    assert(ok_of(ask("{\"t\":\"net.key\",\"key\":\"" KEY2_B64 "\"}")) && glue_told == 2 && glue_sends_at_told == 0);
+    assert(ok_of(ask("{\"t\":\"net.host\",\"host\":\"10.0.0.2\",\"port\":19000}")) && glue_told == 3 && glue_sends_at_told == 0);
+    assert(ok_of(ask("{\"t\":\"net.mode\",\"mode\":0}")) && glue_told == 4 && glue_sends_at_told == 0);
+    assert(ok_of(ask("{\"t\":\"net.clear\"}")) && glue_told == 5 && glue_sends_at_told == 0);
+    // reads and refusals write nothing: no call
+    refused("{\"t\":\"net.mode\",\"mode\":2}", "mode");
+    refused("{\"t\":\"net.key\",\"key\":\"???\"}", "key");
+    assert(ok_of(ask("{\"t\":\"net.get\"}")) && glue_told == 5);
+    // a store that fails: the write may have gone half way, so the glue is told to read what NVS holds
+    host_nvs_fail_after(0);
+    refused(SET, "storage");
+    host_nvs_fail_after(-1);
+    assert(glue_told == 6);
 }
 
 static void test_off_the_cable_nothing_is_touched(void)
@@ -641,6 +668,7 @@ int main(void)
     test_get_when_nothing_is_set();
     test_a_refusal_names_the_field();
     test_the_other_messages();
+    test_the_mode_switch_is_told_after_every_write();
     test_off_the_cable_nothing_is_touched();
     test_without_the_feature_nothing_is_touched();
     test_a_failing_store();

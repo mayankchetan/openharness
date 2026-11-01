@@ -27,6 +27,7 @@
 #include "esp_timer.h"
 #include "fw_update.h"
 #include "last_words.h"
+#include "mode_glue.h"
 #include "pet_store.h"
 #include "power_sleep.h"
 #include "ram_telemetry.h"
@@ -1530,6 +1531,11 @@ static void net_store_task(void *arg)
     case 'k': err = config_net_set_key(r->key); break;
     default:  err = config_net_set_host(r->host, r->port); break;
     }
+    // Tell the running mode switch to read wl_mode and stay_wl again, on success and on failure (a failed write can leave the marker off, and the
+    // glue should see what NVS holds). Without this a dial that had no target keeps "USB, never leaves" until the next reboot: the bench saw net.set
+    // store wl_mode = 1 and the dial stay on USB for 75 s unplugged. The read is the mode switch's own, after this write has finished, and a drop to
+    // "no target" is confirmed by a second read (mg_apply_settings), so a marker window of a later write cannot send a Wi-Fi dial to USB.
+    mode_glue_settings_changed();
     net_zero(&s_net_req, sizeof s_net_req);
     net_reply(id, err == CFG_NET_OK, err == CFG_NET_OK ? NULL : config_net_err_name(err), true);
     ESP_LOGI(TAG, "net_store: stack high-water %u B free of %d", (unsigned)uxTaskGetStackHighWaterMark(NULL), NET_STORE_STACK);
