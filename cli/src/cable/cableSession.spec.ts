@@ -221,6 +221,107 @@ describe('cable session', () => {
       } finally { await session.stop() }
     })
 
+  // The 3 s footer poll runs for as long as a dial is focused on an agent, turn or no turn. Each frame wakes a sleeping Wi-Fi dial, so
+  // the poll may read as often as it likes but speaks only when what the dial was last told has changed.
+  describe('footer poll sends only a change', () => {
+    const activityFrames = (port: LoopbackPort) => port.sent.filter(m => m.t === 'turn.activity').map(m => m.text)
+    /** One poll tick: the 3 s rate limit is the clock's business, not this test's. */
+    const poll = async (session: CableSession) => { session['activityRefreshAt'] = 0; await session['refreshFocusedActivity']() }
+
+    it('an unchanged footer is sent once; a changed one is sent again; the liveness beat stays', async () => {
+      let footer: string | null = 'Working'
+      const { session, port } = await connect(makeHost({ activityText: async () => footer }))
+      try {
+        port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
+        await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
+        await session.focusAgent('a1')
+        port.sent.length = 0
+        for (let i = 0; i < 4; i++) await poll(session)
+        expect(activityFrames(port)).toEqual(['Working'])
+        // The dial's 25 s busy window is fed by turn.started, not by turn.activity: a live footer keeps beating.
+        expect(port.sent.filter(m => m.t === 'turn.started')).toHaveLength(4)
+        footer = 'Reading'
+        await poll(session)
+        await poll(session)
+        expect(activityFrames(port)).toEqual(['Working', 'Reading'])
+      } finally { await session.stop() }
+    })
+
+    it('an empty footer after an empty footer sends nothing; one clearing frame follows a real footer', async () => {
+      let footer: string | null = null
+      const activityText = vi.fn(async () => footer)
+      const { session, port } = await connect(makeHost({ activityText }))
+      try {
+        port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
+        await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
+        await session.focusAgent('a1')
+        port.sent.length = 0
+        for (let i = 0; i < 5; i++) await poll(session)
+        expect(activityText).toHaveBeenCalledTimes(5)   // it still looks; it does not talk
+        expect(activityFrames(port)).toEqual([''])
+        footer = 'Working'
+        await poll(session)
+        footer = null
+        await poll(session)   // the footer went away: the dial is told once
+        await poll(session)
+        await poll(session)
+        expect(activityFrames(port)).toEqual(['', 'Working', ''])
+        // A turn that ends and a footer that is still on screen: the dial has dropped the line with the turn, so it is told again.
+        footer = 'Working'
+        await poll(session)
+        await session.turnDone('a1')
+        session['activityEndedAt'].clear()
+        await poll(session)
+        expect(activityFrames(port)).toEqual(['', 'Working', '', 'Working', 'Working'])
+      } finally { await session.stop() }
+    })
+
+    it('a frame that is not the footer (a step line, a reply) counts as what the dial last heard', async () => {
+      const { session, port } = await connect(makeHost({ activityText: async () => 'Working' }), tmpLog())
+      try {
+        port.say({ t: 'hello', product: 'harness', mac: 'aa:bb', activity: 'steps-v1' })
+        await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
+        await session.focusAgent('a1')
+        port.sent.length = 0
+        await poll(session)
+        await session.turnStep('a1', 'Read · cableSession.ts')   // text '' on the wire: the dial blanks its footer line
+        await poll(session)
+        expect(activityFrames(port)).toEqual(['Working', '', 'Working'])
+      } finally { await session.stop() }
+    })
+
+    it('a new dial session is told the current state once, then nothing more', async () => {
+      const ports: LoopbackPort[] = []
+      const session = new CableSession(makeHost({ activityText: async () => 'Working' }), tmpLog(), async (onData, onClosed) => {
+        const next = new LoopbackPort(onData, onClosed)
+        ports.push(next)
+        return next
+      })
+      session.start()
+      try {
+        await vi.waitFor(() => expect(ports).toHaveLength(1))
+        ports[0].say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
+        await vi.waitFor(() => expect(ports[0].types()).toContain('agents.end'))
+        await session.focusAgent('a1')
+        ports[0].sent.length = 0
+        await poll(session)
+        await poll(session)
+        expect(activityFrames(ports[0])).toEqual(['Working'])
+        // The dial reboots (power-off, crash): the cable closes and a new one opens. The daemon still has the agent in focus.
+        await ports[0].close('dial rebooted')
+        await settle()
+        await vi.waitFor(() => expect(ports).toHaveLength(2), NEXT_TICKS)
+        ports[1].say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
+        await vi.waitFor(() => expect(ports[1].types()).toContain('agents.end'))
+        ports[1].sent.length = 0
+        await poll(session)
+        await poll(session)
+        await poll(session)
+        expect(activityFrames(ports[1])).toEqual(['Working'])
+      } finally { await session.stop() }
+    })
+  })
+
   it('does not read before connection or invent liveness when no native footer exists', async () => {
     const activityText = vi.fn(async () => null)
     const { session, port } = await connect(makeHost({ activityText }))

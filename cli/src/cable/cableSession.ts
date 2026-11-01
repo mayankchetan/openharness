@@ -1119,6 +1119,7 @@ export class CableSession {
     // A new port is a new dial until proven otherwise; tell it everything.
     this.lastAgentsKey = ''
     this.lastMachinesKey = ''
+    this.activitySent.clear()   // ... including the line it should show for the focused agent
     this.resetCapabilities()
     // INCLUDING which images it has been offered. `offered` holds bare version strings and named no dial,
     // so without this it outlived the session its comment claims it belongs to and became per-DAEMON:
@@ -1151,6 +1152,7 @@ export class CableSession {
     this.activityRefreshAt = 0
     this.activityRefreshAgent = ''
     this.activityLabels.clear()
+    this.activitySent.clear()
     // Unplugged, but not forgotten: the mac and the last settings ride along so the app can show the
     // device's rows read-only rather than emptying the pane. The settings are kept on the session too —
     // a device that comes back on the same port should not make the pane blink through empty.
@@ -3213,9 +3215,14 @@ export class CableSession {
     this.markLive(agentId)
     const read = {}
     this.activityReads.set(agentId, read)
+    this.activitySent.delete(agentId)   // a start resets the dial's line: the footer read below is always told
     await this.send({ t: 'turn.started', agentId, text })
     // The paragraph the agent last wrote, so the working screen has a sentence before the footer is read.
-    if (this.stepsActivity && update) await this.send({ t: 'turn.activity', agentId, text, action: clipUtf8(update, ACTION_MAX_BYTES) })
+    if (this.stepsActivity && update) {
+      const action = clipUtf8(update, ACTION_MAX_BYTES)
+      const link = this.link
+      if (await this.send({ t: 'turn.activity', agentId, text, action }) && this.link === link) this.noteActivitySent(agentId, JSON.stringify([text, action, '']))
+    }
     if (!this.link?.isOpen || !this.canReadActivity()) { this.activityReads.delete(agentId); return }
     let activity: ActivitySnapshot | null = null
     try { activity = await this.readActivity(agentId) } catch { /* unavailable is not a status */ }
@@ -3241,9 +3248,29 @@ export class CableSession {
   private async sendActivity(agentId: string, activity: ActivitySnapshot | null): Promise<void> {
     const steps = this.stepsActivity
     const seconds = activity?.elapsedSeconds
-    await this.send({ t: 'turn.activity', agentId, text: activity?.text ?? '',
-      ...(steps && activity?.action ? { action: clipUtf8(activity.action, ACTION_MAX_BYTES) } : {}),
+    const text = activity?.text ?? ''
+    const action = steps && activity?.action ? clipUtf8(activity.action, ACTION_MAX_BYTES) : ''
+    // Only a change is worth waking a Wi-Fi dial for. The dial keeps the line it was given until the turn ends, so an
+    // unchanged footer is not repeated and "no footer" after "no footer" is not said twice. `elapsedSeconds` alone is not a
+    // change: the firmware does not read it, and a timer that ticks would put a frame on the air every poll.
+    const key = JSON.stringify([text, action, ''])
+    if (this.activitySent.get(agentId) === key) return
+    const link = this.link
+    const sent = await this.send({ t: 'turn.activity', agentId, text,
+      ...(action ? { action } : {}),
       ...(steps && Number.isSafeInteger(seconds) && seconds! >= 0 && seconds! <= 2_592_000 ? { elapsedSeconds: seconds } : {}) })
+    if (sent && this.link === link) this.noteActivitySent(agentId, key)
+  }
+  /**
+   * What each agent's line on the dial was last set to by a `turn.activity` frame in THIS dial session: [text, action, step]
+   * as one string. The dial replaces its line with every such frame (a step or a reply frame carries `text: ''` and blanks it),
+   * so every sender records here, and the footer poll compares against the last of them. Forgotten when the turn ends (the dial
+   * drops the line with it) and when the dial goes away or a new one opens.
+   */
+  private readonly activitySent = new Map<string, string>()
+  private noteActivitySent(agentId: string, key: string): void {
+    if (!this.activitySent.has(agentId) && this.activitySent.size >= 256) this.activitySent.delete(this.activitySent.keys().next().value!)
+    this.activitySent.set(agentId, key)
   }
   private readonly activityReads = new Map<string, object>()
   /**
@@ -3286,6 +3313,8 @@ export class CableSession {
       if (!current()) return
       // A visible engine footer is direct evidence of work. Recover liveness even
       // when the transcript's turn.started happened before we attached.
+      // A turn this daemon had closed (or never saw) comes back to life here, and the dial's line starts empty again: tell it.
+      if (activity && !this.liveTurns.has(agentId)) this.activitySent.delete(agentId)
       if (activity) this.markLive(agentId)
       if (activity) await this.send({ t: 'turn.started', agentId, text: activity.text })
       if (!current()) return
@@ -3304,12 +3333,15 @@ export class CableSession {
   async turnStep(agentId: string, step: string): Promise<void> {
     this.markLive(agentId)
     if (!this.stepsActivity) return
-    await this.send({ t: 'turn.activity', agentId, text: '', step })
+    const link = this.link
+    if (await this.send({ t: 'turn.activity', agentId, text: '', step }) && this.link === link) this.noteActivitySent(agentId, JSON.stringify(['', '', step]))
   }
   /** The agent's reply as it streams: its latest paragraph as `action`, for a `steps-v1` device's working screen. Nobody else is told. */
   async turnReply(agentId: string, action: string): Promise<void> {
     if (!this.stepsActivity || !action) return
-    await this.send({ t: 'turn.activity', agentId, text: '', action: clipUtf8(action, ACTION_MAX_BYTES) })
+    const clipped = clipUtf8(action, ACTION_MAX_BYTES)
+    const link = this.link
+    if (await this.send({ t: 'turn.activity', agentId, text: '', action: clipped }) && this.link === link) this.noteActivitySent(agentId, JSON.stringify(['', clipped, '']))
   }
   /** A connected device that wants `turn.stats`: the token reads are only worth doing for one. */
   get wantsStats(): boolean { return this.statsTurn && this.isConnected }
@@ -3474,6 +3506,7 @@ export class CableSession {
    */
   private endLive(agentId: string): void {
     this.turnOpen.delete(agentId)
+    this.activitySent.delete(agentId)   // the dial drops its activity line with the turn
     if (this.superTabAsks.has(agentId)) this.liveTurns.set(agentId, 'question')
     else this.liveTurns.delete(agentId)
   }
