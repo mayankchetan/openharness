@@ -25,6 +25,11 @@
 // next magic), exactly as for a bad CRC. MS suggested "about 1 KB, set from a daemon log": the daemon's probe welcome is under 100 bytes and a
 // full welcome from an older daemon is a few hundred (cableSession.probe.spec.ts holds the first to 256).
 #define UP_FRAME_CAP 1024u
+// The decoder is fed in chunks of this size, and one up_core_pump call takes the first chunk plus at most UP_DRAIN_CHUNKS more. 9 x 128 B is a little
+// over what the driver's 1 KB ring holds, so one call empties a ring that filled while the task was away; a host that keeps sending gets the next
+// call after the task has given the CPU away (usb_probe.c).
+#define UP_READ_CHUNK 128u
+#define UP_DRAIN_CHUNKS 8u
 // Hello cadence: HELLO_ALONE_MS of cable_client.c, and the figure the 3 s welcome-age limit of mode_switch.h was derived from.
 #define UP_HELLO_MS 2000u
 
@@ -43,6 +48,12 @@ bool up_core_init(up_core_t *p, uint8_t *buf, size_t cap);
 void up_core_start(up_core_t *p, uint64_t now_ms);
 // Bytes from the port. `now_ms` stamps any welcome they complete.
 void up_core_feed(up_core_t *p, const uint8_t *data, size_t n, uint64_t now_ms);
+// A port read: up to `cap` bytes into `buf`, waiting up to `wait_ms` for the first. Returns the byte count, 0 for none, negative for an error.
+typedef int (*up_read_fn)(void *ctx, uint8_t *buf, size_t cap, uint32_t wait_ms);
+// Read what the host has sent (the first read waits up to `wait_ms`, the rest do not) and feed it to the decoder, at most 1 + UP_DRAIN_CHUNKS chunks.
+// True when it stopped on that bound with bytes still coming (the caller yields the CPU before the next call); false when the port ran dry or
+// failed, or the probe or the reader is missing.
+bool up_core_pump(up_core_t *p, up_read_fn rd, void *ctx, uint32_t wait_ms, uint64_t now_ms);
 // True once per UP_HELLO_MS (and at once after up_core_start). A stall is one hello, not a burst. A clock that steps back does not fire.
 bool up_core_hello_due(up_core_t *p, uint64_t now_ms);
 // The hello as an encoded CABLE_TYPE_JSON frame: {"t":"hello","product":P,"proto":N,"probe":1}, and nothing else (no mac, no settings, no pet list).

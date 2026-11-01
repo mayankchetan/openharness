@@ -207,3 +207,38 @@ bool ms_record_load(const ms_record_t *r, bool reset_is_software, ms_record_view
     }
     return true;
 }
+
+// ── the panic loop ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+uint32_t ms_crash_crc(const ms_crash_t *r)
+{
+    if (!r) return 0;
+    uint32_t crc = 0xFFFFFFFFu;
+    crc = crc32_update(crc, (const unsigned char *)&r->magic, sizeof r->magic);
+    crc = crc32_update(crc, (const unsigned char *)&r->crashes, sizeof *r - offsetof(ms_crash_t, crashes));
+    return ~crc;
+}
+
+void ms_crash_seal(ms_crash_t *r, uint8_t crashes, ms_mode_t running)
+{
+    if (!r) return;
+    memset(r, 0, sizeof *r);
+    r->magic = MS_CRASH_MAGIC;
+    r->crashes = crashes > MS_CRASH_MAX ? (uint8_t)MS_CRASH_MAX : crashes;
+    r->mode = (uint8_t)running;
+    r->check = ms_crash_crc(r);
+}
+
+void ms_crash_boot(const ms_crash_t *r, ms_reset_t cls, ms_crash_view_t *out)
+{
+    ms_crash_view_t local;
+    ms_crash_view_t *v = out ? out : &local;
+    memset(v, 0, sizeof *v);
+    if (!r || cls == MS_RESET_POWERON) return;
+    if (r->magic != MS_CRASH_MAGIC || r->check != ms_crash_crc(r)) return;
+    if (r->crashes > MS_CRASH_MAX || !mode_valid((ms_mode_t)r->mode)) return;
+    v->crashes = r->crashes;
+    if (cls == MS_RESET_CRASH && r->mode == (uint8_t)MS_MODE_WIFI) {
+        if (v->crashes < MS_CRASH_MAX) v->crashes++;
+        v->trip = v->crashes >= MS_CRASH_LIMIT;
+    }
+}

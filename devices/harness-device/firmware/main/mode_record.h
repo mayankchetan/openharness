@@ -27,3 +27,19 @@ void mode_record_clear_flaps(void);
 // Host tests only: the record itself, to scribble over (a power cut) or to inspect.
 ms_record_t *mode_record_raw_for_test(void);
 #endif
+
+// ── the crash record (panic loop, user decision 2026-10-31; rules in mode_switch.h) ──────────────────────────────────────────────────────────
+// A sibling RTC_NOINIT variable with its own checksum. Unlike the record above it is believed after EVERY kind of reset but a power-on, because
+// it exists to count the abnormal ones. A power cut that loses it loses the count; that is the safe side.
+
+// At boot, once, before the boot decision. Returns whether this boot is the third (or later) crash in a row in Wi-Fi mode and sets *crashes to the
+// count after this reset. A power-on zeroes the record. Writes nothing otherwise: seal after the mode is known.
+bool mode_record_crash_boot(ms_reset_t cls, uint8_t *crashes);
+// Seal the count and the mode that is running (or about to start). Called after the boot decision, and again with the mode that really started.
+void mode_record_crash_seal(uint8_t crashes, ms_mode_t running);
+// MS_CRASH_CLEAR_MS of uptime in Wi-Fi mode: the count goes to zero, the mode stays.
+void mode_record_crash_clear(void);
+
+#ifdef MODE_RECORD_HOST
+ms_crash_t *mode_record_crash_raw_for_test(void);
+#endif

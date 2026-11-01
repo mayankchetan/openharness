@@ -16,6 +16,7 @@
 #include "last_words.h"
 #include "mode_glue_core.h"
 #include "mode_record.h"
+#include "store_gate.h"
 #include "ui/display.h"
 #include "ui/ui_screens.h"
 #include "usb_probe.h"
@@ -32,6 +33,7 @@ _Static_assert(MS_WL_WIFI == 1 && MS_WL_UNSET == 0, "config_load_wl_effective() 
 #define PROBE_READ_MS 40         // probe on: read for up to this long between steps, so a burst from the daemon is drained quickly
 #define PROBE_RETRY_MS 5000      // the driver would not install: try again this often (a dial that cannot probe cannot come back to USB)
 #define RESTART_FLUSH_MS 150     // let the last log lines out before the reset
+#define RESTART_FREEZE_MS 500    // how long an NVS writer in flight is waited for before the reset (power_off.c waits 2,000 ms before cutting the power)
 
 static mg_boot_out_t s_boot;
 static mg_t s_mg;
@@ -39,10 +41,42 @@ static ms_mode_t s_running = MS_MODE_USB;
 static char s_focus[MS_FOCUS_MAX];     // the agent to restore, copied out of the boot plan
 static bool s_focus_pending;
 static atomic_bool s_reload;           // mode_glue_settings_changed(): the task re-reads wl_mode and stay_wl at its next step
+static bool s_crash_usb;               // this boot took USB because of the panic loop (said again once the daemon is likely to be listening)
+static uint8_t s_crashes;              // the crash count as of this boot
 
 static uint64_t uptime_ms(void) { return (uint64_t)(esp_timer_get_time() / 1000); }
 
 // ── boot ────────────────────────────────────────────────────────────────────────────────────────────
+
+// How the panic loop (mode_switch.h) sees a reset. The sets are the user's rule of 2026-10-31 (a crash is any reset that is not a power-on, a software
+// restart or a deep-sleep wake) with one deliberate exception: a reset somebody asked for (the reset pin, a flash tool over USB, a debugger) holds the
+// count like a software restart does, because three flashes in a row are not three crashes. Every enumerator is named so that a reason a later IDF
+// adds is a decision here, not an accident; the default is "crash" (test_mode_glue_source.py checks the sets).
+static ms_reset_t reset_class(esp_reset_reason_t reason)
+{
+    switch (reason) {
+    case ESP_RST_POWERON:
+        return MS_RESET_POWERON;
+    case ESP_RST_SW:
+    case ESP_RST_DEEPSLEEP:
+    case ESP_RST_EXT:
+    case ESP_RST_USB:
+    case ESP_RST_JTAG:
+        return MS_RESET_HOLD;
+    case ESP_RST_PANIC:
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:
+    case ESP_RST_BROWNOUT:
+    case ESP_RST_UNKNOWN:
+    case ESP_RST_SDIO:
+    case ESP_RST_EFUSE:
+    case ESP_RST_PWR_GLITCH:
+    case ESP_RST_CPU_LOCKUP:
+    default:
+        return MS_RESET_CRASH;
+    }
+}
 
 ms_mode_t mode_glue_boot(void)
 {
@@ -50,6 +84,8 @@ ms_mode_t mode_glue_boot(void)
     memset(&in, 0, sizeof in);
     // The record first: only a software reset makes it believable, and the reason is read from the chip, not from anything stored.
     in.record_ok = mode_record_boot(esp_reset_reason() == ESP_RST_SW, &in.record);
+    // The crash record is believed after every reset but a power-on (it is there to count the abnormal ones).
+    in.crash_trip = mode_record_crash_boot(reset_class(esp_reset_reason()), &in.crashes);
     in.wl_effective = config_load_wl_effective();
     in.stay_wl = config_load_stay_wl();
     in.boot_usb = config_load_boot_usb();
@@ -63,6 +99,12 @@ ms_mode_t mode_glue_boot(void)
     in.sof = usb_serial_jtag_is_connected();
     in.sof_read_ms = (uint32_t)uptime_ms();
     mg_boot(&in, &s_boot);
+    // At once, with the mode that is about to start: a crash while the radio comes up is counted against Wi-Fi. mode_glue_start() seals again with
+    // the mode that really started.
+    mode_record_crash_seal(s_boot.crashes, s_boot.mode);
+    s_crash_usb = s_boot.crash_usb;
+    s_crashes = s_boot.crashes;
+    if (s_crash_usb) ESP_LOGW(TAG, "Wi-Fi mode crashed %u times; started in USB", (unsigned)s_crashes);
     if (s_boot.write_boot_usb && !config_save_boot_usb(s_boot.boot_usb_new))
         ESP_LOGW(TAG, "boot_usb could not be stored; the next boot may pick the other mode (the flap cap bounds it)");
     snprintf(s_focus, sizeof s_focus, "%s", s_boot.focus);
@@ -141,14 +183,45 @@ static bool op_store_boot_usb(void *ctx, bool boot_usb)
     return ok;
 }
 
-static void op_restart(void *ctx, ms_mode_t target)
+static void op_clear_crashes(void *ctx)
+{
+    (void)ctx;
+    mode_record_crash_clear();
+    s_crashes = 0;
+    ESP_LOGI(TAG, "10 minutes up in Wi-Fi mode: the crash count is cleared");
+}
+
+// A refused restart: the sequence had written the target's boot_usb and a raised flap count. Put both back, so a reset that comes for another reason
+// finds the dial as it was; the reason noted for last_words is blanked too (it said "mode switch"). The next step starts the sequence again.
+static void op_undo(void *ctx, ms_mode_t running, uint8_t flaps)
+{
+    (void)ctx;
+    last_words_note_reason("");
+    if (!config_save_boot_usb(running == MS_MODE_USB)) ESP_LOGW(TAG, "boot_usb could not be put back after the refused restart");
+    mode_record_save(NULL, flaps);
+}
+
+static bool op_restart(void *ctx, ms_mode_t target)
 {
     (void)ctx;
     (void)target;
     ESP_LOGI(TAG, "stack free_min=%u B (restart)", (unsigned)uxTaskGetStackHighWaterMark(NULL));
     usb_probe_stop();
     vTaskDelay(pdMS_TO_TICKS(RESTART_FLUSH_MS));
+    // The sequence before this took a display lock, an NVS commit and 150 ms, and the user may have started a voice turn, a draft or a pet upload
+    // meanwhile. Stop the NVS writers first (as power_off.c does before it cuts the power: no write is half done when the reset comes), then look at
+    // the gate one last time, hard rows and soft rows by the same rule as the step (ms_blocked). Nothing but the call below follows the look.
+    if (!store_gate_freeze(RESTART_FREEZE_MS)) {
+        ESP_LOGW(TAG, "restart postponed: an NVS writer did not finish in %d ms", RESTART_FREEZE_MS);
+        return false;
+    }
+    if (mode_switch_blocked()) {
+        store_gate_thaw();
+        ESP_LOGW(TAG, "restart called off: the dial turned busy at the last moment (busy=%#x); it will try again", (unsigned)mode_switch_busy());
+        return false;
+    }
     esp_restart();
+    return true;   // not reached
 }
 
 static const mg_ops_t OPS = {
@@ -160,6 +233,8 @@ static const mg_ops_t OPS = {
     .seal = op_seal,
     .store_boot_usb = op_store_boot_usb,
     .restart = op_restart,
+    .clear_crashes = op_clear_crashes,
+    .undo = op_undo,
 };
 
 static void sample(mg_world_t *w, uint64_t now)
@@ -203,6 +278,11 @@ static void mode_sw_task(void *arg)
         if (now >= next_mark) {
             next_mark = now + 600000;
             ESP_LOGI(TAG, "stack free_min=%u B", (unsigned)uxTaskGetStackHighWaterMark(NULL));
+            // The panic loop's reason, again: the boot line may have gone out before a daemon was listening.
+            if (s_crash_usb) {
+                s_crash_usb = false;
+                ESP_LOGW(TAG, "Wi-Fi mode crashed %u times; started in USB", (unsigned)s_crashes);
+            }
         }
 
         const uint64_t t = uptime_ms();
@@ -219,6 +299,8 @@ void mode_glue_start(ms_mode_t running)
 {
     s_running = running == MS_MODE_WIFI ? MS_MODE_WIFI : MS_MODE_USB;
     mg_init(&s_mg, s_running, s_boot.flaps, config_load_wl_effective(), config_load_stay_wl());
+    mg_note_crashes(&s_mg, s_crashes);
+    mode_record_crash_seal(s_crashes, s_running);   // the mode that really started (the radio may not have come up: then USB, and a crash is not Wi-Fi's)
     if (xTaskCreate(mode_sw_task, "mode_sw", TASK_STACK, NULL, TASK_PRIO, NULL) != pdPASS)
         ESP_LOGE(TAG, "mode_sw task create failed: this dial will not switch modes by itself");
     else

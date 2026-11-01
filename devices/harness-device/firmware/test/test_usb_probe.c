@@ -292,8 +292,137 @@ static void test_init_refuses_nonsense(void)
     assert(!p.have_welcome);
 }
 
+// The depth limit (review finding 5). The daemon's welcomes nest three levels at the most (machine{}, features[], and one object or array inside);
+// the limit is 6, so a real welcome has room and a hostile payload cannot run the stack out. Depth 7 is refused, not crashed on.
+static void test_nesting_limit(void)
+{
+    char buf[400];
+    for (int levels = 1; levels <= 40; levels++) {
+        int n = 0;
+        n += snprintf(buf + n, sizeof buf - (size_t)n, "{\"t\":\"welcome\",\"x\":");
+        for (int k = 0; k < levels; k++) buf[n++] = '[';
+        buf[n++] = '0';
+        for (int k = 0; k < levels; k++) buf[n++] = ']';
+        buf[n++] = '}';
+        const bool got = up_is_welcome((const uint8_t *)buf, (size_t)n);
+        if (got != (levels <= 6)) { fprintf(stderr, "nesting %d: got %d\n", levels, (int)got); assert(0); }
+    }
+    // objects count the same as arrays, and mixed
+    const char *six = "{\"t\":\"welcome\",\"a\":{\"b\":[{\"c\":[{\"d\":[0]}]}]}}";
+    const char *seven = "{\"t\":\"welcome\",\"a\":{\"b\":[{\"c\":[{\"d\":[{\"e\":0}]}]}]}}";
+    assert(up_is_welcome((const uint8_t *)six, strlen(six)));
+    assert(!up_is_welcome((const uint8_t *)seven, strlen(seven)));
+    // the same through the frame decoder: a deep welcome is not one, and the next real welcome is still found
+    fresh();
+    uint8_t f[CABLE_MAX_FRAME];
+    int n = 0;
+    n += snprintf(buf, sizeof buf, "{\"t\":\"welcome\",\"x\":");
+    for (int k = 0; k < 7; k++) buf[n++] = '[';
+    buf[n++] = '0';
+    for (int k = 0; k < 7; k++) buf[n++] = ']';
+    buf[n++] = '}';
+    buf[n] = 0;
+    feed_json(buf, 10);
+    assert(!g_p.have_welcome);
+    up_core_feed(&g_p, f, json_frame("{\"t\":\"welcome\",\"probe\":1}", f, sizeof f), 20);
+    assert(g_p.have_welcome && g_p.last_welcome_ms == 20);
+    // a payload that is nothing but opening brackets after the key, up to the cap, does not recurse past the limit (the sanitizer build would show it)
+    char brackets[UP_FRAME_CAP];
+    memcpy(brackets, "{\"t\":\"welcome\",\"x\":", 19);
+    memset(brackets + 19, '[', sizeof brackets - 19);
+    assert(!up_is_welcome((const uint8_t *)brackets, sizeof brackets - 10));
+}
+
+// The drain loop (review finding 3). usb_probe_poll used to read until the ring was empty: a host that streams frames as fast as the port takes them
+// (crafted 1 KB frames with a bad CRC, say) kept the task in that loop and starved the idle task. up_core_pump reads at most 1 + UP_DRAIN_CHUNKS
+// chunks per call and says when it stopped on the bound; usb_probe.c gives the CPU away after a bounded call.
+typedef struct {
+    const uint8_t *data;       // what the "port" holds
+    size_t len, pos;
+    bool endless;              // refill from the start for ever
+    unsigned calls;
+    uint32_t first_wait, later_wait_max;
+    unsigned fail_at;          // a call number that returns -1
+} port_t;
+
+static int port_read(void *ctx, uint8_t *buf, size_t cap, uint32_t wait_ms)
+{
+    port_t *p = ctx;
+    p->calls++;
+    if (p->calls == 1) p->first_wait = wait_ms;
+    else if (wait_ms > p->later_wait_max) p->later_wait_max = wait_ms;
+    if (p->fail_at && p->calls == p->fail_at) return -1;
+    size_t n = 0;
+    while (n < cap) {
+        if (p->pos >= p->len) {
+            if (!p->endless) break;
+            p->pos = 0;
+        }
+        buf[n++] = p->data[p->pos++];
+    }
+    return (int)n;
+}
+
+static void test_pump_is_bounded(void)
+{
+    // a flood of 1 KB frames whose CRC is wrong, as long as the port takes reads
+    static uint8_t flood[1024];
+    uint8_t body[1016];
+    memset(body, 'a', sizeof body);
+    const int fl = cable_frame_encode(CABLE_TYPE_JSON, body, sizeof body, flood, sizeof flood);
+    assert(fl == 1024);
+    flood[fl - 1] ^= 0xFF;     // bad CRC
+    port_t port = {.data = flood, .len = (size_t)fl, .endless = true};
+    fresh();
+    const bool more = up_core_pump(&g_p, port_read, &port, 40, 1000);
+    assert(more);                                         // stopped on the bound, not on an empty port
+    assert(port.calls == 1u + UP_DRAIN_CHUNKS);
+    assert(port.first_wait == 40 && port.later_wait_max == 0);   // only the first read waits
+    assert(!g_p.have_welcome);
+    // and again: the bound is per call, the next call gets its own
+    assert(up_core_pump(&g_p, port_read, &port, 40, 1040));
+    assert(port.calls == 2u * (1u + UP_DRAIN_CHUNKS));
+    assert(UP_DRAIN_CHUNKS * UP_READ_CHUNK <= 1024);      // one call takes little more than the driver's ring holds
+
+    // a port that runs dry: everything is read, the last empty read ends it, and it is not "more"
+    uint8_t f[CABLE_MAX_FRAME];
+    const size_t n = json_frame("{\"t\":\"welcome\",\"probe\":1}", f, sizeof f);
+    port_t dry = {.data = f, .len = n};
+    fresh();
+    assert(!up_core_pump(&g_p, port_read, &dry, 40, 5000));
+    assert(dry.calls == 2 && g_p.have_welcome && g_p.last_welcome_ms == 5000);
+
+    // an old daemon's roster burst bigger than one call takes: the welcome in front is found at once, the rest over later calls
+    static uint8_t burst[4096];
+    size_t len = json_frame("{\"t\":\"welcome\",\"proto\":4}", burst, sizeof burst);
+    while (len < 3000) len += json_frame("{\"t\":\"agent\",\"id\":\"abc\",\"name\":\"an agent with a name\"}", burst + len, sizeof burst - len);
+    port_t roster = {.data = burst, .len = len};
+    fresh();
+    unsigned pumps = 0;
+    bool again = true;
+    while (again) { again = up_core_pump(&g_p, port_read, &roster, 40, 6000 + pumps); pumps++; assert(pumps < 100); }
+    assert(pumps >= 3 && roster.pos == roster.len);       // read in slices of at most 9 chunks, all of it in the end
+    assert(g_p.have_welcome && g_p.last_welcome_ms == 6000);
+
+    // a read error ends the call and is not "more"
+    port_t bad = {.data = flood, .len = (size_t)fl, .endless = true, .fail_at = 3};
+    fresh();
+    assert(!up_core_pump(&g_p, port_read, &bad, 40, 1));
+    assert(bad.calls == 3);
+
+    // NULL arguments and a dead probe
+    assert(!up_core_pump(NULL, port_read, &port, 40, 0));
+    assert(!up_core_pump(&g_p, NULL, &port, 40, 0));
+    up_core_t dead;
+    memset(&dead, 0, sizeof dead);
+    const unsigned before = port.calls;
+    assert(!up_core_pump(&dead, port_read, &port, 40, 0) && port.calls == before);   // an uninitialised probe reads nothing
+}
+
 int main(void)
 {
+    test_nesting_limit();
+    test_pump_is_bounded();
     test_hello_frame();
     test_welcome_detection();
     test_feed_stamps_the_newest_welcome();

@@ -15,8 +15,12 @@ the rules that keep a dial able to get back to USB.
      view; the model list, the pet upload and the update are counted by mode_switch_busy.
   6. last_words: the reason of a mode switch survives the reset and is used once.
   7. The build and the test run know the new files.
+  8. Review fixes (2026-10-31): the restart op freezes the NVS writers and looks at the busy gate last; the one cross-task 64-bit timestamp is atomic;
+     the probe's drain is bounded; the welcome scanner's depth limit.
+  9. The panic loop: the exact sets of reset reasons, the order of the crash record's reads and writes at boot, the 10-minute clear.
 """
 from pathlib import Path
+import os
 import re
 
 fw = Path(__file__).resolve().parent / '..'
@@ -82,6 +86,12 @@ assert boot.count('usb_serial_jtag_is_connected()') == 1, 'the SOF flag is read 
 assert boot.index('MS_SOF_SETTLE_MS') < boot.index('usb_serial_jtag_is_connected()'), 'the 20 ms settle comes before the read'
 assert 'esp_reset_reason() == ESP_RST_SW' in boot and 'mode_record_boot(' in boot, 'the record is believed only after a software reset'
 assert boot.index('mode_record_boot(') < boot.index('mg_boot('), 'the record is read before the decision'
+# the panic loop at boot: the crash record is read (with the class of the reset) before the decision, sealed right after it, and the reason is logged
+assert 'mode_record_crash_boot(reset_class(esp_reset_reason()), &in.crashes)' in boot and boot.index('mode_record_crash_boot(') < boot.index('mg_boot(')
+assert 'in.crash_trip = mode_record_crash_boot(' in boot, 'the answer of the crash record is the decision input'
+assert 'mode_record_crash_seal(s_boot.crashes, s_boot.mode)' in boot and boot.index('mg_boot(') < boot.index('mode_record_crash_seal('), 'sealed with the decided mode'
+assert 'Wi-Fi mode crashed %u times; started in USB' in raw_glue
+assert 's_boot.crash_usb' in boot
 assert 'config_load_wl_effective()' in boot and 'config_load_stay_wl()' in boot and 'config_load_boot_usb()' in boot
 assert 'config_save_boot_usb(s_boot.boot_usb_new)' in boot and 's_boot.write_boot_usb' in boot, 'boot_usb is rewritten only when the plan says so'
 assert re.search(r'_Static_assert\(MS_FOCUS_MAX == ID_MAX', raw_glue), 'the record holds an agent id: same size as cable_client.h'
@@ -92,7 +102,7 @@ assert 'task_create_psram' not in glue
 assert int(re.search(r'#define TASK_STACK (\d+)', glue)[1]) >= 4096
 # the sequence: the ops table is the one place the reboot is spelled, and the core fixes the order (test_mode_glue.c holds it)
 ops = re.search(r'static const mg_ops_t OPS = \{(.*?)\};', glue, re.S)[1]
-for field in ('probe', 'notice', 'clear_flaps', 'log_reason', 'seal', 'store_boot_usb', 'restart'):
+for field in ('probe', 'notice', 'clear_flaps', 'log_reason', 'seal', 'store_boot_usb', 'restart', 'clear_crashes', 'undo'):
     assert re.search(r'\.' + field + r' = op_\w+', ops), field
 assert glue.count('esp_restart()') == 1 and 'esp_restart()' in body(glue, 'op_restart')
 assert 'last_words_note_reason(MS_REASON_SWITCH)' in body(glue, 'op_log_reason')
@@ -102,12 +112,28 @@ core = code('mode_glue_core.c')
 step = body(core, 'mg_step')
 order = [step.index(x) for x in ('ops->log_reason(', 'ops->seal(', 'ops->store_boot_usb(', 'ops->restart(')]
 assert order == sorted(order), 'log, seal, store, restart'
+# a refused restart is undone and the core goes on: done is cleared, so the sequence runs again at a later step
+assert re.search(r'if \(ops->restart && !ops->restart\(ops->ctx, out\.target\)\) \{\s*if \(ops->undo\) ops->undo\(ops->ctx, g->ms\.mode, g->ms\.flaps\);\s*g->done = false;', step), \
+    'a refused restart: undo, then done = false'
+assert 'g->ms.mode == MS_MODE_WIFI' in step and 'MS_CRASH_CLEAR_MS' in step and 'ops->clear_crashes(' in step, 'ten minutes up in Wi-Fi clear the crash count; USB time does not'
 # a probe that did not install is tried again: a dial that cannot probe cannot come back to USB
 task = body(glue, 'mode_sw_task')
 assert 'PROBE_RETRY_MS' in task and 'usb_probe_running()' in task and 'usb_probe_start(' in task
 assert 'usb_probe_poll(' in task and task.index('usb_probe_poll(') > task.index('usb_probe_start(')
 # the probe is asked for only through the module's answer, and never while the dial runs on USB
 assert 'usb_probe_start(' in body(glue, 'op_probe') and 'usb_probe_stop()' in body(glue, 'op_probe')
+# the restart op (review finding 2): the NVS writers are frozen, THEN the busy gate is looked at (hard and soft rows, the step's own predicate), THEN
+# esp_restart() with nothing in between; a refusal thaws and returns false. The undo op puts boot_usb and the record back.
+assert re.search(r'static bool op_restart\(', glue)
+rs = body(glue, 'op_restart')
+assert rs.index('usb_probe_stop()') < rs.index('store_gate_freeze(') < rs.index('mode_switch_blocked()') < rs.index('esp_restart()')
+assert re.search(r'if \(mode_switch_blocked\(\)\) \{[^}]*store_gate_thaw\(\);[^}]*return false;\s*\}\s*esp_restart\(\);', rs), 'nothing between the last look and the restart; a refusal thaws'
+assert rs.count('return false;') == 2 and 'RESTART_FREEZE_MS' in rs
+undo = body(glue, 'op_undo')
+assert 'config_save_boot_usb(running == MS_MODE_USB)' in undo and 'mode_record_save(NULL, flaps)' in undo and 'last_words_note_reason("")' in undo
+assert 'mode_record_crash_clear()' in body(glue, 'op_clear_crashes')
+gate = text('store_gate.h')
+assert 'store_gate_freeze' in gate.split('#else')[1] and 'store_gate_thaw' in gate.split('#else')[1], 'the build without DEVICE_BATTERY_POWEROFF has the calls too'
 sample = body(glue, 'sample')
 assert 'usb_probe_last_welcome(' in sample and sample.index('s_running == MS_MODE_USB') < sample.index('usb_probe_last_welcome('), 'welcomes are read only in a wireless mode'
 # the clock handed to the module is wrap-safe
@@ -181,7 +207,47 @@ client = code('cable_client.c')
 assert '((model_item_t *volatile *)&s_models_out)[0] != NULL' in body(client, 'cable_client_models_waiting')
 assert 's_pet_id[0] != 0' in body(client, 'cable_client_pet_upload_active')
 daemon = body(client, 'cable_client_last_daemon_byte')
-assert 's_last_rx_us' in daemon and 'tries' in daemon and 'if (a == b) break;' in daemon,'a 64-bit value on a 32-bit CPU is read until two reads agree'
+# The one timestamp that crosses tasks is 64 bits on a 32-bit CPU. A plain read can tear, and a "read twice until equal" loop over a plain variable can
+# be merged into one read by the compiler. _Atomic makes each load a single indivisible operation (the library routine, a spinlock in newlib/stdatomic.c).
+assert re.search(r'static _Atomic int64_t\s+s_last_rx_us;', client), 's_last_rx_us is atomic'
+assert 'atomic_load(&s_last_rx_us)' in daemon and 'tries' not in daemon and 'for (' not in daemon, 'one atomic load, no retry loop to merge'
+
+# the probe's drain is bounded (review finding 3) and the scanner's depth limit is the welcome's, not 16 (finding 5)
+poll = body(probe, 'usb_probe_poll')
+assert 'up_core_pump(&s_core, port_read, NULL, wait_ms, now_ms)' in poll and 'vTaskDelay(1)' in poll and 'while' not in poll and 'usb_serial_jtag_read_bytes(' not in poll
+assert 'usb_serial_jtag_read_bytes(buf, cap, pdMS_TO_TICKS(wait_ms))' in body(probe, 'port_read')
+core_src = code('usb_probe_core.c')
+assert re.search(r'#define MAX_DEPTH 6\b', core_src), 'depth 6: a welcome nests three levels at the most'
+assert re.search(r'#define UP_DRAIN_CHUNKS (\d+)u', text('usb_probe_core.h')) and int(re.search(r'#define UP_DRAIN_CHUNKS (\d+)u', text('usb_probe_core.h'))[1]) <= 16
+pump = body(core_src, 'up_core_pump')
+assert 'UP_DRAIN_CHUNKS' in pump and pump.count('rd(ctx') == 2
+
+# ── 9. the panic loop: the exact reset sets ─────────────────────────────────────────────────────────
+rc = body(glue, 'reset_class')
+groups = {}
+for labels, cls in re.findall(r'((?:(?:case ESP_RST_\w+|default):\s*)+)return (MS_RESET_\w+);', rc):
+    groups.setdefault(cls, set()).update(re.findall(r'ESP_RST_\w+|default', labels))
+assert groups == {
+    'MS_RESET_POWERON': {'ESP_RST_POWERON'},
+    'MS_RESET_HOLD': {'ESP_RST_SW', 'ESP_RST_DEEPSLEEP', 'ESP_RST_EXT', 'ESP_RST_USB', 'ESP_RST_JTAG'},
+    'MS_RESET_CRASH': {'ESP_RST_PANIC', 'ESP_RST_INT_WDT', 'ESP_RST_TASK_WDT', 'ESP_RST_WDT', 'ESP_RST_BROWNOUT', 'ESP_RST_UNKNOWN', 'ESP_RST_SDIO',
+                       'ESP_RST_EFUSE', 'ESP_RST_PWR_GLITCH', 'ESP_RST_CPU_LOCKUP', 'default'},
+}, groups
+# every reason the SDK knows is named above, so a new one is a decision (checked when IDF_PATH is set, as run.sh does for the other SDK tests)
+idf = os.environ.get('IDF_PATH')
+if idf and (Path(idf) / 'components/esp_system/include/esp_system.h').exists():
+    sdk = (Path(idf) / 'components/esp_system/include/esp_system.h').read_text()
+    enum = re.search(r'typedef enum \{(.*?)\} esp_reset_reason_t;', sdk, re.S)[1]
+    known = set(re.findall(r'\bESP_RST_\w+', enum))
+    named = set().union(*groups.values()) - {'default'}
+    assert known <= named, f'ESP_RST reasons not classified in reset_class(): {sorted(known - named)}'
+# the crash record is its own RTC variable with a checksum, and the wrapper writes nothing at boot but the power-on zeroing
+rec = code('mode_record.c')
+assert re.search(r'static RTC_NOINIT_ATTR ms_crash_t s_crash;', rec)
+cb = body(rec, 'mode_record_crash_boot')
+assert 'ms_crash_boot(&s_crash, cls, &v)' in cb and 'ms_crash_seal' not in cb and 'cls == MS_RESET_POWERON' in cb
+assert 'mg_note_crashes(&s_mg, s_crashes)' in body(glue, 'mode_glue_start') and 'mode_record_crash_seal(s_crashes, s_running)' in body(glue, 'mode_glue_start')
+assert 'mode_record_crash_seal(' not in code('app_main.c') and 'mode_record_crash' not in code('usb_probe.c')
 
 # ── 6. last_words ───────────────────────────────────────────────────────────────────────────────────
 lw = code('last_words.c')

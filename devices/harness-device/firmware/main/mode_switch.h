@@ -172,3 +172,51 @@ void ms_record_seal(ms_record_t *r, const char *focus, uint8_t flaps);
 // True and the contents if the reset was a software one, the magic and checksum match, flaps <= MS_FLAP_CAP and focus is terminated. Otherwise
 // false and `view` (if given) is all zeros: a power cut gives zero, never garbage.
 bool ms_record_load(const ms_record_t *r, bool reset_is_software, ms_record_view_t *view);
+
+// ── the panic loop (user decision 2026-10-31) ──────────────────────────────────────────────────────────────────────────────────────────────
+// A dial whose Wi-Fi mode crashes at every start would reboot at the speed of a panic and never be reachable by cable. A second RTC record counts
+// the abnormal resets that ended a run in Wi-Fi mode. The boot that sees the MS_CRASH_LIMIT-th takes USB once (the boot decision, mode_glue_core.c)
+// and logs why. The count is held by every reset that is not a crash (a software reset, so the switch back to Wi-Fi does not undo it), and cleared
+// by two things only: a power-on, and MS_CRASH_CLEAR_MS of uptime in Wi-Fi mode (mode_glue_core.c). So after the first three crashes each further
+// crash sends the next boot to USB at once, and a USB dial goes back to Wi-Fi no sooner than MS_T_DWELL_MS: a crash loop becomes one Wi-Fi attempt per
+// dwell, not one per reboot. A power cut that loses the record loses the count (the safe side: the dial then boots as it always did).
+//
+// How a reset looks to this module. The glue maps esp_reset_reason() onto these three (mode_glue.c, reset_class(); the sets are fixed by
+// test_mode_glue_source.py):
+//   MS_RESET_POWERON  ESP_RST_POWERON
+//   MS_RESET_HOLD     ESP_RST_SW, ESP_RST_DEEPSLEEP, and the resets somebody asked for: ESP_RST_EXT, ESP_RST_USB, ESP_RST_JTAG (a reset pin, a flash tool
+//                     or a debugger; counting them would make three flashes in a row look like three crashes)
+//   MS_RESET_CRASH    everything else: PANIC, INT_WDT, TASK_WDT, WDT, BROWNOUT, UNKNOWN, SDIO, EFUSE, PWR_GLITCH, CPU_LOCKUP, and any reason a later IDF adds
+#define MS_CRASH_LIMIT      3u
+#define MS_CRASH_CLEAR_MS   MS_FLAP_CLEAR_MS   // uptime in Wi-Fi mode that proves the mode works
+#define MS_CRASH_MAX        250u               // the count saturates here; a byte never wraps round to "no crashes"
+
+typedef enum {
+    MS_RESET_POWERON = 0,   // zero on purpose: a record variable that was never set reads as a power-on
+    MS_RESET_HOLD,
+    MS_RESET_CRASH,
+} ms_reset_t;
+
+// In RTC_NOINIT memory (mode_record.c), believed after every reset but a power-on. CRC-32 over every field but the checksum.
+typedef struct {
+    uint32_t magic;
+    uint32_t check;
+    uint8_t  crashes;       // abnormal resets that ended a Wi-Fi run, held at MS_CRASH_MAX
+    uint8_t  mode;          // the ms_mode_t that was running (or being started) when the record was last sealed
+    uint8_t  reserved[2];
+} ms_crash_t;
+
+typedef struct {
+    uint8_t crashes;        // the count after this boot's reset
+    bool    trip;           // this boot is the MS_CRASH_LIMIT-th (or later) crash in a row: take USB once
+} ms_crash_view_t;
+
+#define MS_CRASH_MAGIC 0x4D534352u   // "MSCR"
+
+uint32_t ms_crash_crc(const ms_crash_t *r);
+// crashes is held at MS_CRASH_MAX.
+void ms_crash_seal(ms_crash_t *r, uint8_t crashes, ms_mode_t running);
+// What this boot's reset does to the count. A record that is not believed (magic, checksum, crashes <= MS_CRASH_MAX, mode one of the three) is a count
+// of zero and counts nothing. POWERON: zero. HOLD (or a class outside the enum): the count as it was. CRASH: one more if the run that ended was Wi-Fi,
+// else as it was. `trip` is set only by a CRASH that brings the count to MS_CRASH_LIMIT or more. Writes nothing.
+void ms_crash_boot(const ms_crash_t *r, ms_reset_t cls, ms_crash_view_t *out);

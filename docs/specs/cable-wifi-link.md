@@ -292,7 +292,8 @@ The daemon answers a hello whose `probe` is the number 1 (not `true`, not `"1"`)
 nothing more. That hello is not a greeting: no capability is read, no dial is attached or reported, no agent list, machine list, pet or
 firmware offer is sent, and the state the daemon keeps for a greeted dial is not touched. The dial that then reboots into USB mode sends a
 normal hello and is greeted in full. A daemon older than this change ignores the field and answers with its full welcome and pushes; the
-probe still finds the welcome, and drops the rest.
+probe finds that welcome only if the whole frame fits the cap below, and drops the rest. The probe therefore needs a W15 or newer daemon: an old
+daemon's full welcome (machine, selected machine, features) above 1,016 bytes of payload is dropped, and that dial would not come back to USB.
 
 The probe's decoder holds one frame of at most 1,024 bytes. A frame over that is noise to it, so the daemon's probe welcome is kept
 under 256 bytes whatever the machine is called (`cableSession.probe.spec.ts`). The rule that turns welcomes into a switch to USB (5 s of

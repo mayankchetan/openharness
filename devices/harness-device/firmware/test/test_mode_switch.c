@@ -1059,6 +1059,80 @@ static void test_robustness(void)
     }
 }
 
+// ── H11: the panic loop (user decision 2026-10-31) ─────────────────────────────────────────────────────────────────────────────────────────
+// A second RTC record counts abnormal resets that ended a run in Wi-Fi mode. It survives every reset but a power-on, and the boot that sees the
+// third abnormal reset in a row takes USB once. Only a power-on, or 10 minutes of uptime in Wi-Fi (the glue, test_mode_glue.c), clears it; a
+// software reset (the switch back to Wi-Fi) holds it, so a crash loop cannot go on at the speed of a reboot.
+static ms_crash_t crash_rec(uint8_t crashes, ms_mode_t mode)
+{
+    ms_crash_t r;
+    ms_crash_seal(&r, crashes, mode);
+    return r;
+}
+
+static ms_crash_view_t crash_boot(const ms_crash_t *r, ms_reset_t cls)
+{
+    ms_crash_view_t v;
+    memset(&v, 0x5A, sizeof v);
+    ms_crash_boot(r, cls, &v);
+    return v;
+}
+
+static void test_h11_panic_loop(void)
+{
+    ms_crash_view_t v;
+    ms_crash_t r;
+
+    CHECK(MS_CRASH_LIMIT == 3 && MS_CRASH_CLEAR_MS == MS_FLAP_CLEAR_MS);
+    CHECK(MS_RESET_POWERON == 0);   // a zeroed variable is a power-on
+
+    // the count climbs one per abnormal reset that ended a Wi-Fi run, and trips at the third
+    r = crash_rec(0, MS_MODE_WIFI); v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 1 && !v.trip);
+    r = crash_rec(1, MS_MODE_WIFI); v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 2 && !v.trip);
+    r = crash_rec(2, MS_MODE_WIFI); v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 3 && v.trip);
+    // past the limit every further crash trips again at once (the USB boot and the switch back do not clear the count)
+    r = crash_rec(3, MS_MODE_WIFI); v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 4 && v.trip);
+    // a crash that ended a USB run is not a Wi-Fi crash: the count is held and nothing trips
+    r = crash_rec(2, MS_MODE_USB);  v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 2 && !v.trip);
+    r = crash_rec(3, MS_MODE_USB);  v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 3 && !v.trip);
+    r = crash_rec(2, MS_MODE_BLE);  v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 2 && !v.trip);
+    // a software reset (the mode switch, an update) or a deep-sleep wake holds the count and never trips
+    r = crash_rec(2, MS_MODE_WIFI); v = crash_boot(&r, MS_RESET_HOLD);  CHECK(v.crashes == 2 && !v.trip);
+    r = crash_rec(3, MS_MODE_WIFI); v = crash_boot(&r, MS_RESET_HOLD);  CHECK(v.crashes == 3 && !v.trip);
+    // a power-on clears it, whatever the record says
+    r = crash_rec(3, MS_MODE_WIFI); v = crash_boot(&r, MS_RESET_POWERON); CHECK(v.crashes == 0 && !v.trip);
+    // saturation: a byte cannot wrap round to zero and forget a crash loop
+    r = crash_rec(250, MS_MODE_WIFI); v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 250 && v.trip);
+    r = crash_rec(255, MS_MODE_WIFI); CHECK(r.crashes == 250);
+
+    // a record that cannot be believed is a count of zero: nothing to count, nothing trips
+    memset(&r, 0, sizeof r);                         v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 0 && !v.trip);
+    memset(&r, 0xA5, sizeof r);                      v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 0 && !v.trip);
+    r = crash_rec(2, MS_MODE_WIFI); r.crashes = 9;   v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 0 && !v.trip);   // checksum wrong
+    r = crash_rec(2, MS_MODE_WIFI); r.mode = MS_MODE_USB; v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 0 && !v.trip);
+    r = crash_rec(2, MS_MODE_WIFI); r.magic ^= 1;    v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 0 && !v.trip);
+    // the right checksum over absurd contents (a later build, a stray write that was sealed): refused
+    r = crash_rec(2, MS_MODE_WIFI); r.mode = 7;      r.check = ms_crash_crc(&r); v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 0 && !v.trip);
+    r = crash_rec(2, MS_MODE_WIFI); r.crashes = 251; r.check = ms_crash_crc(&r); v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 0 && !v.trip);
+    // every byte of the record is covered by the checksum
+    r = crash_rec(2, MS_MODE_WIFI);
+    for (size_t i = 0; i < sizeof r; i++) {
+        ms_crash_t q = r;
+        ((unsigned char *)&q)[i] ^= 0x01;
+        CHECK(ms_crash_crc(&q) != q.check);
+    }
+    // a class number outside the enum is held, never a trip
+    r = crash_rec(2, MS_MODE_WIFI); v = crash_boot(&r, (ms_reset_t)9); CHECK(v.crashes == 2 && !v.trip);
+
+    // NULL arguments
+    ms_crash_boot(NULL, MS_RESET_CRASH, NULL);
+    ms_crash_seal(NULL, 1, MS_MODE_WIFI);
+    memset(&v, 0x5A, sizeof v);
+    ms_crash_boot(NULL, MS_RESET_CRASH, &v);
+    CHECK(v.crashes == 0 && !v.trip);
+    CHECK(ms_crash_crc(NULL) == 0);
+}
+
 int main(void)
 {
     test_h1_boot_table();
@@ -1071,6 +1145,7 @@ int main(void)
     test_h8_stay_wl();
     test_h9_record();
     test_h10_boot_usb();
+    test_h11_panic_loop();
     test_robustness();
     printf("test_mode_switch: %d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;

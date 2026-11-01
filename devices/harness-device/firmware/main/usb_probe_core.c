@@ -6,9 +6,11 @@
 // ── the welcome test ────────────────────────────────────────────────────────────────────────────────
 // A small strict scanner over one JSON object. It builds no tree and allocates nothing. It understands strings (with escapes), nesting and the
 // scalar tokens just well enough to skip them, and it reads only the top-level key "t". Anything it does not like is "not a welcome". Recursion
-// is bounded by MAX_DEPTH (16 frames of a few words), so a hostile payload cannot run the stack out.
+// is bounded by MAX_DEPTH, so a hostile payload cannot run the stack out. The daemon's welcome nests three levels at the most (machine{} and
+// features[] each holding at most one more); 6 leaves room for that and costs at most 6 frames of a few words each on the mode switch task's
+// 4 KB stack.
 
-#define MAX_DEPTH 16
+#define MAX_DEPTH 6
 
 typedef struct { const uint8_t *p, *end; } cur_t;
 
@@ -171,6 +173,19 @@ void up_core_feed(up_core_t *p, const uint8_t *data, size_t n, uint64_t now_ms)
     if (!p || !p->dec.buf || !data || !n) return;
     p->now_ms = now_ms;
     cable_decoder_buf_feed(&p->dec, data, n, on_frame, p);
+}
+
+bool up_core_pump(up_core_t *p, up_read_fn rd, void *ctx, uint32_t wait_ms, uint64_t now_ms)
+{
+    if (!p || !p->dec.buf || !rd) return false;
+    uint8_t chunk[UP_READ_CHUNK];
+    int n = rd(ctx, chunk, sizeof chunk, wait_ms);   // the one read that may wait for the host
+    for (unsigned i = 0; n > 0; i++) {
+        up_core_feed(p, chunk, (size_t)n, now_ms);
+        if (i >= UP_DRAIN_CHUNKS) return true;       // the bound: a host that never stops sending does not keep this task in the loop
+        n = rd(ctx, chunk, sizeof chunk, 0);         // drain what is already there, without waiting
+    }
+    return false;
 }
 
 bool up_core_hello_due(up_core_t *p, uint64_t now_ms)

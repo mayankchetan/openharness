@@ -88,7 +88,7 @@ static atomic_uint       s_features;
 static bool              s_started; // boot owner; successful start is idempotent
 // Only the USB reader accesses this after start. A volatile 64-bit value is
 // not atomic on this 32-bit CPU; session expiry must share the reader's owner.
-static int64_t           s_last_rx_us;
+static _Atomic int64_t   s_last_rx_us;   // 64 bits on a 32-bit CPU and read by the mode switch task (cable_client_last_daemon_byte): atomic, so no read tears
 static char              s_machine_name[CABLE_NAME_MAX];
 static uint32_t          s_bad, s_unknown;
 
@@ -2016,17 +2016,13 @@ void cable_client_counters(uint32_t *bad, uint32_t *unknown)
 bool cable_client_last_daemon_byte(uint32_t *ms32)
 {
     if (!ms32) return false;
-    // s_last_rx_us is 64 bits on a 32-bit CPU: a read can tear while the reader stores it. A torn value is wrong by 2^32 us (71 minutes), which
-    // would read as a daemon that has been silent for 71 minutes, so read twice until the two agree.
-    int64_t a = 0, b = 0;
-    for (int tries = 0; tries < 4; tries++) {
-        a = s_last_rx_us;
-        b = s_last_rx_us;
-        if (a == b) break;
-    }
+    // s_last_rx_us is 64 bits on a 32-bit CPU: a plain read can tear while another task stores it, and a torn value is wrong by 2^32 us (71 minutes),
+    // which would read as a daemon silent for 71 minutes. The variable is _Atomic, so this is one indivisible load (the library routine behind it takes
+    // a spinlock, newlib/stdatomic.c), and every store of it is indivisible too. (An earlier "read twice until the two agree" over a plain variable
+    // could be merged into one read by the compiler.)
+    const int64_t a = atomic_load(&s_last_rx_us);
     if (a == 0) return false;   // the link has not started
-    // Four reads that never agreed (not seen in practice): say "a frame just now", the answer that keeps a USB dial where it is.
-    *ms32 = (uint32_t)((a == b ? a : esp_timer_get_time()) / 1000);
+    *ms32 = (uint32_t)(a / 1000);
     return true;
 }
 

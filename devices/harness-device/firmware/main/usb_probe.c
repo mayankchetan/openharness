@@ -8,6 +8,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "usb_probe_core.h"
 
 static const char *TAG = "usb_probe";
@@ -16,7 +17,6 @@ static const char *TAG = "usb_probe";
 // while this task is between reads (it reads every 40 ms); TX holds a few of the 70-byte hellos if the host has not opened the port yet.
 #define PROBE_RX_BUF 1024
 #define PROBE_TX_BUF 256
-#define PROBE_READ_CHUNK 128
 #define PROBE_WRITE_WAIT_MS 20
 
 static up_core_t s_core;
@@ -62,15 +62,18 @@ void usb_probe_stop(void)
     ESP_LOGI(TAG, "probe off");
 }
 
+static int port_read(void *ctx, uint8_t *buf, size_t cap, uint32_t wait_ms)
+{
+    (void)ctx;
+    return usb_serial_jtag_read_bytes(buf, cap, pdMS_TO_TICKS(wait_ms));
+}
+
 void usb_probe_poll(uint64_t now_ms, uint32_t wait_ms)
 {
     if (!s_running) return;
-    uint8_t chunk[PROBE_READ_CHUNK];
-    int n = usb_serial_jtag_read_bytes(chunk, sizeof chunk, pdMS_TO_TICKS(wait_ms));
-    while (n > 0) {
-        up_core_feed(&s_core, chunk, (size_t)n, now_ms);
-        n = usb_serial_jtag_read_bytes(chunk, sizeof chunk, 0);   // drain what is already there without waiting
-    }
+    // A bounded read (up_core_pump): a host that streams frames as fast as the port takes them must not keep this task out of the idle task for
+    // long enough to trip the task watchdog. After a call that hit the bound, sleep one tick; the rest is read by the next poll.
+    if (up_core_pump(&s_core, port_read, NULL, wait_ms, now_ms)) vTaskDelay(1);
     if (up_core_hello_due(&s_core, now_ms)) {
         uint8_t frame[96];
         const size_t len = up_core_hello(frame, sizeof frame, CABLE_PROTO_VERSION, CABLE_PRODUCT);

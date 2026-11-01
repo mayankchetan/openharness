@@ -5,9 +5,12 @@
 //   mg_boot()  once, at least MS_SOF_SETTLE_MS after the reset, from the values mode_glue.c read (NVS, the SOF flag, the RTC record)
 //   mg_init()  once, with the mode that really started (the radio may not have come up: then it is USB) and the flap count of the record
 //   mg_step()  every MS_STEP_MS or faster
-//   on REBOOT: log the reason, seal the record (focus and flaps), store boot_usb, THEN restart, in that order and nothing after
+//   on REBOOT: log the reason, seal the record (focus and flaps), store boot_usb, THEN restart, in that order and nothing after. The restart op looks
+//     at the busy gate once more right before it acts and may say no (false): the core then calls undo and tries again at a later step.
 //   the USB probe is installed exactly while ms_out_t.probe_wanted, and uninstalled when it falls
 //   when ms_out_t.flaps_cleared: re-seal the record at zero
+//   the panic loop (mode_switch.h): the glue reads the crash record before mg_boot() and hands its answer in; mg_step() clears the count after
+//     MS_CRASH_CLEAR_MS of uptime in Wi-Fi mode
 #pragma once
 
 #include <stdbool.h>
@@ -24,6 +27,8 @@ typedef struct {
     uint32_t sof_read_ms;       // the uptime of that read
     bool     record_ok;         // mode_record_boot() trusted the record (a software reset, magic and checksum right)
     ms_record_view_t record;    // its contents (zeros when not trusted)
+    bool     crash_trip;        // mode_record_crash_boot(): this boot follows the MS_CRASH_LIMIT-th abnormal reset in a row in Wi-Fi mode
+    uint8_t  crashes;           // the crash count after this boot's reset
 } mg_boot_in_t;
 
 typedef struct {
@@ -32,6 +37,8 @@ typedef struct {
     bool      boot_usb_new;
     bool      sof_ignored;      // the SOF reading was too early to use (the glue waits, so this should never be true)
     bool      unsupported;      // wl_effective named a mode this firmware cannot start; the dial boots USB
+    bool      crash_usb;        // the panic loop took USB although the table said Wi-Fi: the glue says why ("Wi-Fi mode crashed N times; started in USB")
+    uint8_t   crashes;          // the crash count to seal (the input's)
     uint8_t   flaps;            // from the record, 0 if untrusted
     char      focus[MS_FOCUS_MAX];   // the agent to put back on the carousel, "" for none
 } mg_boot_out_t;
@@ -61,7 +68,12 @@ typedef struct {
     void (*log_reason)(void *ctx, ms_mode_t target);         // last_words reason MS_REASON_SWITCH, and a log line
     void (*seal)(void *ctx, uint8_t flaps);                  // the focused agent and `flaps` into the RTC record
     bool (*store_boot_usb)(void *ctx, bool boot_usb);        // NVS boot_usb. A false return is logged by the glue and does not stop the restart.
-    void (*restart)(void *ctx, ms_mode_t target);            // esp_restart()
+    // esp_restart(), after one last look at the busy gate. False: the dial turned busy meanwhile and nothing was restarted (the core calls undo).
+    // True is what a restart that returns at all says (a test double); the real one does not return.
+    bool (*restart)(void *ctx, ms_mode_t target);
+    // after the table above, so a test double written for the older table still lines up
+    void (*clear_crashes)(void *ctx);                        // MS_CRASH_CLEAR_MS of uptime in Wi-Fi mode: re-seal the crash record at zero
+    void (*undo)(void *ctx, ms_mode_t running, uint8_t flaps);   // a refused restart: boot_usb back to the running mode's value, the record back to `flaps`
 } mg_ops_t;
 
 typedef struct {
@@ -70,11 +82,14 @@ typedef struct {
     bool       stay_wl;
     bool       probe_on;
     bool       notice_on;
-    bool       done;                 // the restart has been asked for: nothing more is done
+    bool       done;                 // the restart has been asked for: nothing more is done (until a refused restart gives the dial back)
+    uint8_t    crashes;              // the crash count; zero after MS_CRASH_CLEAR_MS in Wi-Fi mode
 } mg_t;
 
 // `running` is the mode that really started, `flaps` the record's count, the last two the settings as read at boot.
 void mg_init(mg_t *g, ms_mode_t running, uint8_t flaps, uint8_t wl_effective, bool stay_wl);
 // The Settings screen (task W16) changed wl_mode or stay_wl: take the new values.
 void mg_set_settings(mg_t *g, uint8_t wl_effective, bool stay_wl);
+// After mg_init(): the crash count this boot started with (mg_boot_out_t.crashes).
+void mg_note_crashes(mg_t *g, uint8_t crashes);
 void mg_step(mg_t *g, const mg_world_t *w, const mg_ops_t *ops);

@@ -18,4 +18,8 @@ bool store_gate_frozen(void);
 #else
 static inline bool store_gate_enter(void) { return true; }
 static inline void store_gate_leave(void) {}
+// The same calls for a caller that works in either build (mode_glue.c freezes the writers before a restart): nothing to freeze, so it always succeeds.
+static inline bool store_gate_freeze(uint32_t timeout_ms) { (void)timeout_ms; return true; }
+static inline void store_gate_thaw(void) {}
+static inline bool store_gate_frozen(void) { return false; }
 #endif

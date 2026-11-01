@@ -52,7 +52,11 @@ typedef struct {
 
     // the dial
     uint64_t t;                 // ms since the boot
-    bool reset_sw;              // how the last reset happened
+    bool reset_sw;              // how the last reset happened (the flap record is believed after a software reset only)
+    ms_reset_t reset_cls;       // the same reset as the crash record sees it (zero: power-on)
+    int refuse_restarts;        // the final busy check inside the restart op finds the dial busy this many times
+    bool crash_usb;             // this boot took USB because of the panic loop
+    uint8_t crashes;            // the crash count this boot started with
     ms_mode_t running;
     mg_t mg;
     bool probe_installed;
@@ -68,7 +72,7 @@ typedef struct {
     uint64_t reboot_uptime[64]; // the uptime at each reboot: no automatic switch before MS_T_DWELL_MS
     uint64_t wall;              // wall clock over the whole run, across reboots
     int probe_calls, notice_calls;
-    char order[16];             // the reboot sequence as letters: L(og) S(eal) B(oot_usb) R(estart)
+    char order[32];             // the reboot sequence as letters: L(og) S(eal) B(oot_usb) R(estart); r = restart refused (busy again), U = undo
     bool store_fails;
 } dial_t;
 
@@ -77,12 +81,38 @@ static dial_t D;
 static void op_probe(void *c, bool on) { dial_t *d = c; d->probe_calls++; d->probe_installed = on; if (on) { d->have_welcome = false; d->last_hello = 0; d->probe_since = d->t; } }
 static void op_notice(void *c, bool on) { dial_t *d = c; d->notice_calls++; d->notice_shown = on; }
 static void op_clear(void *c) { (void)c; mode_record_clear_flaps(); }
-static void op_log(void *c, ms_mode_t target) { dial_t *d = c; (void)target; strcat(d->order, "L"); }
+static void op_log(void *c, ms_mode_t target)
+{
+    dial_t *d = c;
+    (void)target;
+    if (strlen(d->order) + 8 >= sizeof d->order) d->order[0] = 0;   // a test that refuses the restart for ever keeps only the newest attempts
+    strcat(d->order, "L");
+}
 static void op_seal(void *c, uint8_t flaps) { dial_t *d = c; strcat(d->order, "S"); mode_record_save(d->focus, flaps); }
 static bool op_store(void *c, bool v) { dial_t *d = c; strcat(d->order, "B"); return !d->store_fails && config_save_boot_usb(v); }
-static void op_restart(void *c, ms_mode_t target) { dial_t *d = c; strcat(d->order, "R"); d->reboot_to[d->reboots < 64 ? d->reboots : 63] = target; d->reboot_uptime[d->reboots < 64 ? d->reboots : 63] = d->t; d->reboots++; d->reset_sw = true; }
+// The real op re-checks the busy gate right before esp_restart() and says false when the dial turned busy meanwhile.
+static bool op_restart(void *c, ms_mode_t target)
+{
+    dial_t *d = c;
+    if (d->refuse_restarts > 0) { d->refuse_restarts--; strcat(d->order, "r"); return false; }
+    strcat(d->order, "R");
+    d->reboot_to[d->reboots < 64 ? d->reboots : 63] = target;
+    d->reboot_uptime[d->reboots < 64 ? d->reboots : 63] = d->t;
+    d->reboots++;
+    d->reset_sw = true;
+    d->reset_cls = MS_RESET_HOLD;
+    return true;
+}
+static void op_undo(void *c, ms_mode_t running, uint8_t flaps)
+{
+    dial_t *d = c;
+    strcat(d->order, "U");
+    config_save_boot_usb(running == MS_MODE_USB);
+    mode_record_save(NULL, flaps);
+}
+static void op_clear_crashes(void *c) { (void)c; mode_record_crash_clear(); }
 
-static const mg_ops_t OPS = {&D, op_probe, op_notice, op_clear, op_log, op_seal, op_store, op_restart};
+static const mg_ops_t OPS = {&D, op_probe, op_notice, op_clear, op_log, op_seal, op_store, op_restart, op_clear_crashes, op_undo};
 
 static bool sof_now(void)
 {
@@ -107,6 +137,7 @@ static ms_mode_t boot(void)
     ms_record_view_t view;
     in.record_ok = mode_record_boot(D.reset_sw, &view);
     in.record = view;
+    in.crash_trip = mode_record_crash_boot(D.reset_cls, &in.crashes);   // reads the crash record; it is sealed again once the mode is known
     in.wl_effective = config_load_wl_effective();
     in.stay_wl = config_load_stay_wl();
     in.boot_usb = config_load_boot_usb();
@@ -119,11 +150,17 @@ static ms_mode_t boot(void)
     assert(!out.sof_ignored);   // the simulator waits, so the reading is never too early
     if (out.write_boot_usb) assert(config_save_boot_usb(out.boot_usb_new) || D.store_fails);
     strcpy(D.restored_focus, out.focus);
+    mode_record_crash_seal(out.crashes, out.mode);   // at once: a crash while the radio comes up is counted against the mode that was being started
+    D.crash_usb = out.crash_usb;
+    D.crashes = out.crashes;
 
     // Wi-Fi mode needs the radio; if it does not start the dial runs on USB in the same boot (net_link_start returns false)
     D.running = (out.mode == MS_MODE_WIFI && !D.radio_fails) ? MS_MODE_WIFI : MS_MODE_USB;
+    mode_record_crash_seal(out.crashes, D.running);
     mg_init(&D.mg, D.running, out.flaps, config_load_wl_effective(), config_load_stay_wl());
+    mg_note_crashes(&D.mg, out.crashes);
     D.reset_sw = false;
+    D.reset_cls = MS_RESET_POWERON;
     D.order[0] = 0;
     return D.running;
 }
@@ -185,6 +222,15 @@ static void fresh(void)
     memset(&D, 0, sizeof D);
     strcpy(D.focus, "agent-12");
     memset(mode_record_raw_for_test(), 0, sizeof(ms_record_t));
+    memset(mode_record_crash_raw_for_test(), 0, sizeof(ms_crash_t));
+}
+// The dial resets by itself the abnormal way (panic, watchdog, brown-out) and boots again. The flap record is not believed after one (as before);
+// the crash record is.
+static ms_mode_t crash_and_boot(void)
+{
+    D.reset_sw = false;
+    D.reset_cls = MS_RESET_CRASH;
+    return boot();
 }
 static void provision(long mode) { assert(config_net_set("home-net", "correct horse battery", "192.168.1.20", 18480, KEY, mode) == CFG_NET_OK); }
 static void put_u8(const char *key, uint8_t v) { nvs_handle_t h; assert(nvs_open("pair", NVS_READWRITE, &h) == ESP_OK); assert(nvs_set_u8(h, key, v) == ESP_OK); }
@@ -568,8 +614,215 @@ static void test_nothing_happens_after_the_restart(void)
     assert(D.reboots == n && strlen(D.order) == len);
 }
 
+// ── the restart can be refused at the last moment (review finding 2) ────────────────────────────────
+static void test_restart_refused_when_the_dial_turns_busy_again(void)
+{
+    // The glue logs, seals, stores and flushes, and that takes time (the display lock, an NVS commit, 150 ms of log flush). The user can start a
+    // voice turn in that time. The restart op looks at the busy gate once more, right before esp_restart(), and says no; the core then undoes what
+    // the sequence wrote (boot_usb, the raised flap count) and tries again on a later step.
+    fresh();
+    provision(1);
+    boot();
+    assert(!run(70000));
+    D.cable = D.daemon = true;
+    D.refuse_restarts = 1000;
+    assert(!run(30000));                                  // due after 5 s; every attempt finds the dial busy again
+    assert(D.reboots == 0 && !D.mg.done);                 // not done: it will retry
+    assert(strchr(D.order, 'r') && D.order[strlen(D.order) - 1] == 'U');
+    assert(!config_load_boot_usb());                      // boot_usb is the running mode's again (Wi-Fi)
+    ms_record_view_t v;
+    assert(mode_record_boot(true, &v) && v.flaps == 0);   // the raised flap count was put back
+    D.refuse_restarts = 0;                                // the voice turn ended
+    assert(run(MS_STEP_MS * 2));
+    assert(D.reboots == 1 && D.order[strlen(D.order) - 1] == 'R');
+    assert(strstr(D.order, "LSBR") != NULL);
+    assert(config_load_boot_usb());                       // and now the switch is stored as usual
+    assert(D.reboot_to[0] == MS_MODE_USB);
+    // a USB dial refused the same way restores boot_usb = 1
+    fresh();
+    provision(1);
+    config_save_boot_usb(true);
+    D.cable = D.daemon = true;
+    D.reset_sw = true;
+    assert(boot() == MS_MODE_USB);
+    assert(!run(30000));
+    D.daemon = false;
+    D.refuse_restarts = 1000;
+    assert(!run(120000));                                 // 60 s without a daemon byte: due; refused every time
+    assert(D.reboots == 0 && config_load_boot_usb());
+    D.refuse_restarts = 0;
+    assert(run(MS_STEP_MS * 2) && D.reboot_to[0] == MS_MODE_WIFI && !config_load_boot_usb());
+}
+
+// ── the panic loop (user decision 2026-10-31) ───────────────────────────────────────────────────────
+static void test_panic_loop_plan(void)
+{
+    mg_boot_in_t in;
+    mg_boot_out_t o;
+    memset(&in, 0, sizeof in);
+    in.wl_effective = 1;
+    in.crash_trip = true;
+    in.crashes = 3;
+    mg_boot(&in, &o);                                     // Wi-Fi would have been the choice: USB once, and boot_usb follows the choice
+    assert(o.mode == MS_MODE_USB && o.crash_usb && o.write_boot_usb && o.boot_usb_new && o.crashes == 3);
+    in.stay_wl = true;                                    // it beats stay_wl for this boot
+    mg_boot(&in, &o);
+    assert(o.mode == MS_MODE_USB && o.crash_usb);
+    in.stay_wl = false;
+    in.boot_usb = true;                                   // boot_usb already says USB, no cable: row 4 would pick Wi-Fi; the trip says USB, nothing to write
+    mg_boot(&in, &o);
+    assert(o.mode == MS_MODE_USB && o.crash_usb && !o.write_boot_usb);
+    in.sof = true;                                        // a cable: USB anyway, so the trip changed nothing and says nothing
+    in.sof_read_ms = 50;
+    mg_boot(&in, &o);
+    assert(o.mode == MS_MODE_USB && !o.crash_usb);
+    in.wl_effective = 0;                                  // no Wi-Fi to crash in
+    in.sof = false;
+    mg_boot(&in, &o);
+    assert(o.mode == MS_MODE_USB && !o.crash_usb);
+    in.wl_effective = 2;                                  // a mode with no transport: USB, and not blamed on a crash
+    mg_boot(&in, &o);
+    assert(o.mode == MS_MODE_USB && o.unsupported && !o.crash_usb);
+    // no trip: the table decides, and the count passes through
+    memset(&in, 0, sizeof in);
+    in.wl_effective = 1;
+    in.crashes = 2;
+    mg_boot(&in, &o);
+    assert(o.mode == MS_MODE_WIFI && !o.crash_usb && o.crashes == 2);
+    // the flap count of the record is not touched by a trip (the cap is the cap)
+    in.crash_trip = true;
+    in.crashes = 3;
+    in.record_ok = true;
+    in.record.flaps = 2;
+    mg_boot(&in, &o);
+    assert(o.mode == MS_MODE_USB && o.flaps == 2);
+}
+
+static void test_third_crash_in_wifi_takes_usb_once(void)
+{
+    fresh();
+    provision(1);
+    assert(boot() == MS_MODE_WIFI && D.crashes == 0 && !D.crash_usb);
+    assert(crash_and_boot() == MS_MODE_WIFI && D.crashes == 1 && !D.crash_usb);
+    assert(crash_and_boot() == MS_MODE_WIFI && D.crashes == 2 && !D.crash_usb);
+    assert(crash_and_boot() == MS_MODE_USB && D.crashes == 3 && D.crash_usb);   // the reason is logged by the glue from crash_usb
+    assert(config_load_boot_usb());                       // boot_usb follows the boot choice
+    // No cable, no daemon: the ordinary rule sends the USB dial back to Wi-Fi after the dwell. That is a software reset: the count is held.
+    assert(!run(59000));
+    assert(run(2000) && D.reboot_to[0] == MS_MODE_WIFI);
+    assert(boot() == MS_MODE_WIFI && D.crashes == 3 && !D.crash_usb);   // held, and no second trip on a software reset
+    assert(D.mg.ms.flaps == 1);                           // the switch is a flap as ever; the cap is the flap guard's business
+    assert(!config_load_boot_usb());
+    // the very next crash in Wi-Fi trips at once: the count was not cleared by the detour
+    assert(crash_and_boot() == MS_MODE_USB && D.crashes == 4 && D.crash_usb);
+}
+
+static void test_trip_beats_stay_wl_and_the_dwell_still_applies(void)
+{
+    fresh();
+    provision(1);
+    config_save_stay_wl(true);
+    assert(boot() == MS_MODE_WIFI);
+    assert(crash_and_boot() == MS_MODE_WIFI);
+    assert(crash_and_boot() == MS_MODE_WIFI);
+    assert(crash_and_boot() == MS_MODE_USB && D.crash_usb);   // stay_wl does not keep a crash-looping dial in Wi-Fi
+    assert(!run(59000));                                   // then stay_wl's own rule applies after the dwell: the dial may try Wi-Fi again
+    assert(run(2000) && D.reboot_to[0] == MS_MODE_WIFI);
+}
+
+static void test_power_on_clears_the_crash_count(void)
+{
+    fresh();
+    provision(1);
+    boot();
+    crash_and_boot();
+    assert(crash_and_boot() == MS_MODE_WIFI && D.crashes == 2);
+    D.reset_sw = false;
+    D.reset_cls = MS_RESET_POWERON;                        // the battery was pulled
+    assert(boot() == MS_MODE_WIFI && D.crashes == 0);
+    assert(crash_and_boot() == MS_MODE_WIFI && D.crashes == 1);
+}
+
+static void test_ten_minutes_up_in_wifi_clears_the_crash_count(void)
+{
+    fresh();
+    provision(1);
+    boot();
+    crash_and_boot();
+    assert(crash_and_boot() == MS_MODE_WIFI && D.crashes == 2);
+    assert(!run(9 * 60 * 1000));                           // 9 minutes is not enough ...
+    uint8_t n;
+    assert(!mode_record_crash_boot(MS_RESET_HOLD, &n) && n == 2);
+    assert(!run(2 * 60 * 1000));                           // ... 11 minutes is
+    assert(!mode_record_crash_boot(MS_RESET_HOLD, &n) && n == 0);
+    assert(crash_and_boot() == MS_MODE_WIFI && D.crashes == 1);   // a crash after a good run is the first of a new row
+}
+
+static void test_time_in_usb_does_not_clear_the_crash_count(void)
+{
+    fresh();
+    provision(1);
+    boot();
+    crash_and_boot();
+    crash_and_boot();
+    D.cable = D.daemon = true;                             // the tripped boot finds a cable with a daemon: USB, and it stays
+    assert(crash_and_boot() == MS_MODE_USB && D.crash_usb);
+    assert(!run(20 * 60 * 1000));
+    uint8_t n;
+    assert(!mode_record_crash_boot(MS_RESET_HOLD, &n) && n == 3);
+}
+
+static void test_a_crash_in_usb_mode_is_not_counted(void)
+{
+    fresh();
+    provision(1);
+    boot();
+    crash_and_boot();
+    assert(crash_and_boot() == MS_MODE_WIFI && D.crashes == 2);
+    D.cable = D.daemon = true;                             // the user plugs in: USB (a software reset, the count is held)
+    assert(run(70000) && D.reboot_to[0] == MS_MODE_USB);
+    assert(boot() == MS_MODE_USB && D.crashes == 2);
+    D.cable = false;                                       // the dial then crashes in USB mode and the cable is out when it comes back
+    assert(crash_and_boot() == MS_MODE_WIFI && D.crashes == 2 && !D.crash_usb);   // held: a USB crash is nobody's Wi-Fi crash
+    assert(crash_and_boot() == MS_MODE_USB && D.crashes == 3 && D.crash_usb);    // the next Wi-Fi crash is the third
+}
+
+static void test_a_crash_loop_in_wifi_is_slowed_to_one_attempt_per_dwell(void)
+{
+    // Wi-Fi mode that crashes 20 s after every start, no cable, an hour. Without the rule the dial reboots every few seconds for ever. With it:
+    // three quick attempts, then USB for at least the 60 s dwell after every crash, so one Wi-Fi attempt per 80 s at the most.
+    fresh();
+    provision(1);
+    boot();
+    const uint64_t wall = 60 * 60 * 1000, start = D.wall;
+    int wifi_runs = 0;
+    unsigned crashes_seen = 0;
+    while (D.wall - start < wall) {
+        if (D.running == MS_MODE_WIFI) {
+            wifi_runs++;
+            if (!run(20000)) crash_and_boot(); else boot();
+        } else if (run(10 * 60 * 1000)) {
+            boot();
+        }
+        assert(D.crashes >= crashes_seen);                 // nothing in the loop clears the count
+        crashes_seen = D.crashes;
+    }
+    assert(crashes_seen >= MS_CRASH_LIMIT);
+    assert(wifi_runs <= (int)MS_CRASH_LIMIT + (int)(wall / (MS_T_DWELL_MS + 20000)) + 1);
+    for (int i = 0; i < D.reboots && i < 64; i++) assert(D.reboot_uptime[i] >= MS_T_DWELL_MS);   // every USB stint lasted the dwell
+}
+
 int main(void)
 {
+    test_restart_refused_when_the_dial_turns_busy_again();
+    test_panic_loop_plan();
+    test_third_crash_in_wifi_takes_usb_once();
+    test_trip_beats_stay_wl_and_the_dwell_still_applies();
+    test_power_on_clears_the_crash_count();
+    test_ten_minutes_up_in_wifi_clears_the_crash_count();
+    test_time_in_usb_does_not_clear_the_crash_count();
+    test_a_crash_in_usb_mode_is_not_counted();
+    test_a_crash_loop_in_wifi_is_slowed_to_one_attempt_per_dwell();
     test_boot_plan();
     test_reboot_sequence_order();
     test_wifi_dial_comes_back_to_usb_and_stays();
