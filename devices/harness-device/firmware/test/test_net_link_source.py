@@ -92,8 +92,11 @@ for path in sorted(main.rglob('*')):
         assert not found, f'{rel} names the radio ({found[0]}); only wifi_sta.c may'
     if rel not in ('wifi_sta.c', 'wifi_sta.h', 'net_link.c'):
         assert 'nwifi_' not in src, f'{rel} names nwifi_*'
-    if rel not in ('net_link.c', 'net_link.h', 'app_main.c', 'cable_client.c', 'cable_client.h', 'ui/habitat/ui_habitat.c', 'cable_link.c', 'cable_link.h'):
+    if rel not in ('net_link.c', 'net_link.h', 'app_main.c', 'cable_client.c', 'cable_client.h', 'ui/habitat/ui_habitat.c', 'cable_link.c', 'cable_link.h',
+                   'power_off.c'):   # power_off.c: net_link_close_for_power_off / net_link_resume only (S7; test_wifi_power_source.py pins the order)
         assert 'net_link_' not in src, f'{rel} names net_link_*'
+    if rel == 'power_off.c':
+        assert set(re.findall(r'\bnet_link_\w+', src)) == {'net_link_close_for_power_off', 'net_link_resume'}, 'power_off.c reaches nothing else of the link'
 
 app = code('app_main.c')
 assert len(re.findall(r'\bnet_link_start\(', app)) == 1

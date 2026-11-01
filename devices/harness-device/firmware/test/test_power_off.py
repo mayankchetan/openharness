@@ -124,11 +124,12 @@ static int pct = 4, mv = 3300, reg20 = 0x04, reg21 = 0x02, soft_off_calls, delay
 static jmp_buf death;                            // the PMIC cuts the power: the task never runs another line
 static bool armed_death;
 static uint32_t delay_total_ms;
+static bool link_up; static int net_close_calls, net_resume_calls; static int64_t t_close, t_reg10;   // Wi-Fi mode: net_link.h
 static int plug_during_show;                    // 1: VBUS appears while the screen is shown; 2: a USB host does
 static int writer_in_flight_ms;                  // a writer holds the gate for this long (virtual time), then leaves; <0: for ever
 
 int power_pmu_read(int *s0, int *s1) { ev("PMUREAD"); *s0 = status0; *s1 = status1; return status1 < 0 ? -1 : (status1 >> 5) & 3; }
-bool power_pmic_soft_off(void) { ev("REG10"); soft_off_calls++; if (dies_on_soft_off && soft_off_ok && armed_death) longjmp(death, 1); return soft_off_ok; }
+bool power_pmic_soft_off(void) { ev("REG10"); t_reg10 = g_now_us; soft_off_calls++; if (dies_on_soft_off && soft_off_ok && armed_death) longjmp(death, 1); return soft_off_ok; }
 int power_read_reg(uint8_t reg) { reg_reads++; return reg == 0x20 ? reg20 : reg == 0x21 ? reg21 : -1; }
 int battery_pct_raw(void) { return pct; }
 int battery_mv(void) { return mv; }
@@ -140,6 +141,8 @@ bool display_is_asleep(void) { return asleep; }
 void display_wake(void) { asleep = false; ev("WAKE"); }
 void ui_show_error(const char *t, const char *d) { char b[96]; snprintf(b, sizeof b, "SHOW[%s|%s]", t, d); ev(b); }
 void ui_leave_error_screen(void) { ev("HOME"); }
+bool net_link_close_for_power_off(void) { ev("NETCLOSE"); net_close_calls++; assert(store_gate_frozen()); t_close = g_now_us; return link_up; }
+void net_link_resume(void) { ev("NETRESUME"); net_resume_calls++; }
 
 // NVS: one namespace, one record, in memory; "commit" is the moment it becomes durable
 static struct { bool present; uint8_t data[32]; size_t len; } store, pending;
@@ -178,7 +181,7 @@ static int count_of(const char *needle) { int n = 0; for (const char *p = g_even
 static void reset_world(void) {
     status0 = 0x08; status1 = 0x40; usb_host = ota = false; asleep = true; soft_off_ok = true; dies_on_soft_off = true; nvs_fail = false;
     pct = 4; mv = 3300; reg20 = 0x04; reg21 = 0x02; soft_off_calls = delays = 0; delay_total_ms = 0; writer_in_flight_ms = 0; plug_during_show = 0; the_board.has_pmic = true; reg_reads = 0; armed_death = true;
-    defer = false; store.present = pending.present = false; tasks_created = 0; g_now_us += 10LL * 1000000 * 100;   // far past any retry throttle
+    link_up = false; net_close_calls = net_resume_calls = 0; defer = false; store.present = pending.present = false; tasks_created = 0; g_now_us += 10LL * 1000000 * 100;   // far past any retry throttle
     store_gate_thaw();
     clear_events();
 }
@@ -321,6 +324,68 @@ static void scenario_plugged_during_screen(void) {
     assert(has("REG10") && !has("PMUREAD"));
 }
 
+static void scenario_wifi_link(void) {
+    // In Wi-Fi mode the link is closed cleanly (a bye and a TLS close_notify, net_link.c) right before the PMIC write: after the last look at VBUS, with the
+    // writers stopped, within a bounded wait. A refusal before that point leaves the link alone; a PMIC that stays up gives the link back.
+    reset_world();
+    link_up = true;
+    assert(power_off_request(PP_OFF_S2_TIMEOUT, false));          // the PMIC takes the power: the task never runs another line (a death leaves the busy flag set, so this is a scenario of its own)
+    assert(net_close_calls == 1 && net_resume_calls == 0 && has("DEAD"));
+    assert(in_order("SHOW[Power|Off - hold PWR]", "NETCLOSE") && in_order("NETCLOSE", "REG10"));
+    assert(count_of("PMUREAD") == 2 && in_order("PMUREAD", "SHOW[Power|Off - hold PWR]") && in_order("SHOW[Power|Off - hold PWR]", "PMUREAD") && in_order("PMUREAD", "NETCLOSE"));
+    assert(in_order("NVSCOMMIT", "NETCLOSE"));                  // the writers are stopped and the record is durable first (the close asserts the gate is frozen)
+    assert(t_reg10 - t_close <= 1000LL * 1000 && t_reg10 >= t_close);   // the wait for the close to leave the radio is bounded: at most a second
+    assert(strstr(g_logs, "link closed before the power-off"));
+}
+
+static void scenario_wifi_link_cases(void) {
+    // not in Wi-Fi mode (USB mode, or the radio never came up): net_link says nothing was open; the sequence is as before
+    reset_world();
+    link_up = false;
+    dies_on_soft_off = false;
+    assert(power_off_request(PP_OFF_S2_TIMEOUT, false));
+    assert(net_close_calls == 1 && has("REG10") && !strstr(g_logs, "link closed before") && net_resume_calls == 0);
+
+    // a refusal before the last look never touches the link
+    reset_world();
+    link_up = true;
+    status0 = 0x28;
+    assert(power_off_request(PP_OFF_S2_TIMEOUT, false));
+    assert(net_close_calls == 0 && net_resume_calls == 0 && !has("REG10"));
+    reset_world();
+    link_up = true;
+    plug_during_show = 1;                                       // VBUS appears while "Off - hold PWR" is up: refused at the last look, before the close
+    assert(power_off_request(PP_OFF_S2_TIMEOUT, false));
+    assert(net_close_calls == 0 && net_resume_calls == 0 && !has("REG10"));
+    reset_world();
+    link_up = true;
+    ota = true;
+    assert(power_off_request(PP_OFF_S2_TIMEOUT, false));
+    assert(net_close_calls == 0);
+    reset_world();
+    link_up = true;
+    assert(store_gate_enter());
+    writer_in_flight_ms = -1;                                   // a writer that never finishes: no power-off, and the link is not closed for nothing
+    assert(power_off_request(PP_OFF_LOW_BATTERY, false));
+    assert(net_close_calls == 0 && !has("REG10"));
+    store_gate_leave();
+
+    // a PMIC that does not take the write: the link was closed, so it is given back (net_link reconnects), after the gate and the screen
+    reset_world();
+    link_up = true;
+    dies_on_soft_off = false;
+    assert(power_off_request(PP_OFF_DRAIN, false));
+    assert(net_close_calls == 1 && net_resume_calls == 1);
+    assert(in_order("REG10", "NETRESUME") && in_order("NETCLOSE", "REG10") && in_order("HOME", "NETRESUME"));   // after the gate and the screen are back
+    assert(!store_gate_frozen());
+    // ... but a link that was never open is not "resumed"
+    reset_world();
+    link_up = false;
+    dies_on_soft_off = false;
+    assert(power_off_request(PP_OFF_DRAIN, false));
+    assert(net_close_calls == 1 && net_resume_calls == 0);
+}
+
 static void scenario_one_at_a_time(void) {
     reset_world();
     defer = true;
@@ -385,6 +450,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "writer")) scenario_writer_in_flight();
     else if (!strcmp(argv[1], "pmic")) scenario_pmic_does_not_take_it();
     else if (!strcmp(argv[1], "plug")) scenario_plugged_during_screen();
+    else if (!strcmp(argv[1], "wifi")) scenario_wifi_link();
+    else if (!strcmp(argv[1], "wificases")) scenario_wifi_link_cases();
     else if (!strcmp(argv[1], "one")) scenario_one_at_a_time();
     else if (!strcmp(argv[1], "nvs")) scenario_nvs_failure();
     else if (!strcmp(argv[1], "boot")) scenario_boot_report();
@@ -410,8 +477,8 @@ with tempfile.TemporaryDirectory(prefix='harness-power-off-') as folder:
                     '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
                     '-I', str(main), str(folder / 'harness.c'), str(folder / 'power_off.c'), str(folder / 'store_gate.c'),
                     str(folder / 'power_policy.c'), '-o', str(folder / 'poff')], check=True)
-    scenarios = ('sequence', 'external', 'writer', 'pmic', 'plug', 'one', 'nvs', 'boot', 'gate')
+    scenarios = ('sequence', 'external', 'writer', 'pmic', 'plug', 'wifi', 'wificases', 'one', 'nvs', 'boot', 'gate')
     for name in scenarios:
         subprocess.run([str(folder / 'poff'), name], check=True)
     print('power off: ' + ', '.join(scenarios) + ' PASS (log line, writers stopped, NVS record committed, "Off - hold PWR", PMIC write last; '
-          'never on VBUS or a USB host; writer in flight; PMIC that stays up; one request at a time; boot report)')
+          'never on VBUS or a USB host; the Wi-Fi link closed before the PMIC write, after the last look; writer in flight; PMIC that stays up; one request at a time; boot report)')

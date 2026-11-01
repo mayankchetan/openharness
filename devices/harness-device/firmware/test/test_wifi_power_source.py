@@ -114,7 +114,7 @@ assert len(re.findall(re.escape(HOLD), net)) == 2 and len(re.findall(re.escape(R
 assert task.count(HOLD) == 1 and task.count(REL) == 2 and serve_fn.count(HOLD) == 1 and serve_fn.count(REL) == 1
 h = task.index(HOLD)
 assert h < task.index('join_wifi()') < task.index('tls->open(tls)'), 'the hold covers the join and the handshake'
-r1 = task.index('if (!opened) ' + REL)
+r1 = task.index('if (!opened || halted) ' + REL)
 assert task.index('tls->open(tls)') < r1 < task.index('backoff('), 'a failed join or handshake lets the hold go before any wait'
 assert not re.search(r'\b(continue|return|break|goto)\b', task[h:r1]), 'no way out between the hold and the release'
 # a link that came up keeps the hold into serve(); the task lets it go when serve() returns, before the relink backoff
@@ -178,6 +178,43 @@ hello = body(raw_client, 'send_hello')
 assert 'msg_string(&root, "keepalive", "v1");' in hello, 'the hello says it reads keepaliveMs'
 # only these two places read or write the window
 assert len(re.findall(r's_keepalive_ms', client)) == 4, 'definition, the silence check, the welcome, the end of the session'
+
+# ── 5. The power-off closes the Wi-Fi link on purpose (S7; user decision 3 of 2026-11-01) ───────────────────────────────────────────────
+# test_power_off.py runs power_off.c on the host and checks the order (after the last look at VBUS, writers stopped, bounded). What is left is
+# net_link.c's side and the wiring, which is not host-compilable.
+close_fn = body(net, 'net_link_close_for_power_off')
+assert 'atomic_load(&s_tls)' in close_fn and re.search(r'if \(!tls\) return false;', close_fn), 'USB mode has no link: nothing to close, and it says so'
+assert close_fn.index('atomic_store(&s_halt, true)') < close_fn.index('cable_client_say_bye(') < close_fn.index('tls->close(tls)'),     'park first, say goodbye while the stream is up, then close it (close_notify)'
+resume_fn = body(net, 'net_link_resume')
+assert 'atomic_exchange(&s_halt, false)' in resume_fn
+assert re.search(r'static atomic_bool s_halt;', net)
+# the task parks before it takes a hold or makes a link, and an attempt that was under way when the halt came leaves nothing behind
+task = body(net, 'net_link_task')
+assert re.search(r'while \(atomic_load\(&s_halt\)\) vTaskDelay\(', task) and task.index('atomic_load(&s_halt)) vTaskDelay') < task.index(HOLD), 'parked before the hold'
+assert 'const bool halted = atomic_load(&s_halt);' in task and 'if (opened && halted) tls->close(tls);' in task
+assert task.index('if (halted) continue;') < task.index('post(NET_EV_LINK_UP)'), 'a halted attempt never reports a link up'
+assert re.search(r'if \(atomic_load\(&s_halt\)\) return', body(net, 'serve')), 'serve() ends at once'
+# the goodbye: one frame, only with a session up, a short plain reason, nothing waits for an answer
+bye = body(code('cable_client.c'), 'cable_client_say_bye')
+assert '!s_session' in bye and 'msg("")' in bye and 'msg_string(&root, "", reason)' in bye and 'send_json(root)' in bye
+assert 'cable_client_say_bye("")' in net
+for rel in firmware_sources():
+    if rel not in ('net_link.c', 'cable_client.c', 'cable_client.h'):
+        assert 'cable_client_say_bye' not in stripped(rel), f'{rel} says goodbye'
+        assert 'net_link_close_for_power_off' not in stripped(rel) or rel in ('power_off.c', 'net_link.h'), f'{rel} closes the link for a power-off'
+# power_off.c: the close is after the last look and before the PMIC write; a refusal before it never reaches it; put_back gives the link back
+po = code('power_off.c')
+run_fn = body(po, 'run')
+assert run_fn.index('external_power_now(') < run_fn.rindex('external_power_now(') < run_fn.index('net_link_close_for_power_off()') < run_fn.index('power_pmic_soft_off()'), \
+    'close after the last look at VBUS, right before the PMIC write'
+assert run_fn.index('store_gate_freeze(') < run_fn.index('net_link_close_for_power_off()'), 'with the writers stopped'
+assert 'net_link_resume()' in body(po, 'put_back') and 's_link_closed' in body(po, 'put_back')
+assert len(re.findall(r'net_link_close_for_power_off\(\)', po)) == 1 and len(re.findall(r'net_link_resume\(\)', po)) == 1
+assert re.search(r'xTaskCreate\(task, "", 6144, NULL, 5, NULL\)', po), 'an internal 6 KB stack: the close_notify runs on it too'
+assert 'power_off.c' in text('CMakeLists.txt') and text('CMakeLists.txt').count('"power_off.c"') == 1
+# the dial's goodbye is a message the daemon knows (cli/src/cable/cableSession.ts case 'bye')
+daemon = (cli / 'cableSession.ts').read_text(encoding='utf-8')
+assert "case 'bye':" in daemon and 'said goodbye' in daemon, 'the daemon logs a clean close'
 
 print('power hooks: net_power_profile (set_ps only, no NONE), listen_interval once in the association config, no PM lock of its own, '
       'hold over connect + handshake and until the session is up, keepaliveMs wiring and limits agree with the daemon')

@@ -59,6 +59,13 @@ Wi-Fi network shows how to set one up instead of the rows.
 
 If you turned Keep Wi-Fi on and want USB back, open the Link screen and turn it off. The dial does not look at the cable while Keep Wi-Fi is on.
 
+## Long idle on the battery
+
+In the image built with `DEVICE_BATTERY_POWEROFF`, a dial that has been idle in light sleep for 30 minutes on its battery closes its link to this computer
+on purpose (it says goodbye, then closes the TLS connection, so the daemon log shows "said goodbye (power-off)" and a clean close), and then the power
+chip switches the dial off. It also switches off at 5 percent or when the battery falls fast. It never does this on a charger or with a cable in. Hold the
+PWR button to bring it back: it starts in Wi-Fi mode as before and reconnects in about 5 seconds.
+
 ## When the cable goes in
 
 With Keep Wi-Fi off, a Wi-Fi dial that is plugged into a computer that runs Harness goes back to USB after about 5 seconds, then restarts. It never restarts in the middle of a voice message, a draft, a firmware update or a pet upload: it waits until they end. If only a page, a question or a picker is open, it shows "Switching in a moment" and restarts 30 seconds after your last touch (each touch starts the 30 seconds again). A dial whose screen is off restarts without the notice.

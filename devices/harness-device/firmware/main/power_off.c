@@ -14,6 +14,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "fw_update.h"
+#include "net_link.h"
 #include "nvs.h"
 #include "power_policy.h"
 #include "store_gate.h"
@@ -28,6 +29,7 @@ static const char *TAG = "poff";
 #define FREEZE_TIMEOUT_MS   2000          // how long a writer in flight is waited for
 #define SETTLE_MS           100           // after the last write has been committed, before the screen
 #define SHOW_MS             1000          // "Off - hold PWR" is on the glass this long before the PMIC write
+#define CLOSE_FLUSH_MS      200           // after the Wi-Fi link is closed, before the PMIC write: the goodbye and the close_notify leave the radio
 #define AFTER_MS            3000          // the PMIC takes the power within milliseconds; still running after this long means it did not
 #define RETRY_US            (60LL * 1000000)   // an unforced request waits this long after a refusal
 
@@ -38,6 +40,7 @@ static atomic_bool s_busy;
 static int64_t s_next_try_us;
 static int s_reason;
 static bool s_force;
+static bool s_link_closed;   // this run closed the Wi-Fi link (net_link.h): put_back() gives it back
 
 static const char *reason_name(int reason)
 {
@@ -93,6 +96,10 @@ static void put_back(void)
     erase_record();
     store_gate_thaw();
     ui_leave_error_screen();
+    if (s_link_closed) {
+        s_link_closed = false;
+        net_link_resume();   // the dial stays on: the link is made again
+    }
     s_next_try_us = esp_timer_get_time() + RETRY_US;
 }
 
@@ -129,6 +136,13 @@ static void run(void)
         put_back();
         return;
     }
+    // Wi-Fi mode: close the link on purpose, so the daemon logs a clean close and not a drop. After the last look (a refusal above never touches the
+    // link) and with the writers stopped: the close writes nothing to flash. Bounded (net_link.h); the flush wait lets the frames leave the radio.
+    s_link_closed = net_link_close_for_power_off();
+    if (s_link_closed) {
+        ESP_LOGW(TAG, "POWEROFF: Wi-Fi link closed before the power-off");
+        vTaskDelay(pdMS_TO_TICKS(CLOSE_FLUSH_MS));
+    }
     const bool wrote = power_pmic_soft_off();   // REG 0x10 bit 0: on success the power goes within milliseconds and nothing below runs
     ESP_LOGW(TAG, "PMIC soft power-off written: %s", wrote ? "ok" : "FAILED");
     vTaskDelay(pdMS_TO_TICKS(AFTER_MS));
@@ -151,8 +165,9 @@ bool power_off_request(int reason, bool force)
     if (atomic_exchange(&s_busy, true)) return false;
     s_reason = reason;
     s_force = force;
-    // An internal stack (xTaskCreate): the task writes NVS, and the ptt task that asks has a PSRAM stack that must not run a flash write.
-    if (xTaskCreate(task, "poweroff", 4096, NULL, 5, NULL) != pdPASS) {
+    // An internal stack (xTaskCreate): the task writes NVS, and the ptt task that asks has a PSRAM stack that must not run a flash write. 6 KB, not 4:
+    // in Wi-Fi mode it also runs the TLS close_notify (net_link.h) on this stack. The margin is a guess, not a measurement: bench the high-water mark.
+    if (xTaskCreate(task, "poweroff", 6144, NULL, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "POWEROFF: task create failed");
         atomic_store(&s_busy, false);
         return false;

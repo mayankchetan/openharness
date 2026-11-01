@@ -30,6 +30,15 @@ bool net_link_start(void);
 // The transport to give cable_client_start_with() when net_link_start() returned true.
 const cable_xport_t *net_link_xport(void);
 
+// The battery power-off (power_off.c, DEVICE_BATTERY_POWEROFF) closes the link on purpose before the PMIC cuts the power, so the daemon logs a clean
+// close and not a drop (and does not wait out its silence window). net_link_close_for_power_off() says goodbye to the daemon when a session is up
+// (cable_client_say_bye), closes the TLS connection (close_notify, best effort, 100 ms), and parks the net_link task so it does not reconnect.
+// Returns true when Wi-Fi mode is running (there was a link to close, or one that was being made); false in USB mode, where it does nothing. Call it
+// from an internal-stack task, once the decision to power off is final. Bounded: the goodbye waits at most for a write that is already stalled
+// (the 2 s write cap of cable_xport_tls.c), usually a few milliseconds. net_link_resume() un-parks the task (the PMIC did not take the power-off).
+bool net_link_close_for_power_off(void);
+void net_link_resume(void);
+
 // What the glass says under the wordmark while the dial is not connected: a short line for the state (joining, no address, daemon not
 // reachable, key refused), or NULL (USB mode, or the link is up). Cheap; any task.
 const char *net_link_status_text(void);

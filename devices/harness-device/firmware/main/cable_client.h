@@ -120,6 +120,9 @@ bool cable_client_start_with(const cable_xport_t *xport);
 
 // Whether `welcome` has been seen and the session is still believed to be live.
 bool cable_client_is_connected(void);
+// Tell the daemon the dial is leaving on purpose (`{t:"bye", reason}`, a short plain word): the daemon logs a clean close. Only while a session is up;
+// false when it is not or the frame did not go. Sent just before a power-off closes the link (net_link.c); nothing waits for an answer.
+bool cable_client_say_bye(const char *reason);
 
 // For the automatic mode switch (mode_glue.c, task W15). Cheap, lock-free, any task.
 //

@@ -39,6 +39,7 @@ static const char *TAG = "net";
 
 static atomic_int s_state = NET_OFF;       // net_state_t; changed only through post()
 static atomic_bool s_ui_dirty;
+static atomic_bool s_halt;                 // a power-off has closed the link on purpose: the task parks and makes no new one (net_link_close_for_power_off)
 static _Atomic(const cable_xport_t *) s_tls;
 static unsigned s_links;                   // links established since boot (net_link task only)
 static net_refusal_t s_refusals;           // handshakes in a row that the daemon answered with an alert (net_link task only)
@@ -219,6 +220,7 @@ static const char *serve(const cable_xport_t *tls)
             held = !session;
         }
         const uint32_t bits = nwifi_wait(NWIFI_DISCONNECTED, power_sleep_wait_ms(PP_POLLER_NET_SERVE, SERVE_MS));   // 1 s while the chip may sleep; a Wi-Fi loss ends the wait at once
+        if (atomic_load(&s_halt)) return "power-off";
         if (!tls->is_up(tls)) return "link closed";
         if (bits & NWIFI_DISCONNECTED) return "wifi lost";
         if (!(bits & NWIFI_GOT_IP)) return "ip lost";
@@ -244,6 +246,7 @@ static void net_link_task(void *arg)
     for (;;) {
         ui_flush();
         power_profile_sync();
+        while (atomic_load(&s_halt)) vTaskDelay(pdMS_TO_TICKS(100));   // parked by a power-off (net_link_close_for_power_off): no new link until it is given back
         // POWER (W13, S1). Idle, this task holds nothing: not in the backoff waits. Over the join and the handshake it holds PP_HOLD_LINK, the power
         // policy's hold for a transport with traffic, so the chip does not light-sleep in the middle of a handshake. A failed join or handshake lets it
         // go before any wait; a link that came up keeps it into serve(), which holds it until the session is up. With battery sleep off these calls
@@ -252,7 +255,9 @@ static void net_link_task(void *arg)
         const bool joined = (nwifi_bits() & NWIFI_GOT_IP) || join_wifi();
         const int64_t t0_us = esp_timer_get_time();
         const bool opened = joined && tls->open(tls);   // TCP connect, then the handshake, both on this task
-        if (!opened) power_sleep_release(PP_HOLD_LINK);
+        const bool halted = atomic_load(&s_halt);        // a power-off began while this attempt was under way: it must not leave a link behind
+        if (opened && halted) tls->close(tls);
+        if (!opened || halted) power_sleep_release(PP_HOLD_LINK);
         if (!joined) {
             backoff(&ladder, "wifi");
             continue;
@@ -262,6 +267,7 @@ static void net_link_task(void *arg)
             backoff(&ladder, "daemon");
             continue;
         }
+        if (halted) continue;   // the top of the loop parks
         net_refusal_reset(&s_refusals);
         post(NET_EV_LINK_UP);
         s_links++;
@@ -280,6 +286,24 @@ static void net_link_task(void *arg)
         if (net_backoff_link_earned_reset(up_ms)) net_backoff_reset(&ladder);
         backoff(&ladder, "relink");
     }
+}
+
+// ── power-off ───────────────────────────────────────────────────────────────────────────────────────
+
+bool net_link_close_for_power_off(void)
+{
+    const cable_xport_t *tls = atomic_load(&s_tls);
+    if (!tls) return false;                       // USB mode, or the radio never came up: there is no link
+    atomic_store(&s_halt, true);                  // first: the task must not make a new link behind this close
+    const bool said = cable_client_say_bye("power-off");   // false when no session is up
+    tls->close(tls);                              // close_notify (best effort, 100 ms), then the socket; takes the transport's own lock, so a task inside a write lets go
+    ESP_LOGW(TAG, "power-off: link closed (goodbye %s)", said ? "sent" : "not sent: no session");
+    return true;
+}
+
+void net_link_resume(void)
+{
+    if (atomic_exchange(&s_halt, false)) ESP_LOGW(TAG, "power-off did not happen: the link is made again");
 }
 
 // ── start-up ────────────────────────────────────────────────────────────────────────────────────────

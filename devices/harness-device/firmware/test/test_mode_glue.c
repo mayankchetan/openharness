@@ -695,6 +695,51 @@ static void test_a_replug_with_a_reader_open_switches_after_30_s_of_idle(void)
     assert(D.notice_shown && D.reboots == 1);
 }
 
+// S7 (user decision 3 of 2026-11-01): after the 30 minute power-off the next PWR-button boot must come up in Wi-Fi mode, as it does today. The power-off
+// writes only its own record (power_off.c), so what the boot reads is what the running dial left: wl_mode, stay_wl and boot_usb. The power-off is a
+// power cut for the RTC memory (a power-on reset), so the crash and flap records start at zero. (While the power-off runs the writers are frozen and the
+// restart gate skips a due switch: test_the_restart_gate_sequence.)
+static void test_the_boot_after_a_power_off_is_wifi_mode(void)
+{
+    // a plain Wi-Fi dial, a long idle, the power goes
+    fresh();
+    provision(1);
+    assert(boot() == MS_MODE_WIFI && D.running == MS_MODE_WIFI);
+    assert(!run(31 * 60 * 1000) && D.reboots == 0);
+    D.reset_sw = false;
+    D.reset_cls = MS_RESET_POWERON;                        // the PMIC cut the power: everything in RTC memory is gone
+    memset(mode_record_raw_for_test(), 0, sizeof(ms_record_t)); memset(mode_record_crash_raw_for_test(), 0, sizeof(ms_crash_t));
+    assert(boot() == MS_MODE_WIFI && D.running == MS_MODE_WIFI);
+    assert(D.crashes == 0 && !D.crash_usb);
+
+    // Keep Wi-Fi on: the same
+    fresh();
+    provision(1);
+    assert(config_save_stay_wl(true));
+    assert(boot() == MS_MODE_WIFI);
+    assert(!run(31 * 60 * 1000));
+    memset(mode_record_raw_for_test(), 0, sizeof(ms_record_t)); memset(mode_record_crash_raw_for_test(), 0, sizeof(ms_crash_t));
+    D.reset_sw = false;
+    D.reset_cls = MS_RESET_POWERON;
+    assert(boot() == MS_MODE_WIFI);
+
+    // a dial that went to Wi-Fi from USB (boot_usb was written 0 by that switch) and then ran 40 minutes on the battery
+    fresh();
+    provision(1);
+    assert(config_save_boot_usb(true));                    // it had been in USB mode
+    D.cable = D.daemon = true;
+    assert(boot() == MS_MODE_USB);
+    assert(!run(70000));
+    D.cable = false;                                       // unplugged: after 10 s it leaves for Wi-Fi
+    assert(run(30000) && D.reboot_to[0] == MS_MODE_WIFI);
+    assert(boot() == MS_MODE_WIFI && !config_load_boot_usb());
+    assert(!run(40 * 60 * 1000));
+    memset(mode_record_raw_for_test(), 0, sizeof(ms_record_t)); memset(mode_record_crash_raw_for_test(), 0, sizeof(ms_crash_t));
+    D.reset_sw = false;
+    D.reset_cls = MS_RESET_POWERON;
+    assert(boot() == MS_MODE_WIFI);                        // the PWR button, no cable: Wi-Fi, as before
+}
+
 static void test_the_notice_goes_when_the_reason_goes(void)
 {
     fresh();
@@ -1304,6 +1349,7 @@ int main(void)
     test_busy_dial_waits_and_shows_the_notice();
     test_the_notice_goes_when_the_reason_goes();
     test_a_held_switch_is_logged_once_and_on_a_change();
+    test_the_boot_after_a_power_off_is_wifi_mode();
     test_a_replug_with_a_reader_open_switches_after_30_s_of_idle();
     test_power_cut_forgets_the_count();
     test_flaps_clear_after_ten_minutes();

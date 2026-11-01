@@ -1013,6 +1013,7 @@ export class CableSession {
   }
 
   private openAt = 0
+  private goodbye = ''   // the reason of a `bye` this port open has seen (cleared when the port closes)
   private probeLogged = false   // this port open's first probe has been logged (a new open is a new plug-in)
   private opening = false
   /**
@@ -1127,7 +1128,8 @@ export class CableSession {
 
   private onClosed(why: string): void {
     if (this.traffic.rx || this.traffic.tx) this.logLink('link at close')
-    this.log(`cable: closed (${why})`)
+    this.log(`cable: closed (${why})${this.goodbye ? ` after goodbye (${this.goodbye})` : ''}`)
+    this.goodbye = ''
     this.debug.abort('the dial went away')
     this.netRequests.abort('the dial went away')
     this.netAnnounced = false
@@ -1456,6 +1458,15 @@ export class CableSession {
       }
       case 'pong':
         return
+      case 'bye': {
+        // The dial is leaving on purpose (a battery power-off sends this just before it closes the link): a clean close, not a drop. Said so in the
+        // log, and the close that follows says "after goodbye". Only a short plain word is quoted; anything else is "unspecified" (the field is the
+        // dial's, and a log line is not a place for what it sends).
+        const reason = str('reason')
+        this.goodbye = reason && /^[a-z0-9 _-]{1,24}$/.test(reason) ? reason : 'unspecified'
+        this.log(`cable: the dial said goodbye (${this.goodbye}) — a clean close, not a drop`)
+        return
+      }
       case 'agents.list':
         await this.pushAgents()
         // A Pro asks for this as its session comes back, having dropped every question with the link (pro_app_link):

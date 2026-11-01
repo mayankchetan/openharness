@@ -68,7 +68,7 @@ assert helper.index('power_pmu_read(') < helper.index('usb_serial_jtag_is_connec
 pos = [run.index(x) for x in order]
 assert pos == sorted(pos), dict(zip(order, pos))
 assert '#define SHOW_MS             1000' in off_c
-assert 'xTaskCreate(task, "poweroff", 4096' in off_c and 'task_create_psram' not in off_c, 'an internal stack: the task writes NVS'
+assert 'xTaskCreate(task, "poweroff", 6144' in off_c and 'task_create_psram' not in off_c, 'an internal stack: the task writes NVS'
 assert '#ifdef DEVICE_BATTERY_POWEROFF' in off_c and off_c.rstrip().endswith('#endif')
 
 # ---- the glue asks, from the ptt task, only when the flag is on ----

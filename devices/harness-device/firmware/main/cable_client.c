@@ -2011,6 +2011,14 @@ failed:
 
 bool cable_client_is_connected(void) { return s_session; }
 
+bool cable_client_say_bye(const char *reason)
+{
+    if (!s_session || !reason) return false;
+    cJSON *root = msg("bye");
+    if (!root || !msg_string(&root, "reason", reason)) return false;
+    return send_json(root);
+}
+
 void cable_client_counters(uint32_t *bad, uint32_t *unknown)
 {
     if (bad) *bad = s_bad;

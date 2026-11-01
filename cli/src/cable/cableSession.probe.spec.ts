@@ -238,3 +238,62 @@ describe('hello{probe:1}', () => {
     await session.stop()
   })
 })
+
+describe('bye (the dial says it is leaving on purpose: a power-off)', () => {
+  afterEach(() => vi.useRealTimers())
+  const fake = () => vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+
+  it('is logged as a clean close, and the close that follows says so; nothing is sent back or attached', async () => {
+    fake()
+    const lines: string[] = []
+    const { session, port } = await connect(host({ log: (line) => lines.push(line) }))
+    port.say(HELLO)
+    await settle()
+    const sentBefore = port.sent.length
+    port.say({ t: 'bye', reason: 'power-off' })
+    await settle()
+    expect(lines.filter((l) => /said goodbye \(power-off\)/.test(l))).toHaveLength(1)
+    expect(lines.join('\n')).toMatch(/clean close/)
+    await port.close('the dial closed the link')
+    await settle()
+    expect(lines.some((l) => /closed \(the dial closed the link\) after goodbye \(power-off\)/.test(l))).toBe(true)
+    expect(port.sent.length).toBe(sentBefore)   // no answer to a goodbye
+    await session.stop()
+  })
+
+  it('names only a short plain reason; anything else is "unspecified" and never reaches the log', async () => {
+    fake()
+    const lines: string[] = []
+    const { session, port } = await connect(host({ log: (line) => lines.push(line) }))
+    port.say(HELLO)
+    await settle()
+    port.say({ t: 'bye', reason: 'power-off\x1b[31m' + 'x'.repeat(300) })
+    await settle()
+    const said = lines.filter((l) => /said goodbye/.test(l))
+    expect(said).toHaveLength(1)
+    expect(said[0]).toMatch(/said goodbye \(unspecified\)/)
+    expect(said[0]).not.toMatch(/\x1b/)
+    port.say({ t: 'bye' })
+    await settle()
+    expect(lines.filter((l) => /said goodbye \(unspecified\)/.test(l))).toHaveLength(2)
+    await session.stop()
+  })
+
+  it('a goodbye does not outlive its port: the next plug-in starts clean', async () => {
+    fake()
+    const lines: string[] = []
+    const { session, port, ports } = await connect(host({ log: (line) => lines.push(line) }))
+    port.say(HELLO)
+    port.say({ t: 'bye', reason: 'power-off' })
+    await settle()
+    await port.close('first')
+    vi.advanceTimersByTime(10_000)
+    await vi.waitFor(() => expect(ports.length).toBeGreaterThan(1))
+    await settle()
+    await settle()
+    await ports[ports.length - 1]!.close('second')
+    await settle()
+    expect(lines.some((l) => /closed \(second\)$/.test(l))).toBe(true)
+    await session.stop()
+  })
+})
