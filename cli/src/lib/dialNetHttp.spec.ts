@@ -144,3 +144,67 @@ describe('the dial Wi-Fi routes: what is answered', () => {
     expect(a).toHaveBeenCalledWith({ op: 'status' }, DIAL_NET_WAIT_MS)
   })
 })
+
+describe('the dial phone routes (B6)', () => {
+  it('phone-set sends only the dial and a mode of 0 or 2; a key or any other field in the body is dropped', async () => {
+    const a = ask()
+    await dialNetRequest('phone-set', undefined, a)
+    await dialNetRequest('phone-set', { dial: ' B8:1F:3F:CA:E5:58 ', mode: 0, key: 'abc', ssid: 'x', pass: PASS, extra: 1 }, a)
+    await dialNetRequest('phone-set', { mode: 2 }, a)
+    expect(a.mock.calls.map(([payload]) => payload)).toEqual([
+      { op: 'phone_set' },
+      { op: 'phone_set', dial: 'B8:1F:3F:CA:E5:58', mode: 0 },
+      { op: 'phone_set', mode: 2 },
+    ])
+    expect(a.mock.calls[0][1]).toBe(DIAL_NET_WAIT_MS)
+  })
+
+  it('phone-mode needs 0 or 2, and phone-forget takes a dial or nothing', async () => {
+    const a = ask()
+    await dialNetRequest('phone-mode', { mode: 2 }, a)
+    await dialNetRequest('phone-mode', { mode: 0, dial: 'serial-1' }, a)
+    await dialNetRequest('phone-forget', undefined, a)
+    await dialNetRequest('phone-forget', { dial: 'serial-1', mode: 2 }, a)
+    expect(a.mock.calls.map(([payload]) => payload)).toEqual([
+      { op: 'phone_mode', mode: 2 },
+      { op: 'phone_mode', dial: 'serial-1', mode: 0 },
+      { op: 'phone_forget' },
+      { op: 'phone_forget', dial: 'serial-1' },
+    ])
+  })
+
+  it.each([
+    ['phone-set', { mode: 1 }, 'mode'],
+    ['phone-set', { mode: '2' }, 'mode'],
+    ['phone-set', { dial: 'x'.repeat(65) }, 'dial'],
+    ['phone-mode', {}, 'mode'],
+    ['phone-mode', { mode: 1 }, 'mode'],
+    ['phone-mode', { mode: 3 }, 'mode'],
+    ['phone-forget', { dial: 'a\nb' }, 'dial'],
+  ])('%s %j is a 400 for %s before anyone is asked', async (op, body, field) => {
+    const a = ask()
+    const reply = await dialNetRequest(op, body, a)
+    expect(reply.status).toBe(400)
+    expect(reply.body).toMatchObject({ kind: 'bad_request', field })
+    expect(a).not.toHaveBeenCalled()
+  })
+
+  it('the underscore names of the payload are not routes', async () => {
+    const a = ask()
+    for (const op of ['phone_set', 'phone_mode', 'phone_forget', 'phone']) expect(await dialNetRequest(op, {}, a)).toEqual({ status: 404, body: { error: 'not found' } })
+    expect(a).not.toHaveBeenCalled()
+  })
+
+  it('an answer carries ble and the mode, and still no key', async () => {
+    const reply = await dialNetRequest('phone-set', {}, async () => ({ ok: true, dial: 'B8:1F:3F:CA:E5:58', ble: true, mode: 2, key: 'AAAA', pass: 'x' }))
+    expect(reply).toEqual({ status: 200, body: { ok: true, dial: 'B8:1F:3F:CA:E5:58', ble: true, mode: 2 } })
+    const status = await dialNetRequest('status', {}, async () => ({ ok: true, usb: { dial: 'B8:1F:3F:CA:E5:58', saved: false, ble: true, mode: 2, keyed: true } }))
+    expect(status.body).toMatchObject({ usb: { ble: true, mode: 2, keyed: true } })
+  })
+
+  it('a failure keeps its kind, and the 502 / 409 mapping is the Wi-Fi one', async () => {
+    const reply = await dialNetRequest('phone-set', {}, async () => ({ ok: false, kind: 'unsupported', message: 'this dial\'s firmware has no phone mode' }))
+    expect(reply.status).toBe(409)
+    expect(reply.body).toMatchObject({ kind: 'unsupported' })
+  })
+})

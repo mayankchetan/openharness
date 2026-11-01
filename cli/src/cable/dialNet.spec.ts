@@ -160,3 +160,54 @@ describe('what goes wrong', () => {
     for (const secret of ['correct horse', 'home-net', '192.168.1.20', KEY.toString('base64'), KEY.toString('hex')]) expect(text).not.toContain(secret)
   })
 })
+
+describe('the phone-mode forms (B6)', () => {
+  it('the key-only set goes out with a key and no other field', async () => {
+    const { net, sent } = rig()
+    const pending = net.request({ op: 'set_ble', key: KEY })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(sent).toEqual([{ t: 'net.set', key: KEY.toString('base64'), id: 10 }])
+    expect(Object.keys(sent[0]).sort()).toEqual(['id', 'key', 't'])
+    net.message({ t: 'net.state', id: 10, ok: true, saved: false, ble: true, mode: 0 })
+    expect(await pending).toEqual({ ok: true, saved: false, ble: true, mode: 0 })
+  })
+
+  it('net.mode accepts 2 (the phone) and refuses 3', async () => {
+    const { net, sent } = rig()
+    const pending = net.request({ op: 'mode', mode: 2 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(sent).toEqual([{ t: 'net.mode', mode: 2, id: 10 }])
+    net.message({ t: 'net.state', id: 10, ok: true, saved: false, ble: true, mode: 2 })
+    expect(await pending).toEqual({ ok: true, saved: false, ble: true, mode: 2 })
+    expect(failure(await net.request({ op: 'mode', mode: 3 } as unknown as NetRequest))).toMatchObject({ kind: 'bad_request' })
+    expect(sent).toHaveLength(1)
+  })
+
+  it('reads ble only when it is true, and a mode only when it is 0, 1 or 2', async () => {
+    const { net } = rig()
+    let pending = net.request({ op: 'get' })
+    await vi.advanceTimersByTimeAsync(0)
+    net.message({ t: 'net.state', id: 10, ok: true, saved: false, ble: 'yes', mode: 3 })
+    expect(await pending).toEqual({ ok: true, saved: false, ble: false })
+    pending = net.request({ op: 'get' })
+    await vi.advanceTimersByTimeAsync(0)
+    net.message({ t: 'net.state', id: 11, ok: true, saved: true, ssid: 'x', ble: true, mode: 1 })
+    expect(await pending).toEqual({ ok: true, saved: true, ssid: 'x', ble: true, mode: 1 })
+  })
+
+  it('refuses an all-zero or short key for the key-only set before sending, and never logs the key', async () => {
+    const { net, sent, lines } = rig()
+    expect(failure(await net.request({ op: 'set_ble', key: Buffer.alloc(32) }))).toMatchObject({ kind: 'bad_request' })
+    expect(failure(await net.request({ op: 'set_ble', key: Buffer.alloc(16, 1) }))).toMatchObject({ kind: 'bad_request' })
+    expect(sent).toEqual([])
+    const pending = net.request({ op: 'set_ble', key: KEY })
+    await vi.advanceTimersByTimeAsync(0)
+    net.message({ t: 'net.state', id: 10, ok: true, saved: false, ble: true })
+    await pending
+    for (const line of lines) {
+      expect(line).not.toContain(KEY.toString('base64'))
+      expect(line).not.toContain(KEY.toString('hex'))
+    }
+    expect(lines.some((l) => /net\.set_ble 10 done/.test(l))).toBe(true)
+  })
+})

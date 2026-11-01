@@ -34,7 +34,9 @@ export type NetRequest =
   | { op: 'set'; ssid: string; pass: string; host: string; port: number; key: Buffer; mode: 0 | 1 }
   | { op: 'get' }
   | { op: 'clear' }
-  | { op: 'mode'; mode: 0 | 1 }
+  | { op: 'mode'; mode: 0 | 1 | 2 }
+  /** The key-only form of net.set (B6): the phone needs the key and nothing else. */
+  | { op: 'set_ble'; key: Buffer }
   | { op: 'key'; key: Buffer }
   | { op: 'host'; host: string; port: number }
 
@@ -44,7 +46,9 @@ export interface NetState {
   ssid?: string
   host?: string
   port?: number
-  mode?: 0 | 1
+  mode?: 0 | 1 | 2
+  /** The dial holds whole phone-mode settings (a marker and a key; the key never leaves it). */
+  ble?: boolean
 }
 
 /**
@@ -93,7 +97,9 @@ function readState(msg: { [key: string]: unknown }): NetState {
   if (typeof msg.ssid === 'string' && msg.ssid.length > 0 && Buffer.byteLength(msg.ssid) <= NET_SSID_MAX && PRINTABLE.test(msg.ssid)) state.ssid = msg.ssid
   if (validHost(msg.host)) state.host = msg.host
   if (validPort(msg.port)) state.port = msg.port
-  if (msg.mode === 0 || msg.mode === 1) state.mode = msg.mode
+  if (msg.mode === 0 || msg.mode === 1 || msg.mode === 2) state.mode = msg.mode
+  // Only a state that says so (the field is new: a firmware before B6 sends none) carries the key; absent reads as false.
+  if ('ble' in msg) state.ble = msg.ble === true
   return state
 }
 
@@ -153,9 +159,12 @@ export class DialNet {
     if (key && !validKeyBytes(key)) return { error: `a dial key is ${NET_KEY_BYTES} bytes and not all zero` }
     switch (request.op) {
       case 'set': return { message: { t: 'net.set', ssid: request.ssid, pass: request.pass, host: request.host, port: request.port, key: request.key.toString('base64'), mode: request.mode } }
+      case 'set_ble': return { message: { t: 'net.set', key: request.key.toString('base64') } }
       case 'get': return { message: { t: 'net.get' } }
       case 'clear': return { message: { t: 'net.clear' } }
-      case 'mode': return { message: { t: 'net.mode', mode: request.mode } }
+      case 'mode': return request.mode === 0 || request.mode === 1 || request.mode === 2
+        ? { message: { t: 'net.mode', mode: request.mode } }
+        : { error: 'the mode is 0, 1 or 2' }
       case 'key': return { message: { t: 'net.key', key: request.key.toString('base64') } }
       case 'host': return { message: { t: 'net.host', host: request.host, port: request.port } }
     }

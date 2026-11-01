@@ -64,5 +64,8 @@ export const validPort = (value: unknown): value is number =>
 
 export const validMode = (value: unknown): value is 0 | 1 => value === 0 || value === 1
 
+/** The phone mode's switch: 2 = use the phone when the cable is out, 0 = USB only. (1 is Wi-Fi's.) */
+export const validPhoneMode = (value: unknown): value is 0 | 2 => value === 0 || value === 2
+
 export const validDial = (value: unknown): value is string =>
   typeof value === 'string' && value.length >= 1 && value.length <= 64 && !CONTROL.test(value)

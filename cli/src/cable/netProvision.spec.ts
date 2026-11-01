@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { pskConnect } from './__fixtures__/pskClient.js'
 import type { FleetNetResult } from './cableFleet.js'
@@ -35,15 +35,16 @@ function rig(over: { net?: Net; lan?: () => Promise<string | null>; keys?: DialK
   const seen: Array<{ op: string; hadKey: boolean }> = []
   const lines: string[] = []
   // A dial that holds nothing until it is set, as the firmware does.
-  const held: { ssid?: string; host?: string; port?: number; mode?: 0 | 1 } = {}
+  const held: { ssid?: string; host?: string; port?: number; mode?: 0 | 1 | 2; ble?: boolean } = {}
   const net: Net = over.net ?? (async (dial, request) => {
     calls.push({ dial, request })
     seen.push({ op: request.op, hadKey: keys.has(MAC) })
     switch (request.op) {
       case 'set': Object.assign(held, { ssid: request.ssid, host: request.host, port: request.port, mode: request.mode }); return { ok: true, saved: true, ...held, dial: MAC }
-      case 'get': return held.ssid ? { ok: true, saved: true, ...held, dial: MAC } : { ok: true, saved: false, dial: MAC }
+      case 'get': return { ok: true, saved: !!held.ssid, ...held, dial: MAC }
+      case 'set_ble': held.ble = true; held.mode ??= 0; return { ok: true, saved: !!held.ssid, ...held, dial: MAC }
       case 'clear': for (const k of Object.keys(held)) delete held[k as keyof typeof held]; return { ok: true, saved: false, dial: MAC }
-      case 'mode': return held.ssid ? (held.mode = request.mode, { ok: true, saved: true, ...held, dial: MAC }) : { ok: false, kind: 'device', err: 'not_provisioned', message: 'the dial refused: not_provisioned', saved: false, dial: MAC }
+      case 'mode': return (request.mode === 2 ? held.ble : held.ssid || held.ble) ? (held.mode = request.mode, { ok: true, saved: !!held.ssid, ...held, dial: MAC }) : { ok: false, kind: 'device', err: 'not_provisioned', message: 'the dial refused: not_provisioned', saved: false, dial: MAC }
       case 'key': return held.ssid ? { ok: true, saved: true, ...held, dial: MAC } : { ok: false, kind: 'device', err: 'not_provisioned', message: 'the dial refused: not_provisioned', saved: false, dial: MAC }
       case 'host': Object.assign(held, { host: request.host, port: request.port }); return { ok: true, saved: true, ...held, dial: MAC }
     }
@@ -462,5 +463,229 @@ describe('the address of this computer on the network', () => {
     expect(await lanAddress(throwing as never)).toBeNull()
     const noAddress = () => ({ once: () => undefined, connect: (_p: number, _h: string, done: () => void) => done(), address: () => { throw new Error('not bound') }, close: () => undefined })
     expect(await lanAddress(noAddress as never)).toBeNull()
+  })
+})
+
+describe('the phone mode (B6)', () => {
+  const phoneSet = { op: 'phone_set' }
+  const lastOps = (calls: Array<{ request: NetRequest }>) => calls.map((c) => c.request.op)
+
+  describe('phone_set', () => {
+    it('sends the key-only set, then mode 2, and files the same key after the dial said ok', async () => {
+      const { prov, keys, calls, seen, held } = rig()
+      const answer = await prov.handle(phoneSet)
+      expect(answer).toEqual({ ok: true, dial: MAC, ble: true, mode: 2 })
+      expect(lastOps(calls)).toEqual(['set_ble', 'mode'])
+      const sent = calls[0].request as Extract<NetRequest, { op: 'set_ble' }>
+      expect(sent.key).toHaveLength(32)
+      expect(Object.keys(sent).sort()).toEqual(['key', 'op'])
+      expect(calls[1].request).toEqual({ op: 'mode', mode: 2 })
+      expect(keys.get(MAC)).toEqual(sent.key)
+      // the keystore did not hold the key while the dial was still deciding
+      expect(seen[0]).toEqual({ op: 'set_ble', hadKey: false })
+      expect(held).toMatchObject({ ble: true, mode: 2 })
+    })
+
+    it('stays off with mode 0: only the key-only set is sent', async () => {
+      const { prov, calls, keys } = rig()
+      const answer = await prov.handle({ ...phoneSet, mode: 0 })
+      expect(answer).toEqual({ ok: true, dial: MAC, ble: true, mode: 0 })
+      expect(lastOps(calls)).toEqual(['set_ble'])
+      expect(keys.has(MAC)).toBe(true)
+    })
+
+    it('refuses a mode that is not 0 or 2, a dial name that is not one, and sends nothing', async () => {
+      const { prov, calls } = rig()
+      expect(await prov.handle({ ...phoneSet, mode: 1 })).toMatchObject({ ok: false, kind: 'bad_request', field: 'mode' })
+      expect(await prov.handle({ ...phoneSet, dial: 5 })).toMatchObject({ ok: false, kind: 'bad_request', field: 'dial' })
+      expect(calls).toEqual([])
+    })
+
+    it('a different key every time', async () => {
+      const { prov, calls } = rig()
+      await prov.handle(phoneSet)
+      await prov.handle(phoneSet)
+      const keysSent = calls.filter((c) => c.request.op === 'set_ble').map((c) => (c.request as { key: Buffer }).key)
+      expect(keysSent[0].equals(keysSent[1])).toBe(false)
+    })
+
+    it('leaves the keystore as it was when the dial refuses (a firmware without the link says feature), and names the reason', async () => {
+      const old = Buffer.alloc(32, 9)
+      const { prov, keys, file } = rig({ net: async () => refusal('feature') })
+      keys.set(MAC, old)
+      const before = readFileSync(file, 'utf8')
+      const answer = await prov.handle(phoneSet)
+      expect(answer).toMatchObject({ ok: false, kind: 'device', err: 'feature' })
+      expect(keys.get(MAC)).toEqual(old)
+      expect(readFileSync(file, 'utf8')).toBe(before)
+    })
+
+    it('says the state is unknown after a timeout, and leaves the keystore alone', async () => {
+      const { prov, keys } = rig({ net: async () => ({ ok: false, kind: 'timeout', message: 'the dial did not answer in 5 s' }) })
+      const answer = await prov.handle(phoneSet)
+      expect(answer).toMatchObject({ ok: false, kind: 'timeout' })
+      expect(String(answer.message)).toContain('harness dial phone set')
+      expect(keys.has(MAC)).toBe(false)
+    })
+
+    it('does not file a key when the dial answered ok but does not hold phone settings', async () => {
+      const { prov, keys } = rig({ net: async (_d, request) => (request.op === 'set_ble' ? { ok: true, saved: false, ble: false, dial: MAC } : { ok: true, saved: false, dial: MAC }) })
+      const answer = await prov.handle(phoneSet)
+      expect(answer).toMatchObject({ ok: false, kind: 'device' })
+      expect(keys.has(MAC)).toBe(false)
+    })
+
+    it('clears the dial again when it did not say its MAC, so a key it holds is not left unfiled', async () => {
+      const seenOps: string[] = []
+      const { prov, keys } = rig({
+        net: async (_d, request) => {
+          seenOps.push(request.op)
+          return request.op === 'set_ble' ? { ok: true, saved: false, ble: true } : { ok: true, saved: false }
+        },
+      })
+      const answer = await prov.handle(phoneSet)
+      expect(answer).toMatchObject({ ok: false, kind: 'device' })
+      expect(seenOps).toEqual(['set_ble', 'clear'])
+      expect(keys.has(MAC)).toBe(false)
+    })
+
+    it('puts a first set back (clear) when the keystore will not take the key', async () => {
+      const real = rig()
+      const { prov, calls, held } = rig({ keys: refusingSet(real.keys) })
+      const answer = await prov.handle(phoneSet)
+      expect(answer).toMatchObject({ ok: false, kind: 'keystore' })
+      expect(lastOps(calls)).toEqual(['set_ble', 'clear'])
+      expect(held).toEqual({})
+    })
+
+    it('sends the old key back when the keystore will not take a new one for a dial that already had one', async () => {
+      const dir = rig()
+      const old = Buffer.alloc(32, 4)
+      dir.keys.set(MAC, old)
+      const { prov, calls } = rig({ keys: refusingSet(dir.keys) })
+      const answer = await prov.handle(phoneSet)
+      expect(answer).toMatchObject({ ok: false, kind: 'keystore' })
+      expect(lastOps(calls)).toEqual(['set_ble', 'key'])
+      expect((calls[1].request as { key: Buffer }).key).toEqual(old)
+    })
+
+    it('when mode 2 fails after the key is filed, says so and tells the person what to run; the key stays (the dial holds it)', async () => {
+      const { prov, keys, calls } = rig({
+        net: async (_d, request) => (request.op === 'mode' ? refusal('feature') : { ok: true, saved: false, ble: true, dial: MAC }),
+      })
+      const answer = await prov.handle(phoneSet)
+      expect(answer).toMatchObject({ ok: false, kind: 'device', err: 'feature' })
+      expect(String(answer.message)).toContain('harness dial phone on')
+      expect(keys.has(MAC)).toBe(true)
+      expect(lastOps(calls)).toEqual(['set_ble', 'mode'])
+    })
+
+    it('keeps the Wi-Fi settings and the pinned address of a dial that has both: one new key, filed once', async () => {
+      const { prov, keys, held } = rig()
+      await prov.handle({ ...provision, host: '10.0.0.7' })
+      const wifiKey = keys.get(MAC)
+      expect(keys.record(MAC)?.hostPinned).toBe(true)
+      await prov.handle(phoneSet)
+      expect(keys.get(MAC)?.equals(wifiKey!)).toBe(false)
+      expect(keys.record(MAC)?.hostPinned).toBe(true)
+      expect(held).toMatchObject({ ssid: SSID, ble: true, mode: 2 })
+    })
+
+    it('puts no key in the log or the answer', async () => {
+      const { prov, keys, lines } = rig()
+      const answer = await prov.handle(phoneSet)
+      const key = keys.get(MAC)!
+      const text = JSON.stringify(answer) + lines.join('\n')
+      for (const secret of [key.toString('base64'), key.toString('hex'), createHash('sha256').update(key).digest('hex')]) expect(text).not.toContain(secret)
+      expect(lines.some((l) => /phone/.test(l))).toBe(true)
+    })
+
+    it('the dial it files for can complete a TLS-PSK handshake at NetDials.acceptStream (the tunnel door)', async () => {
+      const { prov, keys } = rig()
+      await prov.handle(phoneSet)
+      const dir = mkdtempSync(join(tmpdir(), 'phone-door-'))
+      cleanup.push(() => rmSync(dir, { recursive: true, force: true }))
+      const { duplexPair } = await import('./__fixtures__/duplexPair.js')
+      const conns: string[] = []
+      const dials = new NetDials({ keys, port: 0, enabled: false, log: () => {}, onDial: (c) => { conns.push(`${c.id}:${c.transport}`); c.socket.on('error', () => {}) } })
+      dials.start()
+      cleanup.push(() => dials.stop())
+      const [near, far] = duplexPair()
+      dials.acceptStream(near, { peer: 'tunnel', transport: 'tunnel' })
+      const client = await pskConnect({ port: 0, identity: MAC, psk: keys.get(MAC)!, socket: far })
+      client.on('error', () => {})
+      cleanup.push(() => client.destroy())
+      await vi.waitFor(() => expect(conns).toEqual([`${MAC}:tunnel`]))
+    })
+  })
+
+  describe('phone_mode', () => {
+    it('on sends mode 2 and off sends mode 0, to a dial that holds phone settings', async () => {
+      const { prov, calls, held } = rig()
+      await prov.handle({ ...phoneSet, mode: 0 })
+      calls.length = 0
+      expect(await prov.handle({ op: 'phone_mode', mode: 2 })).toMatchObject({ ok: true, dial: MAC, mode: 2 })
+      expect(held.mode).toBe(2)
+      expect(await prov.handle({ op: 'phone_mode', mode: 0 })).toMatchObject({ ok: true, dial: MAC, mode: 0 })
+      expect(held.mode).toBe(0)
+    })
+
+    it('off does not turn off a dial that is in Wi-Fi mode: that is `harness dial wifi off`', async () => {
+      const { prov, calls, held } = rig()
+      await prov.handle(provision)
+      calls.length = 0
+      const answer = await prov.handle({ op: 'phone_mode', mode: 0 })
+      expect(answer).toMatchObject({ ok: false, kind: 'bad_request' })
+      expect(String(answer.message)).toContain('harness dial wifi off')
+      expect(held.mode).toBe(1)
+      expect(lastOps(calls)).toEqual(['get'])
+    })
+
+    it('on passes the dial\'s refusal through when it holds no phone settings', async () => {
+      const { prov } = rig()
+      expect(await prov.handle({ op: 'phone_mode', mode: 2 })).toMatchObject({ ok: false, kind: 'device', err: 'not_provisioned' })
+    })
+
+    it('refuses a mode that is not 0 or 2 and sends nothing', async () => {
+      const { prov, calls } = rig()
+      expect(await prov.handle({ op: 'phone_mode', mode: 1 })).toMatchObject({ ok: false, kind: 'bad_request', field: 'mode' })
+      expect(await prov.handle({ op: 'phone_mode' })).toMatchObject({ ok: false, kind: 'bad_request', field: 'mode' })
+      expect(calls).toEqual([])
+    })
+  })
+
+  describe('phone_forget', () => {
+    it('clears a dial that holds phone settings only, and forgets its key here', async () => {
+      const { prov, keys, calls, held } = rig()
+      await prov.handle(phoneSet)
+      calls.length = 0
+      const answer = await prov.handle({ op: 'phone_forget' })
+      expect(answer).toMatchObject({ ok: true, dial: MAC, cleared: true, removed: true })
+      expect(lastOps(calls)).toEqual(['get', 'clear'])
+      expect(held).toEqual({})
+      expect(keys.has(MAC)).toBe(false)
+    })
+
+    it('refuses when the dial also holds Wi-Fi settings: they share the key, and the clear would take both', async () => {
+      const { prov, keys, calls, held } = rig()
+      await prov.handle(provision)
+      await prov.handle(phoneSet)
+      calls.length = 0
+      const answer = await prov.handle({ op: 'phone_forget' })
+      expect(answer).toMatchObject({ ok: false, kind: 'bad_request' })
+      expect(String(answer.message)).toContain('harness dial wifi forget')
+      expect(lastOps(calls)).toEqual(['get'])
+      expect(held).toMatchObject({ ssid: SSID, ble: true })
+      expect(keys.has(MAC)).toBe(true)
+    })
+  })
+
+  describe('status', () => {
+    it('carries ble and the phone mode of the dial on the cable', async () => {
+      const { prov } = rig()
+      await prov.handle(phoneSet)
+      const answer = await prov.handle({ op: 'status' })
+      expect(answer).toMatchObject({ ok: true, usb: { dial: MAC, keyed: true, saved: false, ble: true, mode: 2 } })
+    })
   })
 })

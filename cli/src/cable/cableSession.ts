@@ -517,7 +517,7 @@ export interface DeviceSettings {
    * report it (every build before W16) has none. Read-only here: no message of this daemon writes it, and the credentials of the
    * network never travel in the settings (spec cable-wifi-link.md section 7).
    */
-  linkMode?: 'usb' | 'wifi'
+  linkMode?: 'usb' | 'wifi' | 'ble'
   voiceLang: string
   /** Presence advertises companion.set support. Omitted by older firmware. */
   followCompanion?: boolean
@@ -647,7 +647,7 @@ function readSettings(value: unknown): DeviceSettings | undefined {
     round: raw.round as boolean,
     voiceLang: raw.voiceLang,
     ...(raw.uiSkin === 'classic' || raw.uiSkin === 'console' ? { uiSkin: raw.uiSkin as 'classic' | 'console' } : {}),
-    ...(raw.linkMode === 'usb' || raw.linkMode === 'wifi' ? { linkMode: raw.linkMode as 'usb' | 'wifi' } : {}),
+    ...(raw.linkMode === 'usb' || raw.linkMode === 'wifi' || raw.linkMode === 'ble' ? { linkMode: raw.linkMode as 'usb' | 'wifi' | 'ble' } : {}),
     ...(raw.companionProtocol === 2 ? {companionProtocol:2, companionDetails:readCompanionIdentity(raw.companionDetails)} : {}),
     ...(typeof raw.followCompanion === 'boolean' &&
         (raw.companion === null || typeof raw.companion === 'string')
@@ -885,6 +885,8 @@ export class CableSession {
   private keepaliveMs: number | null = null
   /** `hello.net === 'v1'`: the dial keeps Wi-Fi settings and speaks net.*. Per link; the welcome then lists "net" (on the cable only). */
   private netCapable = false
+  /** `hello.ble === 'v1'`: the dial's image has the phone link and keeps phone-mode settings (the key-only net.set, net.mode 2). Per link; the welcome then lists "ble" (on the cable only). */
+  private bleCapable = false
   /** The host has been told, on this link, that the dial keeps Wi-Fi settings. */
   private netAnnounced = false
 
@@ -1350,6 +1352,7 @@ export class CableSession {
         this.swarmCard = str('swarmCard') === 'v1'
         this.adpcmVoice = str('voiceCodec') === 'adpcm-v1'
         this.netCapable = str('net') === 'v1'
+        this.bleCapable = str('ble') === 'v1'
         this.keepaliveCapable = str('keepalive') === 'v1'
         // Decided here, applied from this welcome on: the same K the welcome carries sets the ping and the quiet-dial window below, and the
         // dial sets its own window from the field. A dial that did not ask, or a host with no setting, keeps today's 5 s / 20 s.
@@ -1394,6 +1397,8 @@ export class CableSession {
             // Wi-Fi settings go over the cable only (the dial refuses them on any other link, and this side sends none), and
             // only to a dial that said it keeps them.
             ...(this.mayNetHere() ? ['net'] : []),
+            // The phone-mode forms (key-only net.set, net.mode 2) go over the cable only too, and only to a dial that said it has the link.
+            ...(this.mayBleHere() ? ['ble'] : []),
           ],
         })
         // Log a dial that is new OR that came back running something else. The version half of that test
@@ -2019,6 +2024,11 @@ export class CableSession {
     return this.netCapable && this.link?.transport === 'usb'
   }
 
+  /** The phone-mode settings (the key) cross the cable and nothing else, to a dial whose hello said "ble": `net` is a Wi-Fi word and does not imply it. */
+  private mayBleHere(): boolean {
+    return this.bleCapable && this.link?.transport === 'usb'
+  }
+
   /** Tell the host, once per link, that this dial on the cable keeps Wi-Fi settings (CableHost.onNetCapable). */
   private announceNet(): void {
     const mac = this.greetedMac
@@ -2602,6 +2612,10 @@ export class CableSession {
     if (!this.isConnected) return { ok: false, kind: 'gone', message: 'the dial is not connected' }
     if (this.link?.transport !== 'usb') return { ok: false, kind: 'transport', message: 'Wi-Fi settings go to a dial over its USB cable only' }
     if (!this.netCapable) return { ok: false, kind: 'unsupported', message: 'this dial\'s firmware does not keep Wi-Fi settings' }
+    // The phone-mode forms need the dial's own word that its image has the link (hello.ble); the dial refuses them with `feature` otherwise.
+    if ((request.op === 'set_ble' || (request.op === 'mode' && request.mode === 2)) && !this.bleCapable) {
+      return { ok: false, kind: 'unsupported', message: 'this dial\'s firmware has no phone mode' }
+    }
     return this.netRequests.request(request)
   }
 
