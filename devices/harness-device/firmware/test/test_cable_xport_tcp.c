@@ -32,6 +32,7 @@ typedef struct { const void *ptr; size_t len; ssize_t got; } send_t;
 enum { CONN_NOW, CONN_PENDING_OK, CONN_PENDING_NEVER, CONN_REFUSED_AT_ONCE, CONN_PENDING_THEN_ERROR };
 static struct {
     int next_fd, open_fds, closed_fds, sockets_made;
+    int seq, shutdown_calls, shutdown_seq, shutdown_fd, close_seq, close_fd;   // order of shutdown() and close()
     int conn_mode;
     unsigned nonblock_calls, nodelay_calls, connect_calls;
     uint32_t connect_ip;
@@ -127,7 +128,8 @@ ssize_t sk_send(int fd, const void *buf, size_t len)
     fk.sends[fk.send_calls++] = (send_t){ buf, len, got };
     return got;
 }
-void sk_close(int fd) { (void)fd; fk.open_fds--; fk.closed_fds++; assert(fk.open_fds >= 0); }
+void sk_shutdown(int fd) { fk.shutdown_calls++; fk.shutdown_seq = ++fk.seq; fk.shutdown_fd = fd; }
+void sk_close(int fd) { fk.close_seq = ++fk.seq; fk.close_fd = fd; fk.open_fds--; fk.closed_fds++; assert(fk.open_fds >= 0); }
 bool sk_parse_ipv4(const char *s, uint32_t *ip_be)
 {
     unsigned a, b, c, d;
@@ -174,8 +176,10 @@ static void test_open(void)
     CHECK(sk_parse_ipv4("192.168.7.9", &want) && fk.connect_ip == want);
     x->close(x);
     CHECK(!x->is_up(x) && fk.open_fds == 0 && fk.closed_fds == 1);
+    // shutdown() goes first, on the same fd, so a reader blocked in select() in wait_readable wakes at once.
+    CHECK(fk.shutdown_calls == 1 && fk.shutdown_fd == fk.close_fd && fk.shutdown_seq < fk.close_seq);
     x->close(x);   // safe twice
-    CHECK(fk.closed_fds == 1);
+    CHECK(fk.closed_fds == 1 && fk.shutdown_calls == 1);   // nothing shut down twice
 
     // Connect under way, then writable: up, after one wait.
     fresh(CONN_PENDING_OK);

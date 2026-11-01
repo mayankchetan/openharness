@@ -253,6 +253,8 @@ static int tls_read(const cable_xport_t *x, uint8_t *buf, size_t cap, int wait_m
     const int64_t end = now_us() + (int64_t)wait_ms * 1000;
     const bool can_wait = t->inner->wait_readable != NULL;
     bool socket_next = false;   // mbedTLS holds nothing more: the next step is to wait on the socket
+    bool write_retry = false;   // the last read said WANT_WRITE: read again after a tick, with no wait on readability
+    bool pace = false;          // the last socket wait failed, or said readable and the read still found nothing: one tick before the next pass, or a persistent fault would spin
     for (;;) {
         if (!atomic_load(&t->up) || atomic_load(&t->closing)) return read_dead(end);
         int64_t left_ms = left_ms_up(end);   // rounded up: a last fraction of a millisecond is one more wait, not a spin of zero waits
@@ -260,10 +262,12 @@ static int tls_read(const cable_xport_t *x, uint8_t *buf, size_t cap, int wait_m
             int w = left_ms > TLS_WAIT_SLICE_MS ? TLS_WAIT_SLICE_MS : (int)left_ms;
             // No mutex here. > 0: readable, or the end of the stream, which the read below reports. < 0: the inner transport
             // failed; the read below finds the same error and ends the link under the mutex. 0: timeout, look at the state again.
-            if (t->inner->wait_readable(t->inner, w) == 0) {
+            const int ready = t->inner->wait_readable(t->inner, w);
+            if (ready == 0) {
                 if (now_us() >= end) return 0;
                 continue;
             }
+            pace = true;   // the wait did not time out: if the read below finds nothing, wait one tick before the next pass
             left_ms = left_ms_up(end);
         }
         if (xSemaphoreTake(t->lock, pdMS_TO_TICKS(left_ms)) == pdTRUE) {
@@ -272,7 +276,7 @@ static int tls_read(const cable_xport_t *x, uint8_t *buf, size_t cap, int wait_m
                 return read_dead(end);
             }
             int64_t slice = 0;   // with a wait op the socket is readable (or mbedTLS holds bytes): read, do not wait
-            if (can_wait && !socket_next && mbedtls_ssl_get_bytes_avail(&t->ssl) == 0 && mbedtls_ssl_check_pending(&t->ssl) == 0) {
+            if (can_wait && !socket_next && !write_retry && mbedtls_ssl_get_bytes_avail(&t->ssl) == 0 && mbedtls_ssl_check_pending(&t->ssl) == 0) {
                 xSemaphoreGive(t->lock);
                 socket_next = true;
                 continue;
@@ -282,6 +286,7 @@ static int tls_read(const cable_xport_t *x, uint8_t *buf, size_t cap, int wait_m
                 if (slice < 0) slice = 0;
                 if (slice > TLS_SLICE_MS) slice = TLS_SLICE_MS;
             }
+            write_retry = false;
             mbedtls_ssl_conf_read_timeout(&t->conf, (uint32_t)slice);
             int r = mbedtls_ssl_read(&t->ssl, buf, cap);
             if (r > 0) {
@@ -295,8 +300,19 @@ static int tls_read(const cable_xport_t *x, uint8_t *buf, size_t cap, int wait_m
                 xSemaphoreGive(t->lock);
                 return read_dead(end);
             }
-            socket_next = true;   // mbedTLS took all it could from what was there and needs more from the socket
             xSemaphoreGive(t->lock);
+            if (r == MBEDTLS_ERR_SSL_WANT_WRITE) {
+                // mbedTLS has to send before it can read on: waiting for the socket to become readable would not help (and with data there
+                // would return at once, every time). Give the send a tick and read again.
+                write_retry = true;
+                socket_next = false;
+                pace = false;
+                vTaskDelay(1);
+            } else {
+                socket_next = true;   // mbedTLS took all it could from what was there and needs more from the socket
+                if (pace) vTaskDelay(1);
+                pace = false;
+            }
         } else if (now_us() < end) {
             vTaskDelay(1);   // the mutex was busy and time remains: do not spin
         }

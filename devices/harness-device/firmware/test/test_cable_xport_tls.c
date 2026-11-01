@@ -91,6 +91,22 @@ int __wrap_mbedtls_ssl_write(mbedtls_ssl_context *ssl, const unsigned char *buf,
 }
 
 static atomic_int client_frees;   // mbedtls_ssl_free calls made by client-side threads
+// ssl_read spy: counts the reads a client thread makes, and can answer WANT_WRITE in place of the real call (what mbedTLS says when a read has to send first).
+static atomic_int client_ssl_reads;       // calls made by client-side threads
+static atomic_int inject_want_write;      // client reads still to answer with WANT_WRITE
+int __real_mbedtls_ssl_read(mbedtls_ssl_context *ssl, unsigned char *buf, size_t len);
+int __wrap_mbedtls_ssl_read(mbedtls_ssl_context *ssl, unsigned char *buf, size_t len)
+{
+    if (!t_is_server) {
+        atomic_fetch_add(&client_ssl_reads, 1);
+        if (atomic_load(&inject_want_write) > 0) {
+            atomic_fetch_sub(&inject_want_write, 1);
+            return MBEDTLS_ERR_SSL_WANT_WRITE;
+        }
+    }
+    return __real_mbedtls_ssl_read(ssl, buf, len);
+}
+
 void __real_mbedtls_ssl_free(mbedtls_ssl_context *ssl);
 void __wrap_mbedtls_ssl_free(mbedtls_ssl_context *ssl)
 {
@@ -194,6 +210,10 @@ typedef struct {
     atomic_int wait_calls;       // inner wait_readable() calls
     atomic_int wait_blocked;     // ... of which found nothing to read at the start (they would really sleep)
     atomic_bool wait_ignores_close;   // the wait does not end when the stream closes (a socket close that selects do not notice)
+    atomic_bool hold_wait;       // the next wait_readable() parks on `latch`, then reports readable (a select() that wakes on a socket closed under it)
+    atomic_bool latch;
+    atomic_int wait_entered;     // waits that reached the park
+    atomic_bool wait_fails;      // every wait_readable() returns -1 at once
 } end_t;
 
 static bool end_open(const cable_xport_t *x) { end_t *e = x->ctx; atomic_fetch_add(&e->open_calls, 1); atomic_store(&e->closed_by_wrapper, false); atomic_store(&e->up, true); return true; }
@@ -220,6 +240,12 @@ static int end_wait(const cable_xport_t *x, int wait_ms)
 {
     end_t *e = x->ctx;
     atomic_fetch_add(&e->wait_calls, 1);
+    if (atomic_load(&e->wait_fails)) return -1;
+    if (atomic_exchange(&e->hold_wait, false)) {   // park until the test says the close is done, then report readable whatever the queue holds
+        atomic_fetch_add(&e->wait_entered, 1);
+        for (int i = 0; i < 5000 && !atomic_load(&e->latch); i++) usleep(1000);
+        return 1;
+    }
     q_t *q = e->rx;
     bool ignore_close = atomic_load(&e->wait_ignores_close);
     pthread_mutex_lock(&q->m);
@@ -280,6 +306,10 @@ static void link_init(link_t *l, cable_xport_kind_t kind)
     atomic_init(&e->wait_calls, 0);
     atomic_init(&e->wait_blocked, 0);
     atomic_init(&e->wait_ignores_close, false);
+    atomic_init(&e->hold_wait, false);
+    atomic_init(&e->latch, false);
+    atomic_init(&e->wait_entered, 0);
+    atomic_init(&e->wait_fails, false);
     // wait_readable is present, as the TCP transport's is; a test that wants the older shape (no such op) sets it to NULL
     e->x = (cable_xport_t){ .name = "fake", .kind = kind, .open = end_open, .close = end_close, .read = end_read,
                             .write = end_write, .is_up = end_is_up, .ctx = e, .wait_readable = end_wait };
@@ -1035,7 +1065,7 @@ static void run_close_during_wait(bool wait_wakes_on_close)
     pthread_join(th, NULL);
     CHECK(close_ms < 100);        // the reader holds no mutex while it waits, so close gets in at once
     CHECK(a.rc < 0);              // dead, not a timeout
-    CHECK(a.ms < 1500 + 300);     // inside its own wait (a dead stream waits out the time it was given), plus slack
+    CHECK(a.ms >= 1400 && a.ms < 1600);   // a dead stream waits out the time it was given (1500 ms), not the extra of a wait slice
     CHECK(!t->is_up(t));
     server_join(&s);
     cable_xport_tls_free(t);
@@ -1048,6 +1078,109 @@ static void test_close_during_wait(void)
 {
     run_close_during_wait(true);
     run_close_during_wait(false);
+}
+
+// The wait ends while close() runs: the socket reported readable, and by the time the reader has the mutex the session is gone. The fake
+// parks the wait until close() has returned, then reports readable. The reader must see `!up || !ssl_ready` under the lock and give up:
+// no inner read, and no mbedtls_ssl_read on the context close() freed.
+static void test_close_between_wait_and_read(void)
+{
+    link_t *l = calloc(1, sizeof(*l));
+    link_init(l, CABLE_XPORT_WIFI);
+    server_t s;
+    server_start(&s, l, SRV_SINK);
+    server_run(&s);
+    const cable_xport_t *t = wrap(l, KEY_A);
+    CHECK(t->open(t));
+    atomic_store(&l->client.hold_wait, true);
+    rd_arg_t a = { .t = t, .wait_ms = 1500 };
+    pthread_t th;
+    CHECK(pthread_create(&th, NULL, timed_reader, &a) == 0);
+    for (int i = 0; i < 2000 && atomic_load(&l->client.wait_entered) == 0; i++) usleep(1000);
+    CHECK(atomic_load(&l->client.wait_entered) == 1);   // the reader is inside the wait, holding no mutex
+    t->close(t);                                        // completes: the session is freed, the inner transport closed
+    CHECK(atomic_load(&l->client.close_calls) == 1 && !t->is_up(t));
+    const int reads_at_close = atomic_load(&l->client.read_calls);
+    const int ssl_reads_at_close = atomic_load(&client_ssl_reads);
+    atomic_store(&l->client.latch, true);               // now the wait reports readable
+    pthread_join(th, NULL);
+    CHECK(a.rc == -1);                                          // dead, per the transport contract
+    CHECK(atomic_load(&l->client.read_calls) == reads_at_close);   // the inner transport saw no read after the close
+    CHECK(atomic_load(&client_ssl_reads) == ssl_reads_at_close);   // and mbedTLS no read on the freed context
+    CHECK(a.ms >= 1400 && a.ms < 1600);                         // a dead stream waits out the time it was given
+    server_join(&s);
+    cable_xport_tls_free(t);
+    free(l);
+    printf("ok close between the wait and the read: reader returned -1 after %lld ms, 0 inner reads and 0 ssl reads after the close\n", (long long)a.ms);
+}
+
+// An inner wait that fails on every call while the link is up must not make the reader spin: it ends by its deadline with 0 (the link
+// is not dead, nothing arrived), after a bounded number of passes.
+static void test_wait_error_does_not_spin(void)
+{
+    link_t *l = calloc(1, sizeof(*l));
+    link_init(l, CABLE_XPORT_WIFI);
+    server_t s;
+    server_start(&s, l, SRV_SINK);
+    server_run(&s);
+    const cable_xport_t *t = wrap(l, KEY_A);
+    CHECK(t->open(t));
+    usleep(50000);
+    atomic_store(&l->client.wait_fails, true);
+    const int waits0 = atomic_load(&l->client.wait_calls), reads0 = atomic_load(&l->client.read_calls);
+    uint8_t b[64];
+    int64_t t0 = ms_now();
+    int rc = t->read(t, b, sizeof(b), 300);
+    int64_t ms = ms_now() - t0;
+    const int waits = atomic_load(&l->client.wait_calls) - waits0, reads = atomic_load(&l->client.read_calls) - reads0;
+    CHECK(rc == 0);                       // the link is up and nothing arrived: a timeout, not a failure
+    CHECK(ms >= 290 && ms < 600);         // by its deadline
+    CHECK(waits >= 2 && waits <= 300);    // one pass per tick at most (host tick 1 ms); a spin would be tens of thousands
+    CHECK(reads <= 300);
+    CHECK(t->is_up(t));
+    atomic_store(&l->client.wait_fails, false);
+    t->close(t);
+    server_join(&s);
+    cable_xport_tls_free(t);
+    free(l);
+    printf("ok failing inner wait does not spin: read returned %d after %lld ms, %d waits, %d inner reads\n", rc, (long long)ms, waits, reads);
+}
+
+// WANT_WRITE from mbedtls_ssl_read (it has to send first): wait a tick and read again; waiting for the socket to become readable
+// would not help and, with data already there, would only spin.
+static int delay_count;
+static void count_delay(void) { __atomic_fetch_add(&delay_count, 1, __ATOMIC_RELAXED); }
+
+static void test_want_write_no_readability_wait(void)
+{
+    link_t *l = calloc(1, sizeof(*l));
+    link_init(l, CABLE_XPORT_WIFI);
+    server_t s;
+    server_start(&s, l, SRV_ECHO);
+    server_run(&s);
+    const cable_xport_t *t = wrap(l, KEY_A);
+    CHECK(t->open(t));
+    const int n = send_frame(t, 5);
+    CHECK(n > 0);
+    usleep(300000);   // the echo is in the queue: the socket is readable
+    const int waits0 = atomic_load(&l->client.wait_calls);
+    __atomic_store_n(&delay_count, 0, __ATOMIC_RELAXED);
+    host_tls_delay_hook = count_delay;
+    atomic_store(&inject_want_write, 3);
+    uint8_t out[CABLE_MAX_FRAME];
+    int r = t->read(t, out, sizeof(out), 2000);
+    host_tls_delay_hook = NULL;
+    const int waits = atomic_load(&l->client.wait_calls) - waits0;
+    const int delays = __atomic_load_n(&delay_count, __ATOMIC_RELAXED);
+    CHECK(atomic_load(&inject_want_write) == 0);   // all three were answered
+    CHECK(r > 0);
+    CHECK(waits == 1);     // the one wait before the first read; none after a WANT_WRITE
+    CHECK(delays >= 3);    // a tick each
+    t->close(t);
+    server_join(&s);
+    cable_xport_tls_free(t);
+    free(l);
+    printf("ok WANT_WRITE from the read: %d bytes, %d readability wait, %d tick delays\n", r, waits, delays);
 }
 
 // ── partial write and stalls ───────────────────────────────────────────────────────────────────────
@@ -1533,6 +1666,9 @@ int main(int argc, char **argv)
     test_data_ends_wait();
     test_buffered_bytes_without_wait();
     test_close_during_wait();
+    test_close_between_wait_and_read();
+    test_wait_error_does_not_spin();
+    test_want_write_no_readability_wait();
     test_write_stall_closes();
     test_busy_mutex_returns_zero();
     test_reads_continue_during_write_stall();

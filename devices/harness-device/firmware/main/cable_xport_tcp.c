@@ -60,6 +60,7 @@ static inline int sk_so_error(int fd)
 }
 static inline ssize_t sk_recv(int fd, void *buf, size_t len) { return recv(fd, buf, len, 0); }
 static inline ssize_t sk_send(int fd, const void *buf, size_t len) { return send(fd, buf, len, 0); }
+static inline void sk_shutdown(int fd) { shutdown(fd, SHUT_RDWR); }   // wakes a select() in another task at once; the result does not matter (ENOTCONN while a connect is under way)
 static inline void sk_close(int fd) { close(fd); }
 static inline bool sk_parse_ipv4(const char *dotted, uint32_t *ip_be)
 {
@@ -76,7 +77,7 @@ static const char *TAG = "tcp";
 #define CONNECT_MS 5000       // longest open() waits for the connection
 #define CONNECT_SLICE_MS 100  // it waits in slices, so a lost access point is noticed soon
 
-static int s_fd = -1;
+static atomic_int s_fd = -1;   // read without a lock by tcpx_wait_readable (the TLS reader waits without its mutex)
 static atomic_bool s_up;
 static bool s_connected_once;
 static int s_last_errno;
@@ -101,9 +102,9 @@ int  cable_xport_tcp_last_errno(void) { return s_last_errno; }
 static void drop(void)
 {
     atomic_store(&s_up, false);
-    if (s_fd >= 0) {
-        const int fd = s_fd;
-        s_fd = -1;
+    const int fd = atomic_exchange(&s_fd, -1);
+    if (fd >= 0) {
+        sk_shutdown(fd);   // first: a reader blocked in select() in tcpx_wait_readable wakes now, not when its slice ends
         sk_close(fd);
     }
 }
@@ -133,7 +134,7 @@ static bool tcpx_open(const cable_xport_t *x)
         ESP_LOGW(TAG, "socket failed: errno %d", s_last_errno);
         return false;
     }
-    s_fd = fd;
+    atomic_store(&s_fd, fd);
     if (sk_set_nonblock(fd) < 0) {
         fail(errno);
         return false;
@@ -207,14 +208,14 @@ static int tcpx_read(const cable_xport_t *x, uint8_t *buf, size_t cap, int wait_
 }
 
 // Waits for the socket to become readable and consumes nothing. The TLS wrapper calls it WITHOUT its mutex (so a 2 s reader wait is one
-// select, not 200 polls, and a writer never queues behind it), so it touches no state but a single read of s_fd. A socket closed under it
-// is not guaranteed to end the select at once; the caller bounds each wait. An error here is not recorded: the next read() sees it
+// select, not 200 polls, and a writer never queues behind it), so it touches no state but a single read of s_fd (into a local). drop() calls
+// shutdown() before close(), so a select() blocked here wakes at once; the caller still bounds each wait (a wake on a reused fd is harmless: the caller re-checks). An error here is not recorded: the next read() sees it
 // and ends the link under the lock.
 static int tcpx_wait_readable(const cable_xport_t *x, int wait_ms)
 {
     (void)x;
     if (wait_ms < 0) wait_ms = 0;
-    const int fd = s_fd;
+    const int fd = atomic_load(&s_fd);
     if (fd < 0) return -1;
     const int r = sk_wait(fd, false, wait_ms);
     if (r < 0) return errno == EINTR ? 0 : -1;

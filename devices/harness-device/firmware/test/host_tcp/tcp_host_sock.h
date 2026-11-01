@@ -17,6 +17,7 @@ int     sk_wait(int fd, bool for_write, int ms);           // 1 ready, 0 timeout
 int     sk_so_error(int fd);                               // the socket's pending error, 0 if none
 ssize_t sk_recv(int fd, void *buf, size_t len);            // bytes, 0 for an orderly close, -1 with errno
 ssize_t sk_send(int fd, const void *buf, size_t len);      // bytes taken (may be fewer than len), -1 with errno
+void    sk_shutdown(int fd);                               // SHUT_RDWR; wakes a select() on the fd in another task
 void    sk_close(int fd);
 bool    sk_parse_ipv4(const char *dotted, uint32_t *ip_be);
 void    sk_pause_ms(int ms);                               // wait out a time with nothing to do

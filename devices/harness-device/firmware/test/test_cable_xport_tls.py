@@ -49,7 +49,7 @@ with tempfile.TemporaryDirectory() as tmp:
     strict = ['-std=c11', '-D_GNU_SOURCE', '-Wall', '-Wextra', '-Werror', '-O1', '-g', '-pthread', *sanitize,
               f'-I{here / "host_tls"}', f'-I{main}', f'-I{mbed / "include"}', '-DMBEDTLS_CONFIG_FILE="mbedtls_host_config.h"', *(['-DHOST_PRODUCT_SUITES_ONLY'] if product_only else [])]
     exe = out / 'test_cable_xport_tls'
-    link = subprocess.run([cc, *strict, '-Wl,--wrap=mbedtls_ssl_write', '-Wl,--wrap=mbedtls_ssl_free', '-o', str(exe), str(here / 'test_cable_xport_tls.c'),
+    link = subprocess.run([cc, *strict, '-Wl,--wrap=mbedtls_ssl_write', '-Wl,--wrap=mbedtls_ssl_read', '-Wl,--wrap=mbedtls_ssl_free', '-o', str(exe), str(here / 'test_cable_xport_tls.c'),
                            str(main / 'cable_xport_tls.c'), str(main / 'cable_frame.c'), *objects, '-lm'],
                           capture_output=True, text=True)
     assert link.returncode == 0, f'build failed:\n{link.stderr[:4000]}'
