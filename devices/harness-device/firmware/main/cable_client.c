@@ -1953,6 +1953,8 @@ static void session_task(void *arg)
 
         if (now >= next_hello_us) {
             // No hello while the chip may sleep: nobody is there to read it, and building the JSON would wake the dial every 2 s.
+            // Over Wi-Fi the link hold (net_link.c serve(), until a session is up) clears "relaxed" at once, so a hello is never held back
+            // while a link waits for its session; with a session up the daemon's ping and the dial's pong keep both sides' silence timers fresh.
             if (!power_sleep_relaxed()) send_hello();
             next_hello_us = now + (int64_t)(s_session ? HELLO_SESSION_MS : HELLO_ALONE_MS) * 1000;
         }

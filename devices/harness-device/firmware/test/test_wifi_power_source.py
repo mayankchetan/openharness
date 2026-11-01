@@ -108,13 +108,25 @@ for rel in NET_FILES:
     assert 'esp_pm_' not in stripped(rel), f'{rel} names a power-management lock of its own'
 net = code('net_link.c')
 task = body(net, 'net_link_task')
-assert len(re.findall(r'power_sleep_hold\(PP_HOLD_LINK\)', net)) == 1 and len(re.findall(r'power_sleep_release\(PP_HOLD_LINK\)', net)) == 1, \
-    'one hold and one release in net_link.c'
-h, r = task.index('power_sleep_hold(PP_HOLD_LINK)'), task.index('power_sleep_release(PP_HOLD_LINK)')
-assert h < task.index('join_wifi()') < task.index('tls->open(tls)') < r, 'the hold covers the join and the handshake'
-assert not re.search(r'\b(continue|return|break|goto)\b', task[h:r]), 'no way out between the hold and the release'
-assert r < task.index('backoff(') and r < task.index('serve(tls)'), 'released before any backoff wait and before the serve loop'
-for name in ('serve', 'backoff', 'sleep_ms', 'join_wifi', 'note_open_failure'):
+serve_fn = body(net, 'serve')
+HOLD, REL = 'power_sleep_hold(PP_HOLD_LINK)', 'power_sleep_release(PP_HOLD_LINK)'
+assert len(re.findall(re.escape(HOLD), net)) == 2 and len(re.findall(re.escape(REL), net)) == 3, 'two holds and three releases in net_link.c: the task and serve()'
+assert task.count(HOLD) == 1 and task.count(REL) == 2 and serve_fn.count(HOLD) == 1 and serve_fn.count(REL) == 1
+h = task.index(HOLD)
+assert h < task.index('join_wifi()') < task.index('tls->open(tls)'), 'the hold covers the join and the handshake'
+r1 = task.index('if (!opened) ' + REL)
+assert task.index('tls->open(tls)') < r1 < task.index('backoff('), 'a failed join or handshake lets the hold go before any wait'
+assert not re.search(r'(continue|return|break|goto)', task[h:r1]), 'no way out between the hold and the release'
+# a link that came up keeps the hold into serve(); the task lets it go when serve() returns, before the relink backoff
+s_idx = task.index('serve(tls)')
+r2 = task.index(REL, s_idx)
+assert r1 < s_idx < r2 < task.rindex('backoff('), 'serve() runs with the hold; it is released right after, before the relink wait'
+assert task.index('post(NET_EV_LINK_UP)') < s_idx and not re.search(r'(continue|return|break|goto)', task[task.index('post(NET_EV_LINK_UP)'):r2]), 'no way out of the held window'
+# serve(): the hold lasts while there is no session (link up to session up); it follows cable_client_is_connected(), and nothing else of power
+assert 'cable_client_is_connected()' in serve_fn and re.search(r'bool held = true;', serve_fn), 'serve() starts with the hold the task passed in'
+assert serve_fn.index(HOLD) < serve_fn.index('nwifi_wait(') and serve_fn.index(REL) < serve_fn.index('nwifi_wait('), 'the hold follows the session once per tick, before the wait'
+assert not re.search(r'(return)', serve_fn[:serve_fn.index('nwifi_wait(')]), 'no way out of serve() between the hold and the wait'
+for name in ('backoff', 'sleep_ms', 'join_wifi', 'note_open_failure'):
     assert 'power_sleep_' not in body(net, name), f'{name} takes or releases no hold of its own'
 assert '#include "power_sleep.h"' in text('net_link.c')
 sleep_h = text('power_sleep.h')
@@ -155,4 +167,4 @@ assert 'msg_string(&root, "keepalive", "v1");' in hello, 'the hello says it read
 assert len(re.findall(r's_keepalive_ms', client)) == 4, 'definition, the silence check, the welcome, the end of the session'
 
 print('power hooks: net_power_profile (set_ps only, no NONE), listen_interval once in the association config, no PM lock of its own, '
-      'hold over connect + handshake only, keepaliveMs wiring and limits agree with the daemon')
+      'hold over connect + handshake and until the session is up, keepaliveMs wiring and limits agree with the daemon')

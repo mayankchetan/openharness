@@ -18,6 +18,7 @@
 #include "board/power.h"
 #include "board/sleep_pins.h"
 #include "cable_client.h"
+#include "cable_link.h"
 #include "driver/gpio.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_heap_caps.h"
@@ -194,11 +195,19 @@ static uint32_t holds_now(void)
 #ifndef DEVICE_NO_OTA
     if (fw_update_active()) holds |= PP_HOLD_FWUPDATE;
 #endif
-    if (cable_client_is_connected()) holds |= PP_HOLD_SESSION;
+    // A USB cable session holds the chip awake (a host whose SOF flickers). A Wi-Fi session does not: modem sleep keeps the association and the
+    // TLS socket lives in RAM, which light sleep keeps. The window from "link up" to "session up" is the link hold's (net_link.c serve()).
+    if (cable_client_is_connected() && cable_link_transport() == CABLE_XPORT_USB) holds |= PP_HOLD_SESSION;
     return holds;
 }
 
-void power_sleep_hold(uint32_t bits) { atomic_fetch_or(&s_link_holds, bits); }
+static void on_hold(void);
+
+void power_sleep_hold(uint32_t bits)
+{
+    const uint32_t before = atomic_fetch_or(&s_link_holds, bits);
+    if ((before & bits) != bits) on_hold();
+}
 void power_sleep_release(uint32_t bits) { atomic_fetch_and(&s_link_holds, ~bits); }
 
 void power_sleep_poll(void)
@@ -265,6 +274,17 @@ static void on_screen(bool on)
     }
 }
 
+// A new hold while the chip may sleep (S2 applied, the lock let go): take the lock back NOW, from the task that asked, and stop relaxing the
+// pollers. Without this the lock would come back at the next ptt poll, up to 250 ms later, and the first part of a join or a handshake could run
+// with light sleep allowed. The policy sees the hold at its next poll and moves to S1; if the hold has gone by then, the render task lets the
+// lock go again (power_sleep_render_service). Idempotent, like on_screen().
+static void on_hold(void)
+{
+    if (!atomic_load(&s_in_s2)) return;
+    lock_acquire_once();
+    atomic_store(&s_relaxed, false);
+}
+
 // ── the render task ─────────────────────────────────────────────────────────────────────────────────
 
 static void enter_battery(void)
@@ -289,6 +309,7 @@ static void leave_battery(void)
 // until a later pass succeeds. Without it, the PWR key (polled by the ptt task on its timer wake) is the only wake source.
 static bool s2_go_live(void)
 {
+    if (holds_now()) return false;               // work in flight (a voice turn, a link coming up): the lock stays; the policy moves to S1 at its next poll
 #if PP_TOUCH_WAKE_ON_BATTERY
     if (!touch_sleep_arm()) {                    // INT (GPIO11) becomes the LOW-level wake source
         if (!s_touch_warned) ESP_LOGW(TAG, "touch wake not armed (no pin lock or controller not ready): the awake lock is kept");
@@ -351,8 +372,10 @@ void power_sleep_render_service(void)
         have = PP_S2;
     } else if (have == PP_S2) {
         if (!s_audio_idle) s_audio_idle = audio_capture_idle(true);   // a beep was playing when S2 began: try again
-        if (!s_s2_live && want == PP_S2 && display_is_asleep()) {
-            s_s2_live = s2_go_live();                                 // the touch wake could not be armed: try again
+        if (want == PP_S2 && display_is_asleep() && (!s_s2_live || (atomic_load(&s_lock_held) && !holds_now()))) {
+            // Not live yet (the touch wake could not be armed, or a hold was on when S2 began), or a hold came and went between two ptt polls
+            // and left the lock taken (on_hold): go live again.
+            s_s2_live = s2_go_live();
 #if PP_TOUCH_WAKE_ON_BATTERY
         } else if (s_s2_live && !touch_sleep_armed()) {
             // The touch driver was deleted (read errors) and not yet reopened: no wake source. Keep the dial up until it is armed again.

@@ -187,17 +187,28 @@ static void log_stacks(const char *when)
 }
 
 // Hold the link: send queued log lines, watch the stream, the access point and the session. Returns why it ended.
+// POWER (S1 of the sleep + Wi-Fi work). The caller still holds PP_HOLD_LINK when serve() starts (the join and the handshake). A live session does not
+// hold the chip awake over Wi-Fi (power_sleep.c holds_now), but the window from "link up" to "session up" does: the dial's hello has to go out and the
+// welcome come back, and a dial that fell asleep in between would not speak and would drop the link as "no session" 30 s later. So the hold stays
+// while there is no session, is let go when one is up, and is taken again if the session ends while the link lasts. The caller releases it on return.
 static const char *serve(const cable_xport_t *tls)
 {
     int64_t stale_since_us = 0;
+    bool held = true;
     for (;;) {
+        const bool session = cable_client_is_connected();
+        if (session == held) {
+            if (session) power_sleep_release(PP_HOLD_LINK);
+            else power_sleep_hold(PP_HOLD_LINK);
+            held = !session;
+        }
         const uint32_t bits = nwifi_wait(NWIFI_DISCONNECTED, SERVE_MS);
         if (!tls->is_up(tls)) return "link closed";
         if (bits & NWIFI_DISCONNECTED) return "wifi lost";
         if (!(bits & NWIFI_GOT_IP)) return "ip lost";
         cable_link_drain_logs(DRAIN_LINES);
         const int64_t now_us = esp_timer_get_time();
-        if (cable_client_is_connected()) {
+        if (session) {
             stale_since_us = 0;
         } else if (!stale_since_us) {
             stale_since_us = now_us;
@@ -216,14 +227,15 @@ static void net_link_task(void *arg)
     net_backoff_reset(&ladder);
     for (;;) {
         ui_flush();
-        // POWER (W13). Idle, this task holds nothing: not in the backoff waits, not in the serve loop. Over the join and the handshake it holds
-        // PP_HOLD_LINK, the power policy's hold for a transport with traffic, so the chip does not light-sleep in the middle of a handshake.
-        // Released on the one line below on every path, before any wait. With battery sleep off these two calls are empty inline functions.
+        // POWER (W13, S1). Idle, this task holds nothing: not in the backoff waits. Over the join and the handshake it holds PP_HOLD_LINK, the power
+        // policy's hold for a transport with traffic, so the chip does not light-sleep in the middle of a handshake. A failed join or handshake lets it
+        // go before any wait; a link that came up keeps it into serve(), which holds it until the session is up. With battery sleep off these calls
+        // are empty inline functions.
         power_sleep_hold(PP_HOLD_LINK);
         const bool joined = (nwifi_bits() & NWIFI_GOT_IP) || join_wifi();
         const int64_t t0_us = esp_timer_get_time();
         const bool opened = joined && tls->open(tls);   // TCP connect, then the handshake, both on this task
-        power_sleep_release(PP_HOLD_LINK);
+        if (!opened) power_sleep_release(PP_HOLD_LINK);
         if (!joined) {
             backoff(&ladder, "wifi");
             continue;
@@ -242,6 +254,7 @@ static void net_link_task(void *arg)
         ram_telemetry_checkpoint("net_link_up");
         const int64_t up_us = esp_timer_get_time();
         const char *why = serve(tls);
+        power_sleep_release(PP_HOLD_LINK);   // the link is over: nothing is in flight while the backoff waits
         const uint32_t up_ms = (uint32_t)((esp_timer_get_time() - up_us) / 1000);
         tls->close(tls);
         post(NET_EV_LINK_DOWN);

@@ -16,7 +16,8 @@ Checked here (plan sections 3.1, 3.2, 3.5 and tasks T6, T7):
   * no retention RAM: frequency scaling only, the dial still works;
   * the screen waking in the middle of the S2 entry never leaves the chip free to sleep;
   * a dial that is not the CST9217 + AXP2101 board never leaves S0 and never reads the PMIC;
-  * a voice turn or a cable session holds the dial in S1; a USB host sends it to S0 at once;
+  * a voice turn or a USB cable session holds the dial in S1; a Wi-Fi session does not, but the link-up hold does and reaches the lock at once
+    (S1 of the sleep+Wi-Fi gap report); a USB host sends it to S0 at once;
   * the sleep statistics of the alive line (count and milliseconds) from the light sleep exit callback.
 A third build with DEVICE_BATTERY_POWEROFF=1 and a fake power_off_request() runs the S3 triggers through the real glue: 30 min in S2, a flat cell,
 the drain, each only from S2 and never on external power (VBUS good, a USB host, a plug-in on the way).
@@ -151,6 +152,7 @@ HARNESS = r'''
 #include "esp_pm.h"
 #include "driver/gpio.h"
 #include "board/board.h"
+#include "cable_link.h"
 #include <assert.h>
 
 char g_events[8192];
@@ -210,6 +212,8 @@ int battery_pct_raw(void) { return cache_pct; }
 bool audio_capture_idle(bool idle) { if (idle) { audio_idles++; if (audio_idle_ok) { audio_stopped = true; ev("AUDIO-"); } return audio_idle_ok; } audio_resumes++; audio_stopped = false; ev("AUDIO+"); return true; }
 bool audio_client_active(void) { return voice; }
 bool cable_client_is_connected(void) { return session; }
+static cable_xport_kind_t transport = CABLE_XPORT_USB;   // which wire the cable link runs over (S1: a Wi-Fi session does not hold the chip awake)
+cable_xport_kind_t cable_link_transport(void) { return transport; }
 bool fw_update_active(void) { return false; }
 bool display_is_asleep(void) { return asleep; }
 void display_set_sleep_cb(void (*cb)(bool)) { sleep_cb = cb; }
@@ -254,7 +258,7 @@ static void unplug(void)   { pmic_state = 2; cache_chg = 2; pmu0 = 0x08; }   // 
 static void reset_world(void) {
     memset(&the_lock, 0, sizeof the_lock); lock_creates = lock_acquires = lock_releases = 0;
     configure_calls = configure_battery = configure_usb = 0; pads_kept = 0; pmic_reads = 0;
-    cache_chg = -1; usb_host = asleep = voice = session = false; audio_stopped = false; audio_idle_ok = true; pmu0 = 0x08; g_logs[0] = 0;
+    cache_chg = -1; usb_host = asleep = voice = session = false; transport = CABLE_XPORT_USB; audio_stopped = false; audio_idle_ok = true; pmu0 = 0x08; g_logs[0] = 0;
     guard_stops = guard_starts = audio_idles = audio_resumes = touch_arms = touch_disarms = 0; pmic_state = 0; retention_result = ESP_OK;
     release_wakes_screen = false; release_plugs_usb = false; arm_fails = false; touch_armed = false; touch_pokes = 0;
     off_calls = off_first_reason = off_last_reason = 0; off_last_force = false; off_accept = true;
@@ -514,6 +518,53 @@ static void scenario_holds(void) {
     assert(power_sleep_relaxed());
 }
 
+static void scenario_wifi_holds(void) {
+    // ---------- S1 (T1): over Wi-Fi a live session does NOT hold the chip awake; work in flight and the link-up window do ----------
+    reset_world();
+    power_sleep_init();
+    unplug(); tick(4000);
+    transport = CABLE_XPORT_WIFI; session = true;
+    screen(false); tick(4000);
+    assert(power_sleep_relaxed() && the_lock.count == 0 && !strcmp(power_sleep_state_name(), "S2"));   // a Wi-Fi session alone: the chip may sleep
+    // B3: the hold reaches the awake lock at once, before the ptt task has polled, and the pollers are back to their awake rates
+    clear_events();
+    power_sleep_hold(PP_HOLD_LINK);
+    assert(the_lock.count == 1 && !power_sleep_relaxed() && g_events[0] == 'L');
+    assert(power_sleep_wait_ms(PP_POLLER_CABLE_SESSION, 250) == 250 && power_sleep_wait_ms(PP_POLLER_CABLE_READER, 100) == 100);
+    // the render task running before the ptt task has noticed does not let the chip go again (a hello is not held back while the hold is on)
+    power_sleep_render_service();
+    assert(the_lock.count == 1 && !power_sleep_relaxed());
+    tick(5000);                                        // the policy sees the hold: back to S1, and stays there
+    assert(the_lock.count == 1 && !power_sleep_relaxed() && !strcmp(power_sleep_state_name(), "S1"));
+    power_sleep_release(PP_HOLD_LINK);
+    tick(3500);                                        // the hold is gone and the screen is still dark: S2 again
+    assert(power_sleep_relaxed() && the_lock.count == 0);
+    // a hold that comes and goes between two ptt polls leaves the lock taken, and the render task lets it go again (no stuck-awake S2)
+    power_sleep_hold(PP_HOLD_LINK);
+    assert(the_lock.count == 1);
+    power_sleep_release(PP_HOLD_LINK);
+    power_sleep_render_service();
+    assert(the_lock.count == 0 && power_sleep_relaxed());
+    tick(500);
+    assert(the_lock.count == 0 && !strcmp(power_sleep_state_name(), "S2"));
+    // voice still holds over Wi-Fi, and so does a firmware update flag (fw_update_active is a fake that says no: voice is the case)
+    voice = true; tick(500);
+    assert(!power_sleep_relaxed() && the_lock.count == 1);
+    voice = false; tick(3500);
+    assert(power_sleep_relaxed() && the_lock.count == 0);
+    // USB transport keeps today's rule: a session holds S1
+    transport = CABLE_XPORT_USB; tick(500);
+    assert(!power_sleep_relaxed() && the_lock.count == 1);
+    transport = CABLE_XPORT_WIFI; tick(3500);
+    assert(power_sleep_relaxed() && the_lock.count == 0);
+    // a hold taken while the policy is in S1 changes nothing about the lock (it is held already)
+    screen(true); tick(300);
+    assert(the_lock.count == 1);
+    power_sleep_hold(PP_HOLD_LINK);
+    assert(the_lock.count == 1 && lock_acquires == lock_releases + 1);
+    power_sleep_release(PP_HOLD_LINK);
+}
+
 static void scenario_audio_retry(void) {
     // ---------- an audio stop that was refused (a beep) is retried ----------
     reset_world();
@@ -695,6 +746,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "boards")) scenario_other_boards();
     else if (!strcmp(argv[1], "host")) scenario_usb_host();
     else if (!strcmp(argv[1], "holds")) scenario_holds();
+    else if (!strcmp(argv[1], "wifi_holds")) scenario_wifi_holds();
     else if (!strcmp(argv[1], "audio")) scenario_audio_retry();
     else if (!strcmp(argv[1], "input")) scenario_input_gate();
     else if (!strcmp(argv[1], "stats")) scenario_stats();
@@ -734,7 +786,7 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
                         '-I', str(main), str(folder / 'harness.c'), str(folder / 'power_sleep.c'), str(folder / 'power_policy.c'),
                         '-o', str(folder / exe)], check=True)
     build('glue')
-    scenarios = ('boot', 'cycles', 'noret', 'race', 'policy', 'facts', 'boards', 'host', 'holds', 'audio', 'input', 'stats')
+    scenarios = ('boot', 'cycles', 'noret', 'race', 'policy', 'facts', 'boards', 'host', 'holds', 'wifi_holds', 'audio', 'input', 'stats')
     for name in scenarios:
         subprocess.run([str(folder / 'glue'), name], check=True)
     # the arming code D1 turns off still has to work for a later mode: build it in and run its two scenarios
@@ -746,5 +798,5 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
     for name in ('off_s2_timeout_0', 'off_s2_timeout_1', 'off_low_battery_0', 'off_low_battery_1', 'off_low_battery_2', 'off_drain_0', 'off_drain_1', 'off_never_on_external_power_0', 'off_never_on_external_power_1', 'off_never_on_external_power_2', 'off_never_on_external_power_3'):
         subprocess.run([str(folder / 'glue_off'), name], check=True)
     print('power sleep glue: ' + ', '.join(scenarios) + ' PASS (boot order, unplug, S2 entry and wake order without a touch wake, plug-in, 200 cycles balanced, '
-          'no retention RAM, PWR wake during entry, other boards, host, holds, audio retry, D1 input gate, sleep statistics); '
+          'no retention RAM, PWR wake during entry, other boards, host, holds, Wi-Fi session and link holds, audio retry, D1 input gate, sleep statistics); '
           'noarm, lost PASS with PP_TOUCH_WAKE_ON_BATTERY=1; the S3 triggers PASS with DEVICE_BATTERY_POWEROFF=1')
