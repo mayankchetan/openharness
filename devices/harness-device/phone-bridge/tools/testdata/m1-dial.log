@@ -1,0 +1,9 @@
+2026-11-01T17:59:00.000Z I (500) habitat: alive up=60s heap=270983/192512 psram=4478912
+2026-11-01T17:59:30.000Z I (30500) vox: VOX n=1 cap_frames=400 overruns=9 dropped=9 sent_bytes=128000 codec=pcm blocks=127 encode_us_max=305 send_ms=5 t_transcript_ms=1900 kind=draft int_free=176503 int_min=1000 hwm_capture=2604 hwm_send=2892
+2026-11-01T18:00:00.000Z I (1000) ble_link: advertising name=harness-dial-a1b2
+2026-11-01T18:00:03.100Z I (4100) ble_link: channel up psm=0x0080 mtu=2048
+2026-11-01T18:00:03.700Z I (4700) ble_link: link up #1 handshake_ms=512
+2026-11-01T18:00:03.900Z [daemon] dial B8:1F:3F:CA:E5:58 on fw 0.0.94 proto 3 hw cst9217+axp2101 caps recap,superTab,swarmCard
+2026-11-01T18:00:30.000Z I (31000) vox: VOX n=1 cap_frames=400 overruns=0 dropped=0 sent_bytes=128000 codec=adpcm blocks=127 encode_us_max=305 send_ms=5 t_transcript_ms=2352 kind=draft int_free=176503 int_min=139688 hwm_capture=2604 hwm_send=2892
+2026-11-01T18:00:31.000Z I (32000) vox: VOX DONE utterances=1 cum_rx_overruns=0 target=agent
+2026-11-01T18:01:00.000Z [daemon] link · tx 2941836 B in 33223 frames · rx 4192302 B in 36008 frames · corrupt 0 · discarded 0 B
