@@ -35,6 +35,8 @@ extern int host_nvs_count(void);
 extern int host_nvs_has(const char *key);
 extern size_t host_nvs_size(const char *key);
 extern const void *host_nvs_raw(const char *key);
+extern void host_nvs_bond_put(const char *key);
+extern int host_nvs_bond_count(void);
 
 #define SSID "home-net"
 #define PASS "correct horse battery"
@@ -313,6 +315,56 @@ static void test_clear_and_factory_reset(void)
     assert(!ble_loads(NULL) && config_load_wl_effective() == 0 && !host_nvs_has("bl_ver"));
 }
 
+// B4e (review L1): the NimBLE bond store is NVS too (namespace "nimble_bond"). Forgetting the network and the factory reset forget the phones as well, or a
+// dial handed on would still trust the old owner's phone.
+static void test_clear_and_factory_reset_erase_the_bond_store(void)
+{
+    // net.clear takes the phone settings and the bonds
+    fresh();
+    assert(config_net_set_ble(KEY) == CFG_NET_OK && config_net_set_mode(2) == CFG_NET_OK);
+    host_nvs_bond_put("peer_sec_1");
+    host_nvs_bond_put("our_sec_1");
+    host_nvs_bond_put("cccd_1");
+    assert(host_nvs_bond_count() == 3);
+    assert(config_net_clear() == CFG_NET_OK);
+    assert(host_nvs_bond_count() == 0 && !ble_loads(NULL) && config_load_wl_effective() == 0);
+    // bonds with no settings at all (a half-forgotten dial) are erased by a clear too
+    fresh();
+    host_nvs_bond_put("peer_sec_1");
+    assert(config_net_clear() == CFG_NET_OK && host_nvs_bond_count() == 0);
+    // and an unrelated key of our own namespace is not what the bond erase touches
+    fresh();
+    assert(config_net_set_ble(KEY) == CFG_NET_OK);
+    host_nvs_bond_put("peer_sec_1");
+    assert(config_net_clear() == CFG_NET_OK && host_nvs_bond_count() == 0 && host_nvs_count() == 0);
+    // factory reset
+    fresh();
+    assert(config_net_set_ble(KEY) == CFG_NET_OK && config_net_set_mode(2) == CFG_NET_OK);
+    host_nvs_bond_put("peer_sec_1");
+    host_nvs_bond_put("our_sec_1");
+    assert(config_clear_all());
+    assert(host_nvs_bond_count() == 0 && host_nvs_count() == 0 && config_load_wl_effective() == 0);
+    // a power cut anywhere: the settings are gone first (no target, USB), the bonds may remain, and then the clear SAYS it failed
+    fresh();
+    assert(config_net_set_ble(KEY) == CFG_NET_OK && config_net_set_mode(2) == CFG_NET_OK);
+    host_nvs_bond_put("peer_sec_1");
+    host_nvs_fail_after(-1);
+    const int before = host_nvs_mutations();
+    assert(config_net_clear() == CFG_NET_OK);
+    const int steps = host_nvs_mutations() - before;
+    for (int cut = 0; cut < steps; cut++) {
+        fresh();
+        assert(config_net_set_ble(KEY) == CFG_NET_OK && config_net_set_mode(2) == CFG_NET_OK);
+        host_nvs_bond_put("peer_sec_1");
+        host_nvs_fail_after(cut);
+        const config_net_err_t err = config_net_clear();
+        host_nvs_fail_after(-1);
+        assert(!(host_nvs_has("bl_ver") && !host_nvs_has("wl_key")));        // the marker never outlives the key
+        if (!host_nvs_has("bl_ver")) assert(config_load_wl_effective() == 0);   // marker gone: no target, USB
+        if (host_nvs_bond_count() > 0) assert(err == CFG_NET_E_STORAGE);       // a bond left behind is never reported as a clean clear
+    }
+}
+
 static void test_nothing_is_logged_but_words(void)
 {
     fresh();
@@ -338,6 +390,7 @@ int main(void)
     test_wl_effective_for_every_stored_byte();
     test_both_configurations_share_one_key();
     test_clear_and_factory_reset();
+    test_clear_and_factory_reset_erase_the_bond_store();
     test_nothing_is_logged_but_words();
     puts("ok test_ble_config");
     return 0;

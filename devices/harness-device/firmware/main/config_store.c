@@ -571,6 +571,28 @@ config_net_err_t config_net_set_ble(const uint8_t *key)
     return ok ? CFG_NET_OK : CFG_NET_E_STORAGE;
 }
 
+// The NimBLE host keeps its bonds in NVS namespace "nimble_bond" (ble_store_nvs.c, CONFIG_BT_NIMBLE_NVS_PERSIST). That store is not ours, but it is part of what
+// "forget this dial's network" and the factory reset must forget: a dial handed on would otherwise still trust the old owner's phone. Erasing the namespace does
+// not need the host running (it reads its RAM copy from here at the next boot; a dial that is switched to USB by a clear or a reset reboots anyway).
+// Through the store gate, like every write. A namespace that does not exist holds nothing to erase.
+#define NIMBLE_BOND_NS "nimble_bond"
+static bool ble_bonds_erase(void)
+{
+    nvs_handle_t h;
+    const esp_err_t probe = nvs_open(NIMBLE_BOND_NS, NVS_READONLY, &h);
+    if (probe == ESP_ERR_NVS_NOT_FOUND) return true;
+    if (probe == ESP_OK) nvs_close(h);
+    if (!store_gate_enter()) return false;
+    bool ok = nvs_open(NIMBLE_BOND_NS, NVS_READWRITE, &h) == ESP_OK;
+    if (ok) {
+        ok = nvs_erase_all(h) == ESP_OK && nvs_commit(h) == ESP_OK;
+        nvs_close(h);
+    }
+    store_gate_leave();
+    ESP_LOGW(TAG, "bond store erase: %s", ok ? "ok" : "FAILED");
+    return ok;
+}
+
 config_net_err_t config_net_clear(void)
 {
     nvs_handle_t h;
@@ -582,6 +604,7 @@ config_net_err_t config_net_clear(void)
         && erased(nvs_erase_key(h, K_STAY_WL))   // the override means nothing without a network, and must not outlive it
         && nvs_commit(h) == ESP_OK;
     close_rw(h);
+    ok = ok && ble_bonds_erase();   // last: the settings and their markers are gone first, so a cut here leaves no target (and says so)
     ESP_LOGW(TAG, "net clear: %s", ok ? "ok" : "FAILED");
     return ok ? CFG_NET_OK : CFG_NET_E_STORAGE;
 }
@@ -593,6 +616,7 @@ bool config_clear_all(void)
     nvs_erase_all(h);
     bool ok = nvs_commit(h) == ESP_OK;
     close_rw(h);
+    ok = ble_bonds_erase() && ok;   // the phones' bonds too (run both even if the first failed)
     ESP_LOGW(TAG, "clear_all: %s", ok ? "ok" : "FAILED");
     return ok;
 }
