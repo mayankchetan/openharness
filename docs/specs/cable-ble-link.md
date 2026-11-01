@@ -125,9 +125,9 @@ out of range).
 3. Queue full: stop reading the source, so the dial's ring takes the stall. Queues are `relay_queue_bytes` = 65536 bytes each
    way. A queue full for `relay_full_close_ms` = 4000 ms closes both sides (TLS cannot resync).
 4. WebSocket error: close the CoC channel only (keep the ACL link and the bond). Reopen the WebSocket on the back-off ladder
-   1000, 2000, 4000, 8000, 16000, 30000 ms, then stay at 30000 ms, with jitter. The jitter amount is not fixed yet; the
-   Android track chooses it and records it here (open). The dial sees a channel close, resets TLS, and reconnects when the
-   phone reopens the channel.
+   1000, 2000, 4000, 8000, 16000, 30000 ms, then stay at 30000 ms. Each delay is the step plus or minus
+   `ws_backoff_jitter_percent` = 20 percent, uniformly distributed (a 1000 ms step waits 800 to 1200 ms; the 30000 ms step
+   waits 24000 to 36000 ms). The dial sees a channel close, resets TLS, and reconnects when the phone reopens the channel.
 5. ACL link lost: the dial advertises again; the phone waits for presence.
 6. Permissions denied or Bluetooth off: show the state; do not loop.
 7. No secret in any log (Access token, URL query).
@@ -155,6 +155,7 @@ out of range).
 | `relay_full_close_ms` | 4000 | queue full, then close |
 | `ws_ping_ms` | 25000 | WebSocket ping |
 | `max_bonds` | 2 | bonded phones |
+| `ws_backoff_jitter_percent` | 20 | back-off jitter, plus or minus |
 
 ## 8. Voice over BLE
 

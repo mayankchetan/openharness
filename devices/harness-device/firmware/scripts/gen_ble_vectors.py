@@ -17,7 +17,7 @@ Format, tab-separated, `#` comments and blank lines ignored:
     status  <value-hex>  <state-name>                          the relay-status characteristic (phone writes, dial reads)
     hint    <written-bytes-hex|empty>  <ok:N|err:0xHH>         a write of the home-hint characteristic and its outcome
     const   <name>  <value>  <ms|bytes|count>                  numbers both sides must agree on
-    ladder  <comma-separated-ms>  ms                           the WebSocket reconnect back-off (jitter: see the spec)
+    ladder  <comma-separated-ms>  ms                           the WebSocket reconnect back-off (jitter: const ws_backoff_jitter_percent)
 
 This file is generated from the constants below, so a number cannot move on one side only. The checks are the Python
 test and the two consumers; nothing here is a measurement.
@@ -83,6 +83,7 @@ CONSTS = [
     ("relay_full_close_ms", 4000, "ms"),      # phone: a queue full this long closes both sides
     ("ws_ping_ms", 25000, "ms"),              # phone: WebSocket ping, keeps the tunnel idle timeout away
     ("max_bonds", 2, "count"),
+    ("ws_backoff_jitter_percent", 20, "count"),   # phone: each back-off delay is the ladder step +/- this many percent, uniformly (chosen 2026-11-01; the plan said "with jitter")
 ]
 
 BACKOFF_LADDER_MS = [1000, 2000, 4000, 8000, 16000, 30000]
