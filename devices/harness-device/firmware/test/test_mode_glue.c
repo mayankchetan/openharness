@@ -1180,6 +1180,7 @@ static void test_a_crash_loop_in_wifi_is_slowed_to_one_attempt_per_dwell(void)
     for (int i = 0; i < D.reboots && i < 64; i++) assert(D.reboot_uptime[i] >= MS_T_DWELL_MS);   // every USB stint lasted the dwell
 }
 
+#define SSID_FOR_TEST "home-net"
 // ── B8a: Bluetooth is a wireless target like Wi-Fi (the glue only; the link itself is B4b) ─────────────────────────
 // The sim forces the target (D.wl_force = 2) because config_store cannot store wl_mode 2 until B6. Every rule below is the Wi-Fi rule with the other number.
 
@@ -1278,6 +1279,36 @@ static void test_picking_usb_while_ble_runs_goes_to_usb(void)
     assert(!run(5 * 60 * 1000) && D.reboots == 1);         // and USB with no target never leaves
 }
 
+// B6: the same rules over the REAL accessors (config_net_set_ble, config_net_set_mode(2)), no forced target: the dial boots Bluetooth only with the
+// phone settings whole, and every loss of them is USB.
+static void test_a_phone_provisioned_dial_boots_ble_from_nvs(void)
+{
+    fresh();
+    assert(config_net_set_ble(KEY) == CFG_NET_OK);
+    assert(boot() == MS_MODE_USB && D.mg.wl_effective == MS_WL_UNSET);            // the key alone is no target
+    assert(config_net_set_mode(2) == CFG_NET_OK && config_load_wl_effective() == 2);
+    D.cable = D.daemon = false;
+    assert(boot() == MS_MODE_BLE && D.running == MS_MODE_BLE && D.mg.wl_effective == MS_WL_BLE);
+    assert(!run(5 * 60 * 1000) && D.reboots == 0);                                // the reload at the start of a BLE run keeps the target
+    // Wi-Fi settings and a Wi-Fi pick on top: Wi-Fi boots
+    assert(config_net_set(SSID_FOR_TEST, "correct horse battery", "192.168.1.20", 18480, KEY, 1) == CFG_NET_OK);
+    assert(boot() == MS_MODE_WIFI);
+    assert(config_net_set_mode(2) == CFG_NET_OK);
+    assert(boot() == MS_MODE_BLE);
+    // the user picks USB on the Link screen while Bluetooth runs: confirmed by a second read, then USB
+    assert(config_net_set_mode(0) == CFG_NET_OK);
+    D.reload = true;
+    assert(run(5000) && D.reboot_to[D.reboots - 1] == MS_MODE_USB);
+    // net.clear: nothing left, USB for good
+    assert(config_net_clear() == CFG_NET_OK);
+    assert(boot() == MS_MODE_USB && !run(5 * 60 * 1000));
+    // a lost marker (a cut during a change): no target, USB
+    fresh();
+    assert(config_net_set_ble(KEY) == CFG_NET_OK && config_net_set_mode(2) == CFG_NET_OK);
+    put_u8("bl_ver", 0);
+    assert(boot() == MS_MODE_USB);
+}
+
 static void test_third_crash_in_ble_takes_usb_once(void)
 {
     fresh();
@@ -1371,6 +1402,7 @@ int main(void)
     test_a_ble_dial_goes_to_usb_and_comes_back();
     test_a_ble_dial_whose_radio_does_not_start_runs_usb_and_is_bounded();
     test_picking_usb_while_ble_runs_goes_to_usb();
+    test_a_phone_provisioned_dial_boots_ble_from_nvs();
     test_third_crash_in_ble_takes_usb_once();
     test_wifi_and_ble_crashes_share_one_count();
     test_ten_minutes_up_in_ble_clears_the_crash_count();

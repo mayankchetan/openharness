@@ -222,6 +222,8 @@ void config_save_swipe_reversed(bool reversed)
 #define K_WL_MODE "wl_mode"
 #define K_WL_VER  "wl_ver"
 #define WL_VERSION 1
+#define K_BL_VER  "bl_ver"    // the commit marker of the phone settings (config_store.h, "Phone mode settings")
+#define BL_VERSION 1
 #define K_STAY_WL "stay_wl"   // the mode switch's override; net.clear takes it with the network (its accessors are at the end of the file)
 
 const char *config_net_err_name(config_net_err_t err)
@@ -387,15 +389,20 @@ void config_net_info(config_net_info_t *out)
         && nvs_get_u16(h, K_WL_PORT, &port) == ESP_OK
         && nvs_get_str(h, K_WL_PASS, NULL, &pass_len) == ESP_OK && (pass_len == 1 || (pass_len >= 9 && pass_len <= CFG_NET_PASS_MAX + 1))
         && nvs_get_blob(h, K_WL_KEY, NULL, &key_len) == ESP_OK && key_len == CFG_NET_KEY_LEN;
-    if (ok) nvs_get_u8(h, K_WL_MODE, &mode);
+    // The phone settings: the marker and the SIZE of the key (the key itself is not read here either).
+    uint8_t bl_version = 0;
+    size_t bl_key_len = 0;
+    const bool ble = nvs_get_u8(h, K_BL_VER, &bl_version) == ESP_OK && bl_version == BL_VERSION
+        && nvs_get_blob(h, K_WL_KEY, NULL, &bl_key_len) == ESP_OK && bl_key_len == CFG_NET_KEY_LEN;
+    if (ok || ble) nvs_get_u8(h, K_WL_MODE, &mode);   // absent reads as USB only
     nvs_close(h);
-    if (!ok || !text_ok(out->ssid, 1, CFG_NET_SSID_MAX) || host_port_check(out->host, port) != CFG_NET_OK) {
-        memset(out, 0, sizeof *out);
-        return;
-    }
-    out->saved = true;
-    out->port = port;
-    out->mode = mode == 1 ? 1 : 0;
+    const bool wifi = ok && text_ok(out->ssid, 1, CFG_NET_SSID_MAX) && host_port_check(out->host, port) == CFG_NET_OK;
+    if (!wifi) memset(out, 0, sizeof *out);
+    out->ble = ble;
+    out->saved = wifi;
+    if (wifi) out->port = port;
+    // Each mode counts only with its own whole settings: the Wi-Fi mode over phone settings alone, or the phone mode over Wi-Fi settings alone, is 0.
+    out->mode = (mode == 1 && wifi) ? 1 : (mode == 2 && ble) ? 2 : 0;
 }
 
 /** A key that is not there is not an error to erase. */
@@ -438,9 +445,24 @@ static bool marker_on(nvs_handle_t h)
     return false;
 }
 
+/** marker_off / marker_on for either or both configurations: wl_ver (Wi-Fi) and bl_ver (phone). With only the Wi-Fi marker they do what marker_off and marker_on do. */
+static bool markers_off(nvs_handle_t h, bool wl, bool bl)
+{
+    return (!wl || erased(nvs_erase_key(h, K_WL_VER))) && (!bl || erased(nvs_erase_key(h, K_BL_VER))) && nvs_commit(h) == ESP_OK;
+}
+
+static bool markers_on(nvs_handle_t h, bool wl, bool bl)
+{
+    const bool set = (!wl || nvs_set_u8(h, K_WL_VER, WL_VERSION) == ESP_OK) && (!bl || nvs_set_u8(h, K_BL_VER, BL_VERSION) == ESP_OK);
+    if (set && nvs_commit(h) == ESP_OK) return true;
+    // Take the markers back if the store allows, so that "refused" and "unprovisioned" mean the same thing.
+    if (erased(nvs_erase_key(h, K_WL_VER)) && erased(nvs_erase_key(h, K_BL_VER))) nvs_commit(h);
+    return false;
+}
+
 config_net_err_t config_net_check_host(const char *host, long port) { return host_port_check(host, port); }
 
-config_net_err_t config_net_check_mode(long mode) { return (mode == 0 || mode == 1) ? CFG_NET_OK : CFG_NET_E_MODE; }
+config_net_err_t config_net_check_mode(long mode) { return (mode == 0 || mode == 1 || mode == 2) ? CFG_NET_OK : CFG_NET_E_MODE; }
 
 config_net_err_t config_net_set(const char *ssid, const char *pass, const char *host, long port, const uint8_t *key, long mode)
 {
@@ -500,13 +522,52 @@ config_net_err_t config_net_set_host(const char *host, long port)
 
 config_net_err_t config_net_set_mode(long mode)
 {
-    if (mode != 0 && mode != 1) return CFG_NET_E_MODE;
-    if (!provisioned()) return CFG_NET_E_NOT_PROVISIONED;
+    if (config_net_check_mode(mode) != CFG_NET_OK) return CFG_NET_E_MODE;
+    config_net_info_t info;
+    config_net_info(&info);
+    // Each mode needs its own settings: 1 the Wi-Fi settings, 2 the phone settings, 0 (USB only) either. Mode 2 is never stored without bl_ver and a key.
+    const bool allowed = mode == 1 ? info.saved : mode == 2 ? info.ble : (info.saved || info.ble);
+    if (!allowed) return CFG_NET_E_NOT_PROVISIONED;
     nvs_handle_t h;
     if (open_rw(&h) != ESP_OK) return CFG_NET_E_STORAGE;
-    const bool ok = marker_off(h) && nvs_set_u8(h, K_WL_MODE, (uint8_t)mode) == ESP_OK && nvs_commit(h) == ESP_OK && marker_on(h);
+    // Every marker that is on comes off for the write and back at the end, so a cut leaves no half-changed configuration.
+    const bool ok = markers_off(h, info.saved, info.ble) && nvs_set_u8(h, K_WL_MODE, (uint8_t)mode) == ESP_OK && nvs_commit(h) == ESP_OK
+        && markers_on(h, info.saved, info.ble);
     close_rw(h);
     ESP_LOGI(TAG, "net mode %d: %s", (int)mode, ok ? "ok" : "FAILED");
+    return ok ? CFG_NET_OK : CFG_NET_E_STORAGE;
+}
+
+bool config_ble_load(config_ble_t *out)
+{
+    memset(out, 0, sizeof *out);
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return false;
+    uint8_t version = 0;
+    size_t key_len = sizeof out->key;
+    bool ok = nvs_get_u8(h, K_BL_VER, &version) == ESP_OK && version == BL_VERSION
+        && nvs_get_blob(h, K_WL_KEY, out->key, &key_len) == ESP_OK && key_len == sizeof out->key;
+    nvs_close(h);
+    ok = ok && config_net_check_key(out->key) == CFG_NET_OK;
+    if (!ok) scrub(out, sizeof *out);
+    return ok;
+}
+
+config_net_err_t config_net_set_ble(const uint8_t *key)
+{
+    const config_net_err_t err = config_net_check_key(key);
+    ESP_LOGI(TAG, "net set ble: -> %s", config_net_err_name(err));
+    if (err != CFG_NET_OK) return err;
+    // The Wi-Fi settings share this key: if they are whole, their marker comes off for the write too and back at the end.
+    config_net_info_t info;
+    config_net_info(&info);
+    nvs_handle_t h;
+    if (open_rw(&h) != ESP_OK) return CFG_NET_E_STORAGE;
+    const bool ok = markers_off(h, info.saved, true)
+        && nvs_set_blob(h, K_WL_KEY, key, CFG_NET_KEY_LEN) == ESP_OK
+        && nvs_commit(h) == ESP_OK
+        && markers_on(h, info.saved, true);
+    close_rw(h);
     return ok ? CFG_NET_OK : CFG_NET_E_STORAGE;
 }
 
@@ -515,7 +576,7 @@ config_net_err_t config_net_clear(void)
     nvs_handle_t h;
     if (open_rw(&h) != ESP_OK) return CFG_NET_E_STORAGE;
     // The marker first, for the same reason as in config_net_set.
-    bool ok = erased(nvs_erase_key(h, K_WL_VER)) && nvs_commit(h) == ESP_OK
+    bool ok = erased(nvs_erase_key(h, K_WL_VER)) && erased(nvs_erase_key(h, K_BL_VER)) && nvs_commit(h) == ESP_OK   // both markers, before any key
         && erased(nvs_erase_key(h, K_WL_SSID)) && erased(nvs_erase_key(h, K_WL_PASS)) && erased(nvs_erase_key(h, K_WL_HOST))
         && erased(nvs_erase_key(h, K_WL_PORT)) && erased(nvs_erase_key(h, K_WL_KEY)) && erased(nvs_erase_key(h, K_WL_MODE))
         && erased(nvs_erase_key(h, K_STAY_WL))   // the override means nothing without a network, and must not outlive it
@@ -570,6 +631,14 @@ bool config_save_boot_usb(bool on) { return flag_save(K_BOOT_USB, on); }
 uint8_t config_load_wl_effective(void)
 {
     config_net_info_t info;
-    config_net_info(&info);                       // saved = the marker and every key, valid; mode is 0 or 1 (anything else reads 0)
-    return info.saved && info.mode == 1 ? 1 : 0;
+    config_net_info(&info);                       // mode: 1 only over whole Wi-Fi settings, 2 only over whole phone settings, else 0
+    if (info.mode == 1) return 1;
+    if (info.mode == 2) {
+        // The phone's key is read here (and wiped) so that a marker over an all-zero key is not a target either.
+        config_ble_t b;
+        const bool ok = config_ble_load(&b);
+        scrub(&b, sizeof b);
+        return ok ? 2 : 0;
+    }
+    return 0;
 }

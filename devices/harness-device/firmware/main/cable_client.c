@@ -351,6 +351,10 @@ static void send_hello(void)
 #endif
     // This dial keeps Wi-Fi settings (handle_net) and takes them over the cable only: the daemon then lists "net" in its welcome.
     if (cable_link_transport() == CABLE_XPORT_USB) msg_string(&root, "net", "v1");
+#ifdef DEVICE_BLE_LINK
+    // An image with the BLE link can hold a phone-mode key (net.set without an SSID) and wl_mode 2; the daemon then lists "ble" in its welcome.
+    if (cable_link_transport() == CABLE_XPORT_USB) msg_string(&root, "ble", "v1");
+#endif
     // This dial reads `welcome.keepaliveMs` (cable_keepalive.h, W13). The daemon sends the field only to a dial that says so: an older firmware
     // would call a ping slower than 5 s a dead daemon.
     msg_string(&root, "keepalive", "v1");
@@ -1450,7 +1454,7 @@ static void handle_pet_map(const cJSON *p)
 // nothing. net.get only reads NVS, which the reader may do (config_load_voicelang does).
 typedef struct {
     long    id;
-    char    op;                        // 's'et, 'c'lear, 'm'ode, 'k'ey, 'h'ost
+    char    op;                        // 's'et, 'c'lear, 'm'ode, 'k'ey, 'h'ost, 'b' = the key-only set of the phone mode
     char    ssid[CFG_NET_SSID_MAX + 1];
     char    pass[CFG_NET_PASS_MAX + 1];
     char    host[CFG_NET_HOST_MAX + 1];
@@ -1513,6 +1517,9 @@ static void net_reply(long id, bool ok, const char *err, bool state)
             msg_number(&root, "port", info.port);
             msg_number(&root, "mode", info.mode);
         }
+        // The phone-mode settings are held (a marker and a key; the key itself never leaves). The mode is told for a phone-only dial too.
+        msg_bool(&root, "ble", info.ble);
+        if (!info.saved && info.ble) msg_number(&root, "mode", info.mode);
     }
     send_json(root);
 }
@@ -1529,6 +1536,7 @@ static void net_store_task(void *arg)
     case 'c': err = config_net_clear(); break;
     case 'm': err = config_net_set_mode(r->mode); break;
     case 'k': err = config_net_set_key(r->key); break;
+    case 'b': err = config_net_set_ble(r->key); break;
     default:  err = config_net_set_host(r->host, r->port); break;
     }
     // Tell the running mode switch to read wl_mode and stay_wl again, on success and on failure (a failed write can leave the marker off, and the
@@ -1543,6 +1551,12 @@ static void net_store_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/** The phone-mode forms (net.set without an SSID, net.mode 2) need an image that has the BLE link AND a daemon that listed "ble" in its welcome. */
+static bool ble_provisioning_allowed(void)
+{
+    return cable_ble_link_built() && cable_client_supports(CABLE_FEATURE_BLE);
+}
+
 static void handle_net(const char *t, const cJSON *p)
 {
     const long id = net_whole(p, "id");
@@ -1552,6 +1566,7 @@ static void handle_net(const char *t, const cJSON *p)
     char *pass = (char *)net_text(p, "pass"), *key_text = (char *)net_text(p, "key");
     uint8_t key[CFG_NET_KEY_LEN] = {0};
     char kind = 0;
+    bool feature_refused = false;
     config_net_err_t err = CFG_NET_OK;
     const char *refusal = NULL;
     // The cable is the authorisation. Over any other link the dial answers nothing it was asked, and says why.
@@ -1567,14 +1582,22 @@ static void handle_net(const char *t, const cJSON *p)
     const char *ssid = net_text(p, "ssid"), *host = net_text(p, "host");
     const long port = net_whole(p, "port"), mode = net_whole(p, "mode");
     if (!strcmp(op, "set")) {
-        kind = 's';
         const bool key_ok = config_net_key_decode(key_text, key);
-        err = config_net_check(ssid, pass, host, port, key_ok ? key : NULL, mode);
+        if (!ssid && !pass && !host && port < 0 && mode < 0) {
+            // The key-only form (B6): the phone needs the key and nothing else.
+            kind = 'b';
+            feature_refused = !ble_provisioning_allowed();
+            err = key_ok ? config_net_check_key(key) : CFG_NET_E_KEY;
+        } else {
+            kind = 's';
+            err = config_net_check(ssid, pass, host, port, key_ok ? key : NULL, mode);
+        }
     } else if (!strcmp(op, "clear")) {
         kind = 'c';
     } else if (!strcmp(op, "mode")) {
         kind = 'm';
         err = config_net_check_mode(mode);
+        feature_refused = err == CFG_NET_OK && mode == 2 && !ble_provisioning_allowed();
     } else if (!strcmp(op, "key")) {
         kind = 'k';
         err = config_net_key_decode(key_text, key) ? config_net_check_key(key) : CFG_NET_E_KEY;
@@ -1584,7 +1607,7 @@ static void handle_net(const char *t, const cJSON *p)
     } else {
         s_unknown++;
     }
-    refusal = !kind ? "op" : err != CFG_NET_OK ? config_net_err_name(err) : NULL;
+    refusal = !kind ? "op" : feature_refused ? "feature" : err != CFG_NET_OK ? config_net_err_name(err) : NULL;
     // One request at a time: a second write is turned away, and changes nothing.
     if (!refusal && atomic_exchange(&s_net_busy, true)) refusal = "busy";
     if (!refusal) {

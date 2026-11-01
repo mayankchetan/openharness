@@ -48,6 +48,13 @@ int main(void)
     check("{\"features\":[\"net\"]}", CABLE_FEATURE_NET);
     check("{\"features\":[\"Net\",\"net.set\",\"network\"]}", 0);
     check("{\"features\":[\"voice.adpcm\",\"net\",\"debug\"]}", CABLE_FEATURE_ADPCM | CABLE_FEATURE_NET | CABLE_FEATURE_DEBUG);
+    // Phone mode (B6): bit 10, named "ble". Wire-visible to the daemon, so its value is pinned here too.
+    assert(CABLE_FEATURE_BLE == (1u << 10));
+    check("{\"features\":[\"ble\"]}", CABLE_FEATURE_BLE);
+    check("{\"features\":[\"net\",\"ble\"]}", CABLE_FEATURE_NET | CABLE_FEATURE_BLE);
+    check("{\"features\":[\"Ble\",\"ble.set\",\"bluetooth\"]}", 0);
+    // this host test is built without DEVICE_BLE_LINK: the image has no BLE link, and says so
+    assert(!cable_ble_link_built());
     static const char *names[] = {"form", "selection", "visit", "voice.draft", "question.review", "agents.refresh"};
     for (unsigned mask=0; mask<64; mask++) {
         cJSON *root=cJSON_CreateObject(), *array=cJSON_AddArrayToObject(root,"features");

@@ -125,6 +125,10 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/host_stubs" -I "$here/host_nvs" -I "$here/../main" \
    -o "$out/test_net_config" "$here/test_net_config.c" "$here/host_nvs/host_nvs.c" "$here/../main/config_store.c"
 "$out/test_net_config"
+# B6: the phone-mode settings (key-only form, bl_ver marker, wl_mode 2)
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/host_stubs" -I "$here/host_nvs" -I "$here/../main" \
+   -o "$out/test_ble_config" "$here/test_ble_config.c" "$here/host_nvs/host_nvs.c" "$here/../main/config_store.c"
+"$out/test_ble_config"
 
 cc -std=c11 -Wall -Wextra -Werror -O1 \
    -o "$out/test_cable_machines" "$here/test_cable_machines.c" "$here/../main/cable_machines.c"
