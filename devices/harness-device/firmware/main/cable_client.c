@@ -9,6 +9,7 @@
 #include "cJSON.h"
 #include "cable_link.h"
 #include "cable_json_guard.h"
+#include "cable_keepalive.h"
 #ifdef HARNESS_DEBUG_COMMANDS
 #include "cable_debug.h"
 #endif
@@ -54,7 +55,10 @@ static const char *TAG = "cable_client";
 // dial would hold stale tiles forever, connected to a daemon that has never sent it a `welcome`.
 #define HELLO_ALONE_MS   2000    // no session: introduce myself often, the daemon cannot see me until I speak
 #define HELLO_SESSION_MS 15000   // session up: a keepalive, and a re-introduction if the daemon restarted
-#define SILENCE_MS       15000   // nothing of any kind for this long → the daemon is gone
+// How long "nothing of any kind" must last before the daemon is gone: 3 x the daemon's ping, 15 s as the daemon has always pinged every 5 s.
+// A `welcome.keepaliveMs` (cable_keepalive.h, task W13) moves the ping, and this window with it; the session forgets it when it ends.
+// Not tied to HELLO_SESSION_MS: the greeting cadence is what it was.
+static atomic_uint s_keepalive_ms = KEEPALIVE_DEFAULT_MS;
 
 typedef struct {
     char id[ID_MAX];
@@ -346,6 +350,9 @@ static void send_hello(void)
 #endif
     // This dial keeps Wi-Fi settings (handle_net) and takes them over the cable only: the daemon then lists "net" in its welcome.
     if (cable_link_transport() == CABLE_XPORT_USB) msg_string(&root, "net", "v1");
+    // This dial reads `welcome.keepaliveMs` (cable_keepalive.h, W13). The daemon sends the field only to a dial that says so: an older firmware
+    // would call a ping slower than 5 s a dead daemon.
+    msg_string(&root, "keepalive", "v1");
     // The Swarms (handle_supertab) and their Super Tab waits (handle_question). Without the second the daemon holds
     // a wait back from this dial, which once had to: a wait is never an answer screen here.
     msg_string(&root, "swarmCard", "v1");
@@ -1094,6 +1101,13 @@ static void gallery_session_up(void)
 static void session_up(const cJSON *p)
 {
     atomic_store(&s_features, cable_features_parse(p));
+    // The ping this daemon runs at (task W13), or today's 5 s when the welcome has no number: the silence window is 3 x it. Read on every welcome,
+    // so a daemon that restarts without the setting takes the window back to 15 s at its next greeting (cable_keepalive.h).
+    {
+        const cJSON *ka = p ? cJSON_GetObjectItemCaseSensitive(p, "keepaliveMs") : NULL;
+        const uint32_t ka_ms = keepalive_effective_ms(cJSON_IsNumber(ka) ? ka->valuedouble : (double)NAN);
+        if (atomic_exchange(&s_keepalive_ms, ka_ms) != ka_ms) ESP_LOGI(TAG, "keepalive %u ms, silence window %u ms", (unsigned)ka_ms, (unsigned)keepalive_dial_silence_ms(ka_ms));
+    }
     const char *app = str_of(p, "app");
     const cJSON *machine = p ? cJSON_GetObjectItemCaseSensitive(p, "machine") : NULL;
     const char *name = str_of(machine, "name");
@@ -1142,6 +1156,7 @@ static void session_down(const char *why)
 #endif
     s_session = false;
     atomic_store(&s_features, 0);
+    atomic_store(&s_keepalive_ms, KEEPALIVE_DEFAULT_MS);   // the next daemon starts from today's 5 s ping, 15 s window (W13)
 
     // FORGET THE AGENTS. They belonged to a daemon that is no longer there, and a tile is not a memory —
     // it is a claim that something is running on the other end of this cable right now. Keeping the list
@@ -1910,7 +1925,7 @@ static void session_tick(void *ctx)
         }
     }
 #endif
-    if (s_session && esp_timer_get_time() - s_last_rx_us > (int64_t)SILENCE_MS * 1000) {
+    if (s_session && esp_timer_get_time() - s_last_rx_us > (int64_t)keepalive_dial_silence_ms(atomic_load(&s_keepalive_ms)) * 1000) {
         session_down("silence");
     }
     // A radio link can be gone while the daemon is merely quiet (the access point left, the TCP stream closed). USB has no such sign that

@@ -1,0 +1,25 @@
+# Keepalive timing table for the harness cable link (task W13, docs/specs/cable-wifi-link.md "Keepalive").
+# Hand-written from the rule, read by BOTH halves: the dial's host test (test_cable_keepalive.c) and the daemon's spec
+# (cli/src/cable/keepalive.spec.ts). One file, no copy: a number that moves, moves for both.
+#
+# The rule. welcome.keepaliveMs absent, or not a number: 5000 (today's ping). Otherwise the value, rounded to a whole millisecond and
+# clamped to 5000..60000. The daemon pings every K ms. The dial calls 3 x K of silence a dead daemon. The daemon calls 3 x K + 5000 of
+# silence a dead dial (today: 15 s and 20 s), so the daemon's window is always the later one.
+#
+#   case <name> <raw> <K> <dial-silence-ms> <daemon-silence-ms>
+#
+# <raw> is the JSON number the welcome carried, "absent" (no field), or "nan" (a field that is not a finite number).
+case absent        absent   5000   15000   20000
+case not_a_number  nan      5000   15000   20000
+case zero          0        5000   15000   20000
+case negative      -5       5000   15000   20000
+case below_min     1000     5000   15000   20000
+case at_min        5000     5000   15000   20000
+case ten_s         10000    10000  30000   35000
+case odd           12345    12345  37035   42035
+case twenty_s      20000    20000  60000   65000
+case fraction      7500.4   7500   22500   27500
+case at_max        60000    60000  180000  185000
+case above_max     90000    60000  180000  185000
+case huge          1e12     60000  180000  185000
+case minus_huge    -1e12    5000   15000   20000

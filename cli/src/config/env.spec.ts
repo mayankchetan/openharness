@@ -53,6 +53,12 @@ describe('the environment, as env.ts reads it', () => {
     expect(load({ CABLE_DEBUG_API: '1' }, ['CABLE_DEBUG_API']).env).toEqual({ CABLE_DEBUG_API: false })
   })
 
+  it('leaves the dial keepalive off (0) unless CABLE_KEEPALIVE_MS is set', () => {
+    const read = ['CABLE_KEEPALIVE_MS']
+    expect(load({}, read).env).toEqual({ CABLE_KEEPALIVE_MS: 0 })
+    expect(load({ CABLE_KEEPALIVE_MS: '15000' }, read).env).toEqual({ CABLE_KEEPALIVE_MS: 15000 })
+  })
+
   it('leaves the dial\'s voice on the account unless CABLE_STT_URL is set, with whisper-1 and no key as its defaults', () => {
     const read = ['CABLE_STT_URL', 'CABLE_STT_MODEL', 'CABLE_STT_API_KEY']
     const plain = load({}, read)

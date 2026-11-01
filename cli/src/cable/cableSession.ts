@@ -28,6 +28,7 @@ import { DialDebug, type DebugTouch, type DoneResult, type ShotResult } from './
 import { DialNet, type NetRequest, type NetResult } from './dialNet.js'
 import { DialLog } from './dialLog.js'
 import { FirmwareTransfer, otaKeyFor } from './fwPush.js'
+import { DEFAULT_DAEMON_SILENCE_MS, DEFAULT_PING_MS, configuredKeepaliveMs, daemonSilenceMs } from './keepalive.js'
 import { PACK_VERSION } from './pets/pack.js'
 import { planPetSync } from './pets/sync.js'
 import type { PetStore } from './pets/store.js'
@@ -43,10 +44,11 @@ import { notificationReadToken, type UnreadNotification } from '../lib/notificat
 /** Bumped when the VOCABULARY changes. Separate from the frame version, which is the envelope. */
 export const CABLE_PROTO_VERSION = 4   // 3: + question.close (a question answered on another client); 4: + ADPCM voice (frame type 0x07, voice.begin.codec)
 
-const PING_EVERY_MS = 5_000
+/** 5 s. With `welcome.keepaliveMs` (keepalive.ts) the link pings every K instead; these two are the numbers without it. */
+const PING_EVERY_MS = DEFAULT_PING_MS
 /** No bytes of any kind for this long → the handle is dead. Longer than the dial's own 15 s window, so a
- *  single late message cannot trip both sides at once and have each conclude the other left. */
-const SILENCE_MS = 20_000
+ *  single late message cannot trip both sides at once and have each conclude the other left. (20 s; 3 x K + 5 s with keepaliveMs.) */
+const SILENCE_MS = DEFAULT_DAEMON_SILENCE_MS
 /** How often a connected port's traffic counters go to the dial's log. */
 const LINK_LOG_MS = 60_000
 /** Non-frame text kept per logging interval, and the shortest printable run worth keeping. */
@@ -354,6 +356,12 @@ export interface CableHost {
   activeSwarmProject?(): { superTabId: string; projectId: string; fromDevice: boolean } | null
   appName(): string
   voiceLang(): string
+  /**
+   * Optional (task W13): the ping interval to offer, in ms, as `welcome.keepaliveMs`. Undefined, 0 or a negative number means off, and the
+   * welcome then carries no field, which is today's link exactly. Sent only to a dial whose hello said `keepalive: 'v1'`; clamped to
+   * 5 s .. 60 s (keepalive.ts). Nothing sets it by default: it is for the battery plan.
+   */
+  keepaliveMs?(): number | undefined
   /** The window's latest selected pane, including selections made before this dial attached. */
   appFocus?(): { machineId: string; agentId: string } | undefined
   /** The active tab's agents, in tile order — and nothing else. Empty with no window or an empty tab. */
@@ -716,6 +724,8 @@ export class CableSession {
     this.swarmMembers = this.longRecap = this.stepsActivity = this.statsTurn = this.playerCapable = this.superTabWaits = false
     this.swarmCard = false
     this.adpcmVoice = this.adpcmUnofferedLogged = false
+    this.keepaliveCapable = false
+    this.keepaliveMs = null
     this.dropCards()
     this.seqOn = false
     this.seq = 0
@@ -862,6 +872,10 @@ export class CableSession {
   private readonly debug = new DialDebug({ send: (msg) => this.send(msg), log: (line) => this.log(line) })
   /** The Wi-Fi settings, one request at a time (dialNet.ts). Nothing that goes through it is ever logged but its op and outcome. */
   private readonly netRequests = new DialNet({ send: (msg) => this.send(msg), log: (line) => this.log(line) })
+  /** `hello.keepalive === 'v1'`: the dial reads `welcome.keepaliveMs`. Per link. An older firmware would call a slower ping a dead daemon, so it is never offered one. */
+  private keepaliveCapable = false
+  /** The K this link was told (`welcome.keepaliveMs`), or null: today's 5 s ping and 20 s silence window. Per link; set when the welcome is sent. */
+  private keepaliveMs: number | null = null
   /** `hello.net === 'v1'`: the dial keeps Wi-Fi settings and speaks net.*. Per link; the welcome then lists "net" (on the cable only). */
   private netCapable = false
   /** The host has been told, on this link, that the dial keeps Wi-Fi settings. */
@@ -952,7 +966,7 @@ export class CableSession {
       return
     }
     // Rule 2. The read never fails on a dead handle, so silence is the only symptom there is.
-    if (Date.now() - this.lastRx > SILENCE_MS) {
+    if (Date.now() - this.lastRx > (this.keepaliveMs === null ? SILENCE_MS : daemonSilenceMs(this.keepaliveMs))) {
       // Silent since the moment it opened and never a dial: a board with nothing to say to us. Reopening
       // it every few seconds for ever is how a second ESP32 on the desk gets its serial port stolen
       // mid-flash, so say so instead of retrying.
@@ -966,7 +980,7 @@ export class CableSession {
     }
     // The cadence is the contract: the dial reads a gap as absence, and the tick that watches for that
     // gap runs far more often than the ping that prevents it.
-    if (Date.now() - this.lastPing >= PING_EVERY_MS) {
+    if (Date.now() - this.lastPing >= (this.keepaliveMs ?? PING_EVERY_MS)) {
       this.lastPing = Date.now()
       await this.send({ t: 'ping' })
     }
@@ -1319,6 +1333,10 @@ export class CableSession {
         this.swarmCard = str('swarmCard') === 'v1'
         this.adpcmVoice = str('voiceCodec') === 'adpcm-v1'
         this.netCapable = str('net') === 'v1'
+        this.keepaliveCapable = str('keepalive') === 'v1'
+        // Decided here, applied from this welcome on: the same K the welcome carries sets the ping and the quiet-dial window below, and the
+        // dial sets its own window from the field. A dial that did not ask, or a host with no setting, keeps today's 5 s / 20 s.
+        this.keepaliveMs = (this.keepaliveCapable ? configuredKeepaliveMs(this.host.keepaliveMs?.()) : undefined) ?? null
         this.wantCards(this.swarmCard)
         this.seqOn = str('board') === 'pro'
         this.seq = 0
@@ -1335,6 +1353,9 @@ export class CableSession {
           // matters after a dial reboot that lands mid-session on a remote selection.
           selected: this.host.selectedMachine(),
           voiceLang: this.host.voiceLang(),
+          // The ping this link runs at, only when this host sets one and the dial said it reads it (hello.keepalive). Absent = 5 s ping,
+          // the dial's 15 s window, this side's 20 s: the fixed numbers above. The dial waits 3 x this, this side 3 x this + 5 s.
+          ...(this.keepaliveMs !== null ? { keepaliveMs: this.keepaliveMs } : {}),
           // Optional controls must be advertised: a new dial can remain useful
           // with an older daemon instead of waiting on commands it ignores.
           features: [

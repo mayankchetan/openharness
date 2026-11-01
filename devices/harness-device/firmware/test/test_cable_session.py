@@ -33,7 +33,8 @@ code = r'''
 #define READ_CHUNK 256
 #define READ_WAIT_MS 100
 #define FRAME_IDLE_US INT64_C(15000000)
-#define SILENCE_MS 15000
+#include "cable_keepalive.h"   /* the dial's silence window is 3 x the daemon's ping (W13): 15 s by default, as it always was */
+static atomic_uint s_keepalive_ms = KEEPALIVE_DEFAULT_MS;
 #define READER_STACK 6144
 #define READER_STACK_RADIO 8192
 #define CABLE_HEADER_BYTES 6
@@ -208,6 +209,20 @@ int main(void) {
         host_up = false; session_tick(NULL); assert(down_count == 1 && !s_session);
         s_session = true; s_xport = &fake_xport; session_tick(NULL); assert(down_count == 1 && s_session);
         host_up = true; owner = 0;
+    }
+    // W13: a welcome.keepaliveMs of 10 s makes the dial's window 30 s. 15 s of silence is then not a dead daemon; 30 s is. The default (15 s) is the case above and in the reconnect run.
+    {
+        assert(atomic_load(&s_keepalive_ms) == 5000u);
+        owner = 1; s_session = true; down_count = 0; s_xport = &fake_xport; host_up = true;
+        atomic_store(&s_keepalive_ms, 10000u);
+        s_last_rx_us = now; now += INT64_C(15000001);
+        session_tick(NULL); assert(down_count == 0 && s_session);
+        now += INT64_C(15000000);
+        session_tick(NULL); assert(down_count == 1 && !s_session);
+        atomic_store(&s_keepalive_ms, KEEPALIVE_DEFAULT_MS);
+        s_session = true; s_last_rx_us = now; now += INT64_C(15000001);
+        session_tick(NULL); assert(down_count == 2 && !s_session);   /* back to the 15 s window */
+        owner = 0;
     }
     puts("USB session: seven startup failures/retries, idempotence, early welcome, idle/error reads, timeout/reconnect and 64-bit wrap PASS");
 }

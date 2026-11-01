@@ -86,6 +86,18 @@ static bool fail(const char *what, esp_err_t e, bool driver_inited)
     return false;
 }
 
+// HOOK 1 (wifi_sta.h). The two profiles are separate names on purpose: the battery plan changes NET_PS_IDLE and nothing else. Default IDLE = ACTIVE.
+#define NET_PS_ACTIVE WIFI_PS_MIN_MODEM
+#define NET_PS_IDLE WIFI_PS_MIN_MODEM
+
+bool net_power_profile(net_power_t profile)
+{
+    if (profile != NET_POWER_ACTIVE && profile != NET_POWER_IDLE) return false;
+    const esp_err_t e = esp_wifi_set_ps(profile == NET_POWER_IDLE ? NET_PS_IDLE : NET_PS_ACTIVE);
+    if (e != ESP_OK) ESP_LOGW(TAG, "set_ps profile=%d: %s", (int)profile, esp_err_to_name(e));
+    return e == ESP_OK;
+}
+
 bool nwifi_start(const char *ssid, const char *pass, nwifi_event_cb on_event_cb)
 {
     if (!ssid || !*ssid || !pass) return false;
@@ -140,8 +152,8 @@ bool nwifi_start(const char *ssid, const char *pass, nwifi_event_cb on_event_cb)
 
     e = esp_wifi_start();   // first esp_phy_enable of the boot: may read and write the "phy" namespace, hence the internal-stack rule
     if (e != ESP_OK) return fail("esp_wifi_start", e, true);
-    e = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);   // every number in the spec was measured with this
-    ESP_LOGI(TAG, "started ps=min_modem listen_interval=3 (%s)", e == ESP_OK ? "ps set" : esp_err_to_name(e));
+    const bool ps_set = net_power_profile(NET_POWER_ACTIVE);   // min-modem: every number in the spec was measured with this
+    ESP_LOGI(TAG, "started ps=min_modem listen_interval=3 (%s)", ps_set ? "ps set" : "ps not set");
     return true;
 }
 

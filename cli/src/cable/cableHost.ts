@@ -341,6 +341,11 @@ export class DaemonCableHost implements CableHost {
     return locale.startsWith('vi') ? 'vi' : 'en'
   }
 
+  /** CABLE_KEEPALIVE_MS: off (undefined) unless the person sets it. Nothing in this repository sets it; the battery plan will. */
+  keepaliveMs(): number | undefined {
+    return env.CABLE_KEEPALIVE_MS > 0 ? env.CABLE_KEEPALIVE_MS : undefined
+  }
+
   appFocus(): { machineId: string; agentId: string } | undefined {
     return this.wiring.appFocus?.()
   }

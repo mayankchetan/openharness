@@ -154,7 +154,7 @@ assert text('wifi_sta.c').index('esp_log_level_set("wifi", ESP_LOG_WARN)') < tex
 assert 'static const char *TAG = "nwifi";' in text('wifi_sta.c'), 'our own lines must not share the driver tag that is lowered'
 for phrase in ('LOG LEVELS', 'WARN and ERROR lines still pass', 'Invalid AP(<bssid>) SSID=<name>', 'PWD:%s'):
     assert phrase in text('wifi_sta.h'), phrase
-assert 'esp_wifi_set_ps(WIFI_PS_MIN_MODEM)' in start_sta
+assert 'net_power_profile(NET_POWER_ACTIVE)' in start_sta and 'esp_wifi_set_ps(' in body(sta, 'net_power_profile'), 'min-modem, set through hook 1 (W13; test_wifi_power_source.py)'
 assert 'WIFI_PS_NONE' not in sta and 'WIFI_PS_MAX_MODEM' not in sta, 'min-modem always for now'
 assert re.search(r'snprintf\(hostname, sizeof hostname, "dial-%02x", mac\[5\]\)', text('wifi_sta.c')), 'hostname dial-<last MAC byte, hex>'
 assert 'esp_netif_set_hostname(s_netif, hostname)' in start_sta

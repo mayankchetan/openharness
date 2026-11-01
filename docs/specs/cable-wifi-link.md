@@ -4,7 +4,7 @@ Status: DRAFT. Source of truth for the wire format. The design reasoning is in t
 (`briefs/research/2026-10-29-wifi-mode-spec.md` in the workbench repository, sections 4, 5 and 7).
 This file holds only what an implementer on either side needs to be byte-exact.
 
-What is implemented now: section 2 (the ADPCM voice block) and its golden vectors, and section 3 (the provisioning
+What is implemented now: section 2 (the ADPCM voice block) and its golden vectors, section 4 (keepalive timing, W13), and section 3 (the provisioning
 messages over the USB cable, W9 and W10). Section 1 describes work that is not finished (W8, W11); it is here so that
 the parts of the wire format are in one place.
 
@@ -252,3 +252,32 @@ Daemon side.
 - `harness dial wifi set|show|forget|rotate|on|off|firewall`. The password is typed at a prompt that shows nothing, or read as one line
   of stdin when stdin is not a terminal; it is never an argument and never read from the environment. `firewall` prints the Windows
   firewall command (inbound TCP on the Wi-Fi port, private profile, local subnet) and does not run it.
+
+## 4. Keepalive timing (task W13)
+
+Without the field below, the link keeps the numbers it has always had: the daemon pings every 5 s, the dial calls 15 s without any byte
+a dead daemon, and the daemon calls 20 s without any byte a dead dial. The daemon's window is the later one on purpose: one late
+message must not trip both sides at once and have each conclude the other left. The dial greets every 15 s while a session is up
+(`HELLO_SESSION_MS`), and every 2 s while it is not; neither number moves with the field.
+
+Negotiation. The dial's `hello` carries `"keepalive":"v1"` (on every transport). Only then, and only when the daemon is
+configured for it, the `welcome` carries `"keepaliveMs":K`. A dial that did not say `keepalive` is never sent the field: an older
+firmware would call a slower ping a dead daemon every 15 s. The welcome is sent again for every hello, so the field is repeated
+and a daemon that restarts without the setting takes the link back to the fixed numbers.
+
+The rule (one table, `firmware/test/vectors/keepalive.txt`, read by the dial's host test `test_cable_keepalive.c` and by the daemon's
+`keepalive.spec.ts`):
+
+| | value |
+|---|---|
+| K | `keepaliveMs` rounded to a whole millisecond and clamped to 5000..60000. Absent, not a number or NaN: 5000 |
+| daemon pings every | K |
+| the dial calls a dead daemon after | 3 x K without any byte (15 s .. 180 s) |
+| the daemon calls a dead dial after | 3 x K + 5 s without any byte (20 s .. 185 s) |
+
+So K can only slow the ping down, never speed it up; K = 5000 is today's link exactly. Both sides compute their window from the same K, and
+the daemon's is always 5 s later than the dial's. The dial answers every ping with a `pong`, so the daemon hears from it at least every K.
+
+Configuration. The daemon reads `CABLE_KEEPALIVE_MS` (`cli/src/config/env.ts`); 0 or unset (the default) is off and the welcome has no field.
+Nothing in the repository sets it: the battery plan decides the value. The dial applies the field in `session_up` (every welcome) and goes
+back to 5000 when the session ends.

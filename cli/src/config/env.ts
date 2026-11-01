@@ -407,6 +407,11 @@ const fields = {
   // Set to 'true' to let this daemon own the dial from any session, not only the console one. For a single-user
   // PC reached over Remote Desktop, where the console session is empty and the dial would otherwise be released.
   CABLE_ANY_SESSION: flag('false'),
+  // Milliseconds between the daemon's pings to a dial that said it understands `welcome.keepaliveMs`; the dial then calls 3 times this
+  // much silence a dead daemon, and the daemon 3 times this plus 5 s a dead dial. 0 (the default) is off: the welcome carries no
+  // field and the link keeps its fixed 5 s ping, 15 s and 20 s windows. A value is clamped to 5000..60000. A battery plan sets it;
+  // nothing in this repository does. See cable-wifi-link.md, "Keepalive".
+  CABLE_KEEPALIVE_MS: number('0'),
   // Set to 'true' to switch on POST /api/dial/debug/{shot,tap,press,swipe} on the daemon's local API: a screenshot of
   // the dial's face and an injected touch, for a developer or an agent testing the firmware's screens. The port is
   // exclusive, so while the daemon holds the dial this is the only way to reach the firmware's debug commands. Off

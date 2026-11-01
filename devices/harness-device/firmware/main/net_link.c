@@ -19,6 +19,7 @@
 #include "freertos/task.h"
 #include "net_hs_class.h"
 #include "net_state.h"
+#include "power_sleep.h"
 #include "ram_telemetry.h"
 #include "task_util.h"
 #include "ui/ui_screens.h"
@@ -214,12 +215,19 @@ static void net_link_task(void *arg)
     net_backoff_reset(&ladder);
     for (;;) {
         ui_flush();
-        if (!(nwifi_bits() & NWIFI_GOT_IP) && !join_wifi()) {
+        // POWER (W13). Idle, this task holds nothing: not in the backoff waits, not in the serve loop. Over the join and the handshake it holds
+        // PP_HOLD_LINK, the power policy's hold for a transport with traffic, so the chip does not light-sleep in the middle of a handshake.
+        // Released on the one line below on every path, before any wait. With battery sleep off these two calls are empty inline functions.
+        power_sleep_hold(PP_HOLD_LINK);
+        const bool joined = (nwifi_bits() & NWIFI_GOT_IP) || join_wifi();
+        const int64_t t0_us = esp_timer_get_time();
+        const bool opened = joined && tls->open(tls);   // TCP connect, then the handshake, both on this task
+        power_sleep_release(PP_HOLD_LINK);
+        if (!joined) {
             backoff(&ladder, "wifi");
             continue;
         }
-        const int64_t t0_us = esp_timer_get_time();
-        if (!tls->open(tls)) {   // TCP connect, then the handshake, both on this task
+        if (!opened) {
             note_open_failure(tls);
             backoff(&ladder, "daemon");
             continue;

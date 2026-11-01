@@ -71,6 +71,13 @@ cc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -O1 -g -fsanitize="$
    -I "$here/../main" -I "$here/host_tcp" -I "$here/host_stubs" -o "$out/test_cable_xport_tcp" "$here/test_cable_xport_tcp.c" "$here/../main/cable_xport_tcp.c"
 "$out/test_cable_xport_tcp"
 python3 "$here/test_net_link_source.py"
+# The power hooks (W13): net_power_profile calls esp_wifi_set_ps and nothing that sets listen_interval; the net task takes no PM lock of its own and
+# holds PP_HOLD_LINK only over connect and handshake; welcome.keepaliveMs on the dial. The timing rule itself (clamp, 1:3, the daemon's window later)
+# runs on the host against the table the daemon's spec reads too (vectors/keepalive.txt).
+python3 "$here/test_wifi_power_source.py"
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" \
+   -o "$out/test_cable_keepalive" "$here/test_cable_keepalive.c" -lm
+"$out/test_cable_keepalive" "$here/vectors/keepalive.txt"
 # The decoder buffer is in PSRAM (W6): only cable_link.c names it, and every consumer of a frame payload is CPU-side (no DMA).
 python3 "$here/test_decoder_psram.py"
 # IMA ADPCM voice blocks (frame type 0x07): encoder and decoder against the shared vectors, sanitizers on.
