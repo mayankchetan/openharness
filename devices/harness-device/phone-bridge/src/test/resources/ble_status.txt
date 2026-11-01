@@ -41,6 +41,7 @@ hint	0101	err:0x0d
 
 const	adv_interval_ms	50	ms
 const	adv_timeout_ms	30000	ms
+const	adv_retry_ms	120000	ms
 const	enc_deadline_ms	3000	ms
 const	dial_tls_deadline_ms	5000	ms
 const	daemon_tls_deadline_ms	3000	ms

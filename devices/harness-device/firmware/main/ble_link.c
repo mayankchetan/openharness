@@ -32,6 +32,7 @@
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 #include "task_util.h"
+#include "ui/display.h"
 
 static const char *TAG = "ble_link";
 
@@ -242,6 +243,8 @@ static void advertise(void)
     if (rc == 0) rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &ap, gap_event, NULL);
     if (rc == 0) {
         s_adv_active = true;
+        char name[24];
+        if (ble_adv_name(s_mac, name, sizeof name)) ESP_LOGI(TAG, "advertising name=%s", name);
     } else if (rc != BLE_HS_EALREADY) {
         ESP_LOGW(TAG, "advertising did not start (rc=%d): trying again in a second", rc);
         s_adv_not_before_ms = now_ms() + 1000;
@@ -320,6 +323,7 @@ static int coc_event(struct ble_l2cap_event *event, void *arg)
         if (event->connect.status == 0) {
             s_chan = event->connect.chan;
             cable_xport_ble_channel_up();
+            ESP_LOGI(TAG, "channel up psm=0x%04x mtu=%u", (unsigned)COC_PSM, (unsigned)port_peer_mtu(NULL));
             post(BLE_EV_CHANNEL_OPEN);
         } else {
             ESP_LOGW(TAG, "channel open failed (status %d)", event->connect.status);
@@ -428,6 +432,7 @@ static void ble_link_task(void *arg)
     bool tls_open = false;     // the TLS session of the current channel is established and not yet closed
     bool refused_seen = false; // AUTH_FAILED already acted on
     uint64_t up_ms = 0;
+    uint32_t seen_wake = display_wake_seq();   // the screen's wake counter: a touch or the PWR button moves it
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(TICK_MS));
         const uint64_t now = now_ms();
@@ -447,6 +452,9 @@ static void ble_link_task(void *arg)
             ESP_LOGW(TAG, "link not encrypted after %u ms: dropped", (unsigned)BLE_ENC_DEADLINE_MS);
             terminate_link();
             post(BLE_EV_ENC_TIMEOUT);
+        } else if (due == BLE_EV_START) {
+            post(BLE_EV_START);   // "Phone not found" has lasted BLE_RETRY_MS: advertise again (30 s on the air, 120 s off)
+            ESP_LOGI(TAG, "no phone for %u ms: advertising again", (unsigned)BLE_RETRY_MS);
         } else if (due == BLE_EV_TLS_FAIL && !tls_open) {
             // open() has its own 5 s deadline, so this is a channel that opened and never got a handshake: close it, and count an ordinary failure
             port_disconnect(NULL);
@@ -455,6 +463,17 @@ static void ble_link_task(void *arg)
             state_unlock();
         }
         st = current(&since);
+
+        // 1b. a screen wake (a touch, the PWR button) while "not found": advertise again at once
+        const uint32_t wake = display_wake_seq();
+        if (wake != seen_wake) {
+            seen_wake = wake;
+            if (st == BLE_ST_NOT_FOUND) {
+                post(BLE_EV_START);
+                ESP_LOGI(TAG, "screen wake: advertising again");
+                st = current(&since);
+            }
+        }
 
         // 2. advertising: while ADVERTISING and not on the air (the first time, after a disconnect, after a refused back-off)
         if (st == BLE_ST_ADVERTISING && !s_adv_active && now >= s_adv_not_before_ms) advertise();

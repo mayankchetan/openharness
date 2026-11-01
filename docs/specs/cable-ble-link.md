@@ -56,8 +56,9 @@ contract.
   is 22 bytes of the 31.
 - A phone filters on the name prefix `harness-dial-` (it is in the primary packet) and the service UUID (scan response, active
   scan).
-- Advertising stops after `adv_timeout_ms` = 30000 ms without a central. The dial shows "Phone not found" and does not
-  restart by itself. The phone-side trigger to reconnect is presence (section 6).
+- Advertising stops after `adv_timeout_ms` = 30000 ms without a central. The dial shows "Phone not found". It advertises
+  again on any screen wake (a touch, the PWR button) and, with no link, every `adv_retry_ms` = 120000 ms after it stopped: 30 s
+  on the air, 120 s off, a fifth of the time. The phone-side trigger to reconnect is presence (section 6).
 - One connection, one channel. Bonds: `max_bonds` = 2.
 
 ## 3. Link settings
@@ -140,6 +141,7 @@ out of range).
 |---|---|---|
 | `adv_interval_ms` | 50 | advertising interval |
 | `adv_timeout_ms` | 30000 | advertising without a central |
+| `adv_retry_ms` | 120000 | after "not found", advertise again |
 | `enc_deadline_ms` | 3000 | connect to encrypted |
 | `dial_tls_deadline_ms` | 5000 | TLS handshake on the dial |
 | `daemon_tls_deadline_ms` | 3000 | TLS handshake at the daemon, from the first byte |

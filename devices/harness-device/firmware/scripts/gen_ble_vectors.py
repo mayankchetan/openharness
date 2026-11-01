@@ -68,6 +68,7 @@ ADV_MACS = [
 CONSTS = [
     ("adv_interval_ms", 50, "ms"),            # connectable undirected, legacy advertising
     ("adv_timeout_ms", 30000, "ms"),          # no central for this long: advertising stops, the dial says "Phone not found"
+    ("adv_retry_ms", 120000, "ms"),           # after "not found" the dial waits this long, then advertises again (a wake does it at once)
     ("enc_deadline_ms", 3000, "ms"),          # a link not encrypted this long after connect is dropped
     ("dial_tls_deadline_ms", 5000, "ms"),     # dial: TLS handshake after the channel opens, then close the channel
     ("daemon_tls_deadline_ms", 3000, "ms"),   # daemon: from the first byte of the stream

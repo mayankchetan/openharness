@@ -80,8 +80,8 @@ uint32_t ble_deadline_ms(ble_state_t state)
     case BLE_ST_ADVERTISING: return BLE_ADV_TIMEOUT_MS;
     case BLE_ST_SECURING:    return BLE_ENC_DEADLINE_MS;
     case BLE_ST_CHANNEL_UP:  return BLE_TLS_DEADLINE_MS;
+    case BLE_ST_NOT_FOUND:   return BLE_RETRY_MS;
     case BLE_ST_OFF:
-    case BLE_ST_NOT_FOUND:
     case BLE_ST_CONNECTED:
     case BLE_ST_TLS_UP:
     case BLE_ST_AUTH_FAILED:
@@ -99,6 +99,7 @@ ble_event_t ble_poll(const ble_t *b, uint64_t now_ms)
     case BLE_ST_ADVERTISING: return BLE_EV_ADV_TIMEOUT;
     case BLE_ST_SECURING:    return BLE_EV_ENC_TIMEOUT;
     case BLE_ST_CHANNEL_UP:  return BLE_EV_TLS_FAIL;
+    case BLE_ST_NOT_FOUND:   return BLE_EV_START;
     default:                 break;
     }
     return BLE_EV_NONE;

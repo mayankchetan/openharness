@@ -5,7 +5,8 @@
 //
 //   OFF           no BLE stack running (USB or Wi-Fi mode, or the phone mode not started).
 //   ADVERTISING   advertising, no central yet. BLE_ADV_TIMEOUT_MS without one: NOT_FOUND.
-//   NOT_FOUND     advertising stopped with nobody there ("Phone not found"). It does not restart by itself: START begins again.
+//   NOT_FOUND     advertising stopped with nobody there ("Phone not found"). BLE_RETRY_MS later ble_poll says START (advertise again), and the
+//                 glue posts START on any screen wake: 30 s on the air, 120 s off, so the radio is on a fifth of the time while no phone comes.
 //   SECURING      a central is connected and the link is not encrypted yet. BLE_ENC_DEADLINE_MS from the connect, then the link is dropped.
 //   CONNECTED     the link is encrypted (and bonded); waiting for the phone to open the L2CAP channel. No deadline of ours.
 //   CHANNEL_UP    the channel is open and the TLS handshake runs. BLE_TLS_DEADLINE_MS from the open, then the channel is closed.
@@ -27,6 +28,7 @@
 #include "net_state.h"
 
 #define BLE_ADV_TIMEOUT_MS   30000u
+#define BLE_RETRY_MS         120000u   // NOT_FOUND to advertising again, with no wake
 #define BLE_ENC_DEADLINE_MS  3000u
 #define BLE_TLS_DEADLINE_MS  5000u
 
@@ -77,10 +79,10 @@ void ble_init(ble_t *b);   // OFF, zeroed
 // ladder is about the daemon refusing this dial, not about which link it came over).
 bool ble_post(ble_t *b, ble_event_t event, uint64_t now_ms);
 
-// How long a state may last, 0 for no deadline. ADVERTISING, SECURING and CHANNEL_UP have one; nothing else does.
+// How long a state may last, 0 for no deadline. ADVERTISING, SECURING, CHANNEL_UP and NOT_FOUND (the retry) have one; nothing else does.
 uint32_t ble_deadline_ms(ble_state_t state);
-// The event the deadline of the current state would post at `now_ms` (>=, so 2.999 s is not 3 s): ADV_TIMEOUT, ENC_TIMEOUT, or TLS_FAIL for the
-// handshake. BLE_EV_NONE when nothing is due. It stays due until the caller posts it; a TLS_FAIL from here goes through ble_handshake_failed(b, false).
+// The event the deadline of the current state would post at `now_ms` (>=, so 2.999 s is not 3 s): ADV_TIMEOUT, ENC_TIMEOUT, TLS_FAIL for the
+// handshake, or START for the retry out of NOT_FOUND. BLE_EV_NONE when nothing is due. It stays due until the caller posts it; a TLS_FAIL from here goes through ble_handshake_failed(b, false).
 ble_event_t ble_poll(const ble_t *b, uint64_t now_ms);
 
 // One failed handshake, in CHANNEL_UP: folds it into the run of refusals (net_handshake_event), posts TLS_FAIL, or TLS_REFUSED on the third alert in a row,

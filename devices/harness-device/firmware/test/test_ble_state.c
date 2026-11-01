@@ -103,7 +103,8 @@ static void test_constants_match_the_vectors(const char *path)
     CHECK(BLE_ADV_TIMEOUT_MS == vector_const(path, "adv_timeout_ms"));
     CHECK(BLE_ENC_DEADLINE_MS == vector_const(path, "enc_deadline_ms"));
     CHECK(BLE_TLS_DEADLINE_MS == vector_const(path, "dial_tls_deadline_ms"));
-    CHECK(BLE_ADV_TIMEOUT_MS == 30000 && BLE_ENC_DEADLINE_MS == 3000 && BLE_TLS_DEADLINE_MS == 5000);
+    CHECK(BLE_RETRY_MS == vector_const(path, "adv_retry_ms"));
+    CHECK(BLE_ADV_TIMEOUT_MS == 30000 && BLE_ENC_DEADLINE_MS == 3000 && BLE_TLS_DEADLINE_MS == 5000 && BLE_RETRY_MS == 120000);
 }
 
 // ── the deadlines ───────────────────────────────────────────────────────────────────────────────────
@@ -119,7 +120,9 @@ static void test_deadlines(void)
     CHECK(ble_poll(&b, 1000 + 30000) == BLE_EV_ADV_TIMEOUT);
     CHECK(ble_poll(&b, 1000 + 99999) == BLE_EV_ADV_TIMEOUT);                // still due until somebody acts on it
     CHECK(ble_post(&b, BLE_EV_ADV_TIMEOUT, 31000) && b.state == BLE_ST_NOT_FOUND);
-    CHECK(ble_poll(&b, 99999999) == BLE_EV_NONE);                            // not found has no deadline: it does not restart by itself
+    CHECK(ble_poll(&b, 31000 + BLE_RETRY_MS - 1) == BLE_EV_NONE);            // "Phone not found" waits the retry period ...
+    CHECK(ble_poll(&b, 31000 + BLE_RETRY_MS) == BLE_EV_START);              // ... and then asks to advertise again (a START)
+    CHECK(ble_poll(&b, 31000 + 10 * BLE_RETRY_MS) == BLE_EV_START);         // still due until somebody acts on it
     CHECK(ble_post(&b, BLE_EV_START, 40000) && b.state == BLE_ST_ADVERTISING && b.since_ms == 40000);
 
     CHECK(ble_post(&b, BLE_EV_LINK_UP, 50000) && b.state == BLE_ST_SECURING && b.since_ms == 50000);
@@ -148,11 +151,63 @@ static void test_deadlines(void)
     // the deadline helper itself
     CHECK(ble_deadline_ms(BLE_ST_ADVERTISING) == BLE_ADV_TIMEOUT_MS && ble_deadline_ms(BLE_ST_SECURING) == BLE_ENC_DEADLINE_MS);
     CHECK(ble_deadline_ms(BLE_ST_CHANNEL_UP) == BLE_TLS_DEADLINE_MS);
-    CHECK(ble_deadline_ms(BLE_ST_OFF) == 0 && ble_deadline_ms(BLE_ST_NOT_FOUND) == 0 && ble_deadline_ms(BLE_ST_CONNECTED) == 0);
+    CHECK(ble_deadline_ms(BLE_ST_OFF) == 0 && ble_deadline_ms(BLE_ST_CONNECTED) == 0);
+    CHECK(ble_deadline_ms(BLE_ST_NOT_FOUND) == BLE_RETRY_MS);
     CHECK(ble_deadline_ms(BLE_ST_TLS_UP) == 0 && ble_deadline_ms(BLE_ST_AUTH_FAILED) == 0 && ble_deadline_ms((ble_state_t)77) == 0);
     // NULL
     CHECK(ble_poll(NULL, 1) == BLE_EV_NONE && !ble_post(NULL, BLE_EV_START, 1));
     ble_init(NULL);
+}
+
+// ── B4d: advertising does not stay stopped ──────────────────────────────────────────────────────────
+// No phone for an hour: 30 s on the air, 2 minutes off, again. A wake (the link task posts START on a touch or the PWR button) restarts it at once.
+static void test_advertising_restarts_by_itself_and_on_a_wake(void)
+{
+    ble_t b;
+    ble_init(&b);
+    ble_post(&b, BLE_EV_START, 0);
+    unsigned starts = 1, not_found = 0;
+    uint64_t on_air_ms = 0, last_on = 0;
+    for (uint64_t now = 0; now <= 3600000; now += 50) {      // the link task's 50 ms tick, an hour
+        const ble_event_t due = ble_poll(&b, now);
+        if (due == BLE_EV_ADV_TIMEOUT) {
+            on_air_ms += now - last_on;
+            ble_post(&b, due, now);
+            not_found++;
+            CHECK(b.state == BLE_ST_NOT_FOUND);
+        } else if (due == BLE_EV_START) {
+            ble_post(&b, due, now);
+            starts++;
+            last_on = now;
+            CHECK(b.state == BLE_ST_ADVERTISING);
+        }
+    }
+    // one cycle is 30 s on and 120 s off: 150 s, so 24 cycles in an hour, and the radio is on a fifth of the time
+    CHECK(not_found == 24 && starts == 25);
+    CHECK(on_air_ms == (uint64_t)24 * BLE_ADV_TIMEOUT_MS);
+    CHECK(on_air_ms * 100 / 3600000 == 20);
+    // a wake in the quiet part: advertising at once, with a fresh 30 s
+    ble_init(&b);
+    ble_post(&b, BLE_EV_START, 0);
+    ble_post(&b, BLE_EV_ADV_TIMEOUT, 30000);
+    CHECK(b.state == BLE_ST_NOT_FOUND);
+    CHECK(ble_post(&b, BLE_EV_START, 50000) && b.state == BLE_ST_ADVERTISING && b.since_ms == 50000);
+    CHECK(ble_poll(&b, 50000 + 29999) == BLE_EV_NONE && ble_poll(&b, 50000 + 30000) == BLE_EV_ADV_TIMEOUT);
+    // a wake while advertising or connected changes nothing and does not stretch the 30 s
+    CHECK(!ble_post(&b, BLE_EV_START, 60000) && b.since_ms == 50000);
+    ble_post(&b, BLE_EV_LINK_UP, 61000);
+    CHECK(!ble_post(&b, BLE_EV_START, 62000) && b.state == BLE_ST_SECURING);
+    // wake after wake after wake: each is a START from NOT_FOUND, and the 30 s on-air window bounds the radio (no storm of state changes)
+    ble_init(&b);
+    ble_post(&b, BLE_EV_START, 0);
+    ble_post(&b, BLE_EV_ADV_TIMEOUT, 30000);
+    unsigned changes = 0;
+    for (uint64_t now = 30000; now < 150000; now += 1000) {  // a touch every second for 2 minutes
+        if (b.state == BLE_ST_NOT_FOUND) { CHECK(ble_post(&b, BLE_EV_START, now)); changes++; }
+        const ble_event_t due = ble_poll(&b, now);
+        if (due == BLE_EV_ADV_TIMEOUT) { ble_post(&b, due, now); changes++; }
+    }
+    CHECK(changes <= 2 * (120000 / BLE_ADV_TIMEOUT_MS) + 2);
 }
 
 static void test_post_keeps_the_clock_of_a_state_that_did_not_change(void)
@@ -340,6 +395,7 @@ int main(int argc, char **argv)
     test_table();
     test_constants_match_the_vectors(argv[1]);
     test_deadlines();
+    test_advertising_restarts_by_itself_and_on_a_wake();
     test_post_keeps_the_clock_of_a_state_that_did_not_change();
     test_refusal_run();
     test_accept_policy();

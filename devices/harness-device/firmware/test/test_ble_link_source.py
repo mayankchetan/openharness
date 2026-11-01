@@ -170,6 +170,20 @@ assert 'tls->close(tls)' in task, 'a finished session is closed before the next 
 tls_h = code('cable_xport_tls.c')
 assert 'inner->kind == CABLE_XPORT_USB' in tls_h, 'the TLS wrapper refuses USB, and takes any other inner transport'
 
+# ── 6b. B4d: advertising does not stay stopped; the log lines the e2e script reads ──────────────────────
+# The retry out of NOT_FOUND comes from ble_poll (BLE_RETRY_MS, `adv_retry_ms`), and any screen wake restarts it at once. Neither touches flash.
+assert define(text('ble_state.h'), 'BLE_RETRY_MS') == vectors['adv_retry_ms'] == 120000
+assert re.search(r'else if \(due == BLE_EV_START\) \{\s*post\(BLE_EV_START\);', task), 'the retry posts START'
+assert 'const uint32_t wake = display_wake_seq();' in task and 'wake != seen_wake' in task, 'a screen wake is seen by its counter'
+assert re.search(r'if \(wake != seen_wake\) \{\s*seen_wake = wake;\s*if \(st == BLE_ST_NOT_FOUND\) \{\s*post\(BLE_EV_START\);', task), 'a wake posts START only from NOT_FOUND'
+assert task.index('wake != seen_wake') < task.index('advertise();'), 'the wake is looked at before the advertising keeper, so it advertises in the same tick'
+assert '#include "ui/display.h"' in raw_link and 'display_wake_seq' not in code('ble_state.c')
+# e2e.ps1 (phone-bridge/tools, branch bridge-daemon) matches these three lines of the dial log; the tag is ble_link
+assert re.search(r'ESP_LOGI\(TAG, "advertising name=%s"', raw_link), 'advertise start'
+assert re.search(r'ESP_LOGI\(TAG, "channel up psm=0x%04x mtu=%u"', raw_link), 'channel up'
+assert re.search(r'ESP_LOGI\(TAG, "link up #%u handshake_ms=%d boot_ms=%d"', raw_link), 'TLS-PSK up'
+assert 'static const char *TAG = "ble_link";' in raw_link
+
 # ── 7. isolation ────────────────────────────────────────────────────────────────────────────────────
 NIMBLE = re.compile(r'#\s*include\s*[<"](nimble/|host/ble_|host/util|os/os_mbuf|services/g|esp_bt)')
 for path in sorted(main.rglob('*.c')) + sorted(main.rglob('*.h')):
