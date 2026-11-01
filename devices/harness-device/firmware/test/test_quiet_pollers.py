@@ -79,6 +79,24 @@ assert re.search(r'if \(wait_ms > 1000\) \{\s+const int64_t left_ms = \(next_us 
 assert 'vTaskDelay(pdMS_TO_TICKS(wait_ms));' in batlog and 'vTaskDelay(pdMS_TO_TICKS(1000))' not in batlog
 checked.append('batlog 1000 ms')
 
+# --- Wi-Fi mode (S2 of the sleep + Wi-Fi work): the link's serve tick and backoff slices, and the mode switch task ---
+net = read('net_link.c')
+serve = re.search(r'static const char \*serve\(const cable_xport_t \*tls\)\n\{.*?^\}', net, re.M | re.S)[0]
+assert re.search(r'#define SERVE_MS 50\b', net) and re.search(r'#define SLICE_MS 250\b', net)
+assert 'nwifi_wait(NWIFI_DISCONNECTED, power_sleep_wait_ms(PP_POLLER_NET_SERVE, SERVE_MS))' in serve
+assert 'SERVE_MS' not in serve.replace('PP_POLLER_NET_SERVE, SERVE_MS', '')
+checked.append('net serve 50 ms')
+sleep_ms = re.search(r'static void sleep_ms\(uint32_t ms\)\n\{.*?^\}', net, re.M | re.S)[0]
+assert 'power_sleep_wait_ms(PP_POLLER_NET_BACKOFF, SLICE_MS)' in sleep_ms and 'ms < step ? ms : step' in sleep_ms
+assert 'SLICE_MS' not in sleep_ms.replace('PP_POLLER_NET_BACKOFF, SLICE_MS', '')
+# the join loop (join_wifi) is not a poller: it runs under PP_HOLD_LINK, when the dial must be awake
+assert 'nwifi_wait(NWIFI_GOT_IP | NWIFI_DISCONNECTED, SLICE_MS)' in net
+checked.append('net backoff 250 ms')
+glue = read('mode_glue.c')
+assert re.search(r'#define IDLE_MS 250\b', glue)
+assert 'vTaskDelay(pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_MODE_SW, IDLE_MS)));' in glue and 'vTaskDelay(pdMS_TO_TICKS(IDLE_MS))' not in glue
+checked.append('mode switch 250 ms')
+
 # --- every poller in the policy table has exactly one caller ---
 policy_h = (main / 'power_policy.h').read_text()
 names = re.findall(r'^\s+(PP_POLLER_[A-Z_]+),?', re.search(r'typedef enum \{(.*?)\} pp_poller_t;', policy_h, re.S)[1], re.M)

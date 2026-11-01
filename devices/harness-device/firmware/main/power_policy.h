@@ -119,6 +119,9 @@ typedef enum {
     PP_POLLER_CABLE_SESSION,// cable_session (250 ms; hello only when a host is there)
     PP_POLLER_REFRESH,      // proj_refresh (1000 ms)
     PP_POLLER_BATLOG,       // battery log (1000 ms)
+    PP_POLLER_NET_SERVE,    // net_link serve loop (50 ms; Wi-Fi mode): a Wi-Fi loss still ends the wait at once (event group), so the tick only paces log drain
+    PP_POLLER_NET_BACKOFF,  // net_link backoff wait, its slice (250 ms; Wi-Fi mode): the slice only paces the Link screen's caption refresh
+    PP_POLLER_MODE_SW,      // mode_sw task idle wait (250 ms; Wi-Fi mode): a dark dial switches silently, a plug-in is seen by the PMIC read first
     PP_POLLER_COUNT
 } pp_poller_t;
 // The touch fallback poll in S2 (plan SLEEP_TOUCH_POLL_MS). With the level wake it backs up the interrupt (1 s); under D1 there is no wake and every

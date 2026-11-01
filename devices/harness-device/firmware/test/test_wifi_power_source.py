@@ -127,7 +127,7 @@ assert 'cable_client_is_connected()' in serve_fn and re.search(r'bool held = tru
 assert serve_fn.index(HOLD) < serve_fn.index('nwifi_wait(') and serve_fn.index(REL) < serve_fn.index('nwifi_wait('), 'the hold follows the session once per tick, before the wait'
 assert not re.search(r'(return)', serve_fn[:serve_fn.index('nwifi_wait(')]), 'no way out of serve() between the hold and the wait'
 for name in ('backoff', 'sleep_ms', 'join_wifi', 'note_open_failure'):
-    assert 'power_sleep_' not in body(net, name), f'{name} takes or releases no hold of its own'
+    assert 'power_sleep_hold' not in body(net, name) and 'power_sleep_release' not in body(net, name), f'{name} takes or releases no hold of its own'
 assert '#include "power_sleep.h"' in text('net_link.c')
 sleep_h = text('power_sleep.h')
 assert re.search(r'static inline void power_sleep_hold\(uint32_t bits\) \{ \(void\)bits; \}', sleep_h), 'an empty inline when battery sleep is off'

@@ -475,6 +475,7 @@ int main(void)
     static const struct { pp_poller_t who; uint32_t awake, relaxed; } rows[] = {
         {PP_POLLER_TOUCH, 20, 5000}, {PP_POLLER_RENDER, 1000, 5000}, {PP_POLLER_CABLE_READER, 100, 2000},
         {PP_POLLER_CABLE_SESSION, 250, 2000}, {PP_POLLER_REFRESH, 1000, 5000}, {PP_POLLER_BATLOG, 1000, 10000},
+        {PP_POLLER_NET_SERVE, 50, 1000}, {PP_POLLER_NET_BACKOFF, 250, 2000}, {PP_POLLER_MODE_SW, 250, 2000},
     };
     assert(sizeof rows / sizeof rows[0] == PP_POLLER_COUNT);
     for (unsigned i = 0; i < sizeof rows / sizeof rows[0]; i++) {

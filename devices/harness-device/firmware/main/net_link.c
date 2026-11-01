@@ -70,7 +70,8 @@ static void ui_flush(void)
 static void sleep_ms(uint32_t ms)
 {
     while (ms) {
-        const uint32_t slice = ms < SLICE_MS ? ms : SLICE_MS;
+        const uint32_t step = power_sleep_wait_ms(PP_POLLER_NET_BACKOFF, SLICE_MS);   // 2 s while the chip may sleep
+        const uint32_t slice = ms < step ? ms : step;
         vTaskDelay(pdMS_TO_TICKS(slice));
         ms -= slice;
         ui_flush();
@@ -202,7 +203,7 @@ static const char *serve(const cable_xport_t *tls)
             else power_sleep_hold(PP_HOLD_LINK);
             held = !session;
         }
-        const uint32_t bits = nwifi_wait(NWIFI_DISCONNECTED, SERVE_MS);
+        const uint32_t bits = nwifi_wait(NWIFI_DISCONNECTED, power_sleep_wait_ms(PP_POLLER_NET_SERVE, SERVE_MS));   // 1 s while the chip may sleep; a Wi-Fi loss ends the wait at once
         if (!tls->is_up(tls)) return "link closed";
         if (bits & NWIFI_DISCONNECTED) return "wifi lost";
         if (!(bits & NWIFI_GOT_IP)) return "ip lost";

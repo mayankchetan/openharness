@@ -126,6 +126,9 @@ uint32_t pp_relaxed_ms(pp_poller_t who)
     case PP_POLLER_CABLE_SESSION: return 2000;
     case PP_POLLER_REFRESH:       return 5000;
     case PP_POLLER_BATLOG:        return 10000;
+    case PP_POLLER_NET_SERVE:     return 1000;
+    case PP_POLLER_NET_BACKOFF:   return 2000;
+    case PP_POLLER_MODE_SW:       return 2000;
     case PP_POLLER_COUNT:         break;
     }
     return 0;

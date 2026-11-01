@@ -16,6 +16,7 @@
 #include "last_words.h"
 #include "mode_glue_core.h"
 #include "mode_record.h"
+#include "power_sleep.h"
 #include "store_gate.h"
 #include "ui/display.h"
 #include "ui/ui_screens.h"
@@ -294,7 +295,7 @@ static void mode_sw_task(void *arg)
             }
             usb_probe_poll(now, PROBE_READ_MS);
         } else {
-            vTaskDelay(pdMS_TO_TICKS(IDLE_MS));
+            vTaskDelay(pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_MODE_SW, IDLE_MS)));   // 2 s while the chip may sleep
         }
         // The stack was sized without a measurement (4,096 B, internal): the high-water mark goes in the log 10 s after start, then every 10 minutes,
         // and just before a restart, so the bench can read it and the size can be cut to what is used.
