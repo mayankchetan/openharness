@@ -76,6 +76,7 @@ typedef struct {
     uint64_t reboot_uptime[64]; // the uptime at each reboot: no automatic switch before MS_T_DWELL_MS
     uint64_t wall;              // wall clock over the whole run, across reboots
     int probe_calls, notice_calls;
+    int held_calls; uint32_t held_busy; ms_mode_t held_target; bool held_asleep;   // the held-switch log hook (mg_ops_t.held)
     char order[32];             // the reboot sequence as letters: L(og) S(eal) B(oot_usb) R(estart); r = restart refused (busy again), U = undo
     bool store_fails;
 } dial_t;
@@ -84,6 +85,7 @@ static dial_t D;
 
 static void op_probe(void *c, bool on) { dial_t *d = c; d->probe_calls++; d->probe_installed = on; if (on) { d->have_welcome = false; d->last_hello = 0; d->probe_since = d->t; } }
 static void op_notice(void *c, bool on) { dial_t *d = c; d->notice_calls++; d->notice_shown = on; }
+static void op_held(void *c, ms_mode_t target, uint32_t busy, bool asleep) { dial_t *d = c; d->held_calls++; d->held_busy = busy; d->held_target = target; d->held_asleep = asleep; }
 static void op_clear(void *c) { (void)c; mode_record_clear_flaps(); }
 static void op_log(void *c, ms_mode_t target)
 {
@@ -121,7 +123,7 @@ static void op_undo(void *c, bool boot_usb_before, uint8_t flaps)
 static void op_clear_crashes(void *c) { (void)c; mode_record_crash_clear(); }
 static bool op_load_boot_usb(void *c) { (void)c; return config_load_boot_usb(); }
 
-static const mg_ops_t OPS = {&D, op_probe, op_notice, op_clear, op_log, op_seal, op_store, op_restart, op_clear_crashes, op_undo, op_load_boot_usb};
+static const mg_ops_t OPS = {&D, op_probe, op_notice, op_clear, op_log, op_seal, op_store, op_restart, op_clear_crashes, op_undo, op_load_boot_usb, op_held};
 
 static bool sof_now(void)
 {
@@ -576,6 +578,66 @@ static void test_busy_dial_waits_and_shows_the_notice(void)
     assert(!run(60000));
     D.busy = 0;
     assert(run(MS_STEP_MS * 2));
+}
+
+// Review Low 3 of 2026-11-01: nothing in the log said what held a due switch (a replug that took 297 s was only "plausible" from the screen-off timer).
+// The glue is told when a due switch is first held and each time the busy mask changes, once per hold: not on every 250 ms step.
+static void test_a_held_switch_is_logged_once_and_on_a_change(void)
+{
+    fresh();
+    provision(1);
+    boot();
+    assert(!run(70000));
+    D.cable = D.daemon = true;
+    D.busy = MS_BUSY_VOICE;
+    assert(!run(30000));                                   // due after 5 s, held by the voice turn for 25 s of steps
+    assert(D.held_calls == 1 && D.held_busy == MS_BUSY_VOICE && D.held_target == MS_MODE_USB && !D.held_asleep);
+    assert(!run(30000));
+    assert(D.held_calls == 1);                             // the same mask: not logged again
+    D.busy = MS_BUSY_VOICE | MS_BUSY_READER;
+    assert(!run(2000));
+    assert(D.held_calls == 2 && D.held_busy == (MS_BUSY_VOICE | MS_BUSY_READER));
+    D.busy = MS_BUSY_READER;                               // a row cleared: a change, so a line
+    assert(!run(2000));
+    assert(D.held_calls == 3 && D.held_busy == MS_BUSY_READER);
+    D.busy = 0;
+    assert(run(MS_STEP_MS * 2));                           // released: the switch goes, and says nothing more
+    assert(D.held_calls == 3);
+
+    // a hold that ended (the cable was pulled) and a later one are two holds: each is logged
+    fresh();
+    provision(1);
+    boot();
+    assert(!run(70000));
+    D.cable = D.daemon = true;
+    D.busy = MS_BUSY_DRAFT;
+    assert(!run(10000));
+    assert(D.held_calls == 1);
+    D.cable = false;
+    assert(!run(3000));
+    D.cable = D.daemon = true;
+    assert(!run(10000));
+    assert(D.held_calls == 2 && D.held_busy == MS_BUSY_DRAFT);
+
+    // a sleeping dial switches silently past a soft row (nothing is held, nothing is said) but is held by an upload, and that is said
+    fresh();
+    provision(1);
+    boot();
+    assert(!run(70000));
+    D.cable = D.daemon = true;
+    D.asleep = true;
+    D.busy = MS_BUSY_READER;
+    assert(run(10000));
+    assert(D.held_calls == 0);
+    fresh();
+    provision(1);
+    boot();
+    assert(!run(70000));
+    D.cable = D.daemon = true;
+    D.asleep = true;
+    D.busy = MS_BUSY_PET_UPLOAD;
+    assert(!run(10000));
+    assert(D.held_calls == 1 && D.held_asleep && D.held_busy == MS_BUSY_PET_UPLOAD);
 }
 
 static void test_the_notice_goes_when_the_reason_goes(void)
@@ -1186,6 +1248,7 @@ int main(void)
     test_charger_never_probes();
     test_busy_dial_waits_and_shows_the_notice();
     test_the_notice_goes_when_the_reason_goes();
+    test_a_held_switch_is_logged_once_and_on_a_change();
     test_power_cut_forgets_the_count();
     test_flaps_clear_after_ten_minutes();
     test_nothing_happens_after_the_restart();

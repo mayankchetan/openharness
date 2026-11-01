@@ -113,6 +113,18 @@ void mg_step(mg_t *g, const mg_world_t *w, const mg_ops_t *ops)
         if (ops->clear_crashes) ops->clear_crashes(ops->ctx);
     }
 
+    // A due switch held by the busy gate: said once when the hold starts and again when what holds it changes. A hold that ended is forgotten, so the
+    // next one is said afresh.
+    if (out.waiting) {
+        if (!g->held_said || g->held_busy != w->busy || g->held_asleep != w->asleep) {
+            g->held_said = true;
+            g->held_busy = w->busy;
+            g->held_asleep = w->asleep;
+            if (ops->held) ops->held(ops->ctx, out.target, w->busy, w->asleep);
+        }
+    } else {
+        g->held_said = false;
+    }
     if (out.act == MS_ACT_NOTICE) {
         notice(g, ops, true);
         return;

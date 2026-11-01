@@ -77,6 +77,9 @@ typedef struct {
     // after the table above. NVS boot_usb as it is NOW; the core reads it just before store_boot_usb and hands it to undo, so a refusal puts back what the
     // dial held (after a radio fallback that is the CHOICE, Wi-Fi, not the mode that runs). NULL: the running mode's value, as before W15e.
     bool (*load_boot_usb)(void *ctx);
+    // after the table above. A due switch is held by the busy gate: called when it is first held and again each time the busy mask or the asleep flag
+    // changes, once per hold (not on every step). The glue logs it: before this a replug that took five minutes left no line saying what held it.
+    void (*held)(void *ctx, ms_mode_t target, uint32_t busy, bool asleep);
 } mg_ops_t;
 
 typedef struct {
@@ -89,6 +92,9 @@ typedef struct {
     uint8_t    crashes;              // the crash count; zero after MS_CRASH_CLEAR_MS in Wi-Fi mode
     uint8_t    refusals;             // refused restarts in a row for the switch that is due; zero when none is due or one went
     uint64_t   retry_at;             // uptime before which the sequence is not started again (valid while refusals > 0)
+    bool       held_said;            // the hold of the switch that is due has been reported (ops->held) ...
+    uint32_t   held_busy;            // ... with this busy mask,
+    bool       held_asleep;          // ... and this asleep flag
     bool       wl_pending;           // a read said "no wireless target" while Wi-Fi runs; waiting for a second one (mg_apply_settings)
     uint64_t   wl_pending_at;        // uptime of that first read
 } mg_t;

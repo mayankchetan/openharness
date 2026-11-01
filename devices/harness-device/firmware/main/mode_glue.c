@@ -184,6 +184,13 @@ static bool op_store_boot_usb(void *ctx, bool boot_usb)
     return ok;
 }
 
+static void op_held(void *ctx, ms_mode_t target, uint32_t busy, bool asleep)
+{
+    (void)ctx;
+    ESP_LOGI(TAG, "switch to %s is due and held: busy=%#x (hard %#x) %s", ms_mode_name(target), (unsigned)busy, (unsigned)(busy & MS_BUSY_HARD),
+             asleep ? "screen off: only an update or an upload holds a dark dial" : "screen on: waits for the screen to go off");
+}
+
 static void op_clear_crashes(void *ctx)
 {
     (void)ctx;
@@ -257,6 +264,7 @@ static const mg_ops_t OPS = {
     .clear_crashes = op_clear_crashes,
     .undo = op_undo,
     .load_boot_usb = op_load_boot_usb,
+    .held = op_held,
 };
 
 static void sample(mg_world_t *w, uint64_t now)

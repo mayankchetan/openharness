@@ -328,7 +328,7 @@ as on. That is deliberate: a dial in Wi-Fi with `stay_wl` on never looks at the 
 
 Link-state text. While the dial is not connected it shows the wordmark and, in Wi-Fi mode, one dim line under it from `net_state_caption`
 (`net_state.c`, task W11; drawn by `render_brand` in `ui_habitat.c`): `Joining Wi-Fi` (JOINING), `Wi-Fi: no address` (NO_IP), `Daemon not reachable`
-(DAEMON_UNREACHABLE), `Key refused: reset dial` (AUTH_FAILED). OFF and UP show nothing. The line never shows the network name, the password or the key.
+(DAEMON_UNREACHABLE), `Plug in USB` (AUTH_FAILED: the key was refused; the cable brings the dial back to USB, and with Keep Wi-Fi on the Link screen does). OFF and UP show nothing. The line never shows the network name, the password or the key.
 
 CLI. `harness dial wifi set|show|forget|rotate|on|off|firewall` was built in W9. W16 added only the sentence that the dial joins 2.4 GHz networks
 only (the help and the output of `set`). There is no `stay_wl` verb. The user note is `docs/dial-wifi.md`.

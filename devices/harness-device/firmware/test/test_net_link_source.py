@@ -247,7 +247,8 @@ assert 'net_refusal_reset(&s_refusals)' in note, 'a TCP failure breaks the run'
 assert 'net_refusal_reset(&s_refusals);\n        post(NET_EV_LINK_UP)' in net.replace('\r', ''), 'a link up clears the count'
 st = code('net_state.c')
 assert 'NET_REFUSALS_TO_AUTH_FAILED' in code('net_state.h') and re.search(r'#define NET_REFUSALS_TO_AUTH_FAILED 3\b', code('net_state.h'))
-assert 'Key refused: reset dial' in text('net_state.c') and 'W14' in text('net_state.c'), 'caption names the way out and the comment says USB recovery returns with W14'
+assert 'return "Plug in USB";' in text('net_state.c') and 'Key refused' not in text('net_state.c'), 'the caption for a refused key is the way out (W16d): plug in USB; a factory reset erases everything and is not it'
+assert 'W14' not in text('net_state.c'), 'no stale note that the USB recovery is still to come'
 
 # ── 5e. reader stack and ring lock discipline ─────────────────────────────────────────────────────────────
 link_raw = text('cable_link.c')

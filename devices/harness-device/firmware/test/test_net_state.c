@@ -82,7 +82,7 @@ static void test_names_and_captions(void)
     }
     CHECK(n == 4);
     // The two states a person can act on say what to do about it: the cable fixes the second.
-    CHECK(!strcmp(net_state_caption(NET_AUTH_FAILED), "Key refused: reset dial"));   // the USB recovery path comes back with W14
+    CHECK(!strcmp(net_state_caption(NET_AUTH_FAILED), "Plug in USB"));   // the way out: the cable's probe brings the dial back to USB (W15); a factory reset is not it
 }
 
 // The one line of the Link screen (W16): a line for EVERY state, OFF and UP included, with the names the tests and the logs use

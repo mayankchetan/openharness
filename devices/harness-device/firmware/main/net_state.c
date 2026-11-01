@@ -52,7 +52,7 @@ const char *net_state_caption(net_state_t state)
     case NET_JOINING:            return "Joining Wi-Fi";
     case NET_NO_IP:              return "Wi-Fi: no address";
     case NET_DAEMON_UNREACHABLE: return "Daemon not reachable";
-    case NET_AUTH_FAILED:        return "Key refused: reset dial";   // W14 brings back the USB recovery (the probe); until then a factory reset is the way
+    case NET_AUTH_FAILED:        return "Plug in USB";   // the way out of a refused key: the cable's probe (W15) brings the dial back to USB, then `harness dial wifi set` again. Not a factory reset: that erases everything. With Keep Wi-Fi on the cable is not looked at: docs/dial-wifi.md names the Link screen
     case NET_OFF:
     case NET_UP:
     case NET_STATE_COUNT:        break;
