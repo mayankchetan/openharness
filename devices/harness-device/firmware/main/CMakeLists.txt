@@ -30,6 +30,7 @@ set(BOARD_SRCS
     "cable_xport_tcp.c"
     "cable_xport_tls.c"
     "net_state.c"
+    "mode_switch.c"
     "log_ring.c"
     "wifi_sta.c"
     "net_link.c"

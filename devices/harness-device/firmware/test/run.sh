@@ -78,6 +78,11 @@ python3 "$here/test_wifi_power_source.py"
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" \
    -o "$out/test_cable_keepalive" "$here/test_cable_keepalive.c" -lm
 "$out/test_cable_keepalive" "$here/vectors/keepalive.txt"
+# The automatic mode switch (W14): the boot table, enter/leave timers, the busy gate, the flap guard, stay_wl, the RTC record and boot_usb as pure
+# logic with an injected clock (cases H1-H10 of the design; the bench cases T1-T11 are task W15).
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" \
+   -o "$out/test_mode_switch" "$here/test_mode_switch.c" "$here/../main/mode_switch.c"
+"$out/test_mode_switch"
 # The decoder buffer is in PSRAM (W6): only cable_link.c names it, and every consumer of a frame payload is CPU-side (no DMA).
 python3 "$here/test_decoder_psram.py"
 # IMA ADPCM voice blocks (frame type 0x07): encoder and decoder against the shared vectors, sanitizers on.
