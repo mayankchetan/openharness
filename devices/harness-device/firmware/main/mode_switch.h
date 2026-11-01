@@ -24,7 +24,7 @@
 #define MS_SOF_SETTLE_MS        20u       // the SOF flag starts TRUE in secondary init and falls only after ticks: read it no earlier than this
 #define MS_T_ENTER_MS           5000u     // wireless -> USB: SOF continuous and welcomes coming for this long
 #define MS_WELCOME_AGE_MS       3000u     // the newest welcome may be at most this old (the probe says hello every 2 s)
-#define MS_T_LEAVE_MS           10000u    // USB -> wireless: SOF lost this long (0 with stay_wl)
+#define MS_T_LEAVE_MS           10000u    // USB -> wireless: SOF lost this long (not used with stay_wl: that leaves at once)
 #define MS_T_LEAVE_DAEMON_MS    60000u    // USB -> wireless: SOF present, no byte from the daemon for this long (or since boot)
 #define MS_T_DWELL_MS           60000u    // no automatic switch before this much uptime
 #define MS_FLAP_CAP             3u        // automatic switches in a row, then no more until MS_FLAP_CLEAR_MS of uptime in one mode
@@ -93,8 +93,9 @@ bool ms_blocked(uint32_t busy, bool asleep);
 //   wireless (Wi-Fi or BLE): SOF absent -> nothing, no probe. SOF present (and not stay_wl) -> the probe runs, hello every 2 s. The first welcome
 //     that arrives after the probe started opens T_ENTER; SOF dropping, or the newest welcome older than 3 s, closes it. When T_ENTER has
 //     lasted 5 s -> gate -> reboot to USB.
-//   USB: SOF absent for T_LEAVE (10 s; 0 with stay_wl), or SOF present with no daemon byte for T_LEAVE_DAEMON (60 s from the last byte, or from
-//     boot if there was none; session_up counts as a byte now) -> gate -> reboot to wl_mode. Never when wl_mode is unset.
+//   USB: stay_wl (with a valid wl_mode) -> gate -> reboot to wl_mode at once, cable in or out, live daemon or not (user decision 2026-10-31).
+//     Otherwise: SOF absent for T_LEAVE (10 s), or SOF present with no daemon byte for T_LEAVE_DAEMON (60 s from the last byte, or from boot if
+//     there was none; session_up counts as a byte now) -> gate -> reboot to wl_mode. Never when wl_mode is unset.
 //   both: not before T_DWELL of uptime, not when MS_FLAP_CAP switches already ran in a row, and MS_FLAP_CLEAR_MS of uptime clears that count.
 typedef struct {
     ms_mode_t mode;          // the running mode
@@ -112,7 +113,7 @@ typedef struct {
 typedef struct {
     uint64_t now_ms;              // uptime
     uint8_t  wl_mode;             // NVS wl_mode, live (the Settings row may change it)
-    bool     stay_wl;             // NVS stay_wl, live
+    bool     stay_wl;             // NVS stay_wl, live: USB leaves for wl_mode at once (after the dwell); wireless never probes
     bool     sof;                 // usb_serial_jtag_is_connected()
     // USB mode
     bool     session_up;          // cable_client_is_connected()

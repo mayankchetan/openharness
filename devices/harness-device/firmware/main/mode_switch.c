@@ -95,12 +95,16 @@ static bool step_usb(ms_state_t *s, const ms_in_t *in, uint64_t now)
         s->lost_on = false;
         return false;
     }
+    if (in->stay_wl) {                  // stay_wl: leave at once, cable in or out, daemon or not (user decision 2026-10-31)
+        s->lost_on = false;
+        return true;
+    }
     if (!in->sof) {
         if (!s->lost_on) {
             s->lost_on = true;
             s->lost_since = now;
         }
-        return now - s->lost_since >= (in->stay_wl ? 0u : MS_T_LEAVE_MS);
+        return now - s->lost_since >= MS_T_LEAVE_MS;
     }
     s->lost_on = false;
     // SOF present: the daemon timer runs from its newest byte, or from boot if it never spoke. A live session is a byte right now.

@@ -722,15 +722,86 @@ static void test_h8_stay_wl(void)
         CHECK(!run_to(&m, S(70) + S(120)));
         CHECK(m.out.act == MS_ACT_NONE && !m.out.probe_wanted);
     }
-    // USB: T_LEAVE = 0, so the loss of SOF leaves at once (the gate and the dwell still apply)
+    // USB: stay_wl leaves at once, cable in with a live daemon (W14, user decision 2026-10-31); the dwell (passed here) and the gate still apply
     {
         sim_t m;
         usb_ready(&m, MS_WL_WIFI);
         m.stay_wl = true;
-        CHECK(!run_to(&m, m.t + S(60)));     // SOF present, daemon alive: stays
+        CHECK(run_to(&m, m.t + 300));        // SOF present, daemon alive: leaves anyway
+        CHECK(m.reboot_target == MS_MODE_WIFI);
+        CHECK(!m.reboot_boot_usb);
+    }
+    // USB: the loss of SOF leaves at once too
+    {
+        sim_t m;
+        usb_ready(&m, MS_WL_WIFI);
+        m.stay_wl = true;
         sim_set_sof(&m, false);
         CHECK(run_to(&m, m.t + 300));
         CHECK(m.reboot_target == MS_MODE_WIFI);
+    }
+    // USB, stay_wl with the cable in and a live daemon: leaves for wl_mode at exactly T_DWELL (60 s uptime), not at the daemon timer
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_USB, MS_WL_WIFI, 0);
+        m.stay_wl = true;
+        sim_set_sof(&m, true);
+        CHECK(!run_to(&m, S(60) - 100));     // dwell holds it
+        CHECK(run_to(&m, S(61)));
+        CHECK(m.reboot_t == S(60));
+        CHECK(m.reboot_target == MS_MODE_WIFI);
+        CHECK(m.reboot_flaps == 1);
+        CHECK(!m.reboot_boot_usb);           // the next boot is wireless (row 2), not USB
+        CHECK(m.have_byte && m.s.flaps == 0 && m.notices == 0);   // the daemon was alive all along
+    }
+    // USB, stay_wl, cable in and live daemon, busy: the notice shows and the switch waits for the gate
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_USB, MS_WL_BLE, 0);
+        m.stay_wl = true;
+        m.busy = MS_BUSY_DRAFT;
+        sim_set_sof(&m, true);
+        CHECK(!run_to(&m, S(70)));
+        CHECK(m.out.act == MS_ACT_NOTICE && m.out.waiting);
+        CHECK(m.notices > 0);
+        m.busy = 0;
+        CHECK(run_to(&m, m.t + MS_STEP_MS));
+        CHECK(m.reboot_target == MS_MODE_BLE && m.reboot_t - S(70) <= MS_STEP_MS);
+    }
+    // USB, stay_wl, cable in and live daemon, asleep: switches at 60 s with no notice (the busy gate lets a dark dial through)
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_USB, MS_WL_WIFI, 0);
+        m.stay_wl = true;
+        m.busy = MS_BUSY_VOICE;
+        m.asleep = true;
+        sim_set_sof(&m, true);
+        CHECK(run_to(&m, S(70)));
+        CHECK(m.reboot_t == S(60) && m.reboot_target == MS_MODE_WIFI);
+        CHECK(m.notices == 0);
+    }
+    // USB, stay_wl, cable in, live daemon, wl_mode unset or invalid: no target, so it stays in USB
+    {
+        const uint8_t none[] = { MS_WL_UNSET, 3, 255 };
+        for (unsigned i = 0; i < sizeof none / sizeof none[0]; i++) {
+            sim_t m;
+            sim_init(&m, MS_MODE_USB, none[i], 0);
+            m.stay_wl = true;
+            sim_set_sof(&m, true);
+            CHECK(!run_to(&m, S(600)));
+            CHECK(m.out.act == MS_ACT_NONE && !m.out.waiting && m.notices == 0);
+        }
+    }
+    // USB, stay_wl turned OFF at 30 s with the cable in and a live daemon: no switch (the daemon keeps the session; the normal rules apply)
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_USB, MS_WL_WIFI, 0);
+        m.stay_wl = true;
+        sim_set_sof(&m, true);
+        CHECK(!run_to(&m, S(30)));
+        m.stay_wl = false;
+        CHECK(!run_to(&m, S(300)));
+        CHECK(!m.rebooted && m.out.act == MS_ACT_NONE);
     }
     {
         sim_t m;
@@ -758,13 +829,14 @@ static void test_h8_stay_wl(void)
         sim_set_sof(&m, false);
         CHECK(!run_to(&m, m.t + 9900));
     }
-    // the daemon timer is not touched by stay_wl: SOF present, daemon silent for 59.9 s
+    // stay_wl: the daemon timer does not matter in USB; SOF present and the daemon silent still leaves at once (dwell passed)
     {
         sim_t m;
         usb_ready(&m, MS_WL_WIFI);
         m.stay_wl = true;
         m.daemon = false;
-        CHECK(!run_to(&m, m.last_byte + S(60) - 100));
+        CHECK(run_to(&m, m.t + 300));
+        CHECK(m.reboot_target == MS_MODE_WIFI);
     }
     // stay_wl with an unset wl_mode: nothing to stay on, nothing to leave to
     {
