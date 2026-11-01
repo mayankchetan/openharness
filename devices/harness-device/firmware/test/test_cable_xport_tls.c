@@ -28,6 +28,7 @@
 #include "mbedtls/ssl.h"
 
 #include "cable_frame.h"
+#include "cable_xport_ble.h"
 #include "cable_xport_tls.h"
 
 // ── bookkeeping ────────────────────────────────────────────────────────────────────────────────────
@@ -1322,6 +1323,298 @@ static int run_connect(char **argv)
     return 0;
 }
 
+// ── B2d: the wrapper over the REAL BLE transport (cable_xport_ble.c), with a CoC-shaped fake stack under it ──────────────────────────────────────
+//
+// The inner transport is not a fake any more: it is the transport the phone mode uses, with its receive ring, its credit rule, its all-or-nothing
+// write and its STALLED / BUSY handling. Only the NimBLE side is faked, by a port: send() puts one SDU on the wire (a byte queue the PSK server
+// reads), with knobs that answer STALLED (taken, then an unstall event a few ms later) and BUSY (nothing taken); and a "stack" thread takes the
+// server's bytes off the other queue and feeds them to the transport as SDUs of random sizes, but only into receive buffers the transport has armed.
+// Handshake and records then cross a link that behaves like a CoC: one-byte SDUs, small MTUs, stalls, a channel that closes mid-handshake.
+
+typedef struct {
+    q_t *rx, *tx;                  // rx: what the server sent (the stack feeds it to the transport); tx: what the dial sent
+    atomic_int mtu;                // peer SDU MTU for send()
+    atomic_int sdu_max;            // largest SDU the stack feeds (random 1..sdu_max)
+    atomic_int stall_every;        // every Nth send() is STALLED (taken, unstalled shortly after)
+    atomic_int busy_every;         // every Nth send() answers BUSY once (nothing taken)
+    atomic_int busy_first;         // the first N sends answer BUSY (nothing taken)
+    atomic_int sends, stalls, busies, armed, disconnects, sdus_in;
+    atomic_bool stop, closed;
+    atomic_bool unstall_due;
+    pthread_t stack_th, unstall_th;
+    uint32_t seed;
+} ble_end_t;
+static ble_end_t BE;
+
+static cable_xport_ble_send_t be_send(void *ctx, const uint8_t *data, size_t len)
+{
+    (void)ctx;
+    if (atomic_load(&BE.closed)) return BLE_SEND_ERR;
+    const int n = atomic_fetch_add(&BE.sends, 1) + 1;
+    const int busy_first = atomic_load(&BE.busy_first);
+    const int busy_every = atomic_load(&BE.busy_every);
+    if ((busy_first && n <= busy_first) || (busy_every && n % busy_every == 0 && n > busy_first)) {
+        atomic_fetch_add(&BE.busies, 1);
+        return BLE_SEND_BUSY;
+    }
+    size_t done = 0;
+    while (done < len) {
+        const int w = q_write(BE.tx, data + done, len - done);
+        if (w < 0) return BLE_SEND_ERR;
+        if (w == 0) { usleep(300); continue; }
+        done += (size_t)w;
+    }
+    const int every = atomic_load(&BE.stall_every);
+    if (every && n % every == 0) {
+        atomic_fetch_add(&BE.stalls, 1);
+        atomic_store(&BE.unstall_due, true);
+        return BLE_SEND_STALLED;
+    }
+    return BLE_SEND_OK;
+}
+static void be_rearm(void *ctx) { (void)ctx; atomic_fetch_add(&BE.armed, 1); }
+static void be_disconnect(void *ctx)
+{
+    (void)ctx;
+    atomic_fetch_add(&BE.disconnects, 1);
+    atomic_store(&BE.closed, true);
+    q_close(BE.tx);
+    q_close(BE.rx);
+}
+static size_t be_mtu(void *ctx) { (void)ctx; return (size_t)atomic_load(&BE.mtu); }
+static const cable_xport_ble_port_t BE_PORT = {NULL, be_send, be_rearm, be_disconnect, be_mtu};
+
+static void *be_stack(void *arg)
+{
+    (void)arg;
+    uint8_t buf[CABLE_XPORT_BLE_SDU_MAX];
+    while (!atomic_load(&BE.stop)) {
+        int a = atomic_load(&BE.armed);
+        if (a <= 0 || !atomic_compare_exchange_strong(&BE.armed, &a, a - 1)) { usleep(200); continue; }
+        BE.seed = BE.seed * 1103515245u + 12345u;
+        const size_t want = 1 + (BE.seed >> 8) % (size_t)atomic_load(&BE.sdu_max);
+        int n = 0;
+        while (!atomic_load(&BE.stop) && (n = q_read(BE.rx, buf, want, 50, 0)) == 0) {}
+        if (n <= 0) { atomic_store(&BE.stop, n < 0 ? true : false); break; }
+        atomic_fetch_add(&BE.sdus_in, 1);
+        if (!cable_xport_ble_on_sdu(buf, (size_t)n)) break;
+    }
+    return NULL;
+}
+
+static void *be_unstaller(void *arg)
+{
+    (void)arg;
+    while (!atomic_load(&BE.stop)) {
+        if (atomic_exchange(&BE.unstall_due, false)) { usleep(2000); cable_xport_ble_on_tx_unstalled(); }
+        else usleep(300);
+    }
+    return NULL;
+}
+
+// Bring a BLE link up: transport initialised, channel up, the stack thread and the unstaller running, a PSK server on the far side.
+static void be_start(link_t *l, int mtu, int sdu_max, int stall_every, int busy_every, int busy_first)
+{
+    memset(&BE, 0, sizeof BE);
+    q_init(&l->c2s);
+    q_init(&l->s2c);
+    BE.rx = &l->s2c;
+    BE.tx = &l->c2s;
+    atomic_init(&BE.mtu, mtu);
+    atomic_init(&BE.sdu_max, sdu_max);
+    atomic_init(&BE.stall_every, stall_every);
+    atomic_init(&BE.busy_every, busy_every);
+    atomic_init(&BE.busy_first, busy_first);
+    atomic_init(&BE.armed, 1);   // the channel opens with one receive buffer armed (ble_link's accept)
+    BE.seed = 17;
+    CHECK(cable_xport_ble_init(&BE_PORT));
+    cable_xport_ble_channel_up();
+    CHECK(pthread_create(&BE.stack_th, NULL, be_stack, NULL) == 0);
+    CHECK(pthread_create(&BE.unstall_th, NULL, be_unstaller, NULL) == 0);
+}
+
+static void be_stop(void)
+{
+    atomic_store(&BE.stop, true);
+    q_close(BE.rx);
+    q_close(BE.tx);
+    pthread_join(BE.stack_th, NULL);
+    pthread_join(BE.unstall_th, NULL);
+    cable_xport_ble_deinit();
+}
+
+static const cable_xport_t *be_wrap(void)
+{
+    const cable_xport_t *t = cable_xport_tls_wrap(cable_xport_ble(), IDENT, KEY_A, 32);
+    CHECK(t != NULL);
+    return t;
+}
+
+static void run_ble_echo(const char *name, int mtu, int sdu_max, int stall_every, int busy_every, int busy_first, uint32_t frames)
+{
+    link_t *l = calloc(1, sizeof(*l));
+    be_start(l, mtu, sdu_max, stall_every, busy_every, busy_first);
+    server_t s;
+    server_start(&s, l, SRV_ECHO);
+    server_run(&s);
+    const cable_xport_t *t = be_wrap();
+    CHECK(t->kind == CABLE_XPORT_BLE && !strcmp(t->name, "tls") && t->inner == cable_xport_ble());   // the layers above see "ble"
+    int64_t t0 = ms_now();
+    CHECK(t->open(t));
+    const int64_t hs_ms = ms_now() - t0;
+    CHECK(t->is_up(t) && cable_xport_tls_last_error(t) == 0);
+    cable_decoder_buf_t d;
+    decoder_init(&d);
+    check_t c = { 0 };
+    uint32_t sent = 0;
+    while (sent < frames) {
+        CHECK(send_frame(t, sent) > 0);
+        sent++;
+        read_frames(t, &d, &c, sent, 0);
+    }
+    read_frames(t, &d, &c, frames, 30000);
+    CHECK(c.seen == frames && c.bad == 0 && d.corrupt_frames == 0 && d.discarded_bytes == 0);
+    CHECK(strcmp(s.version, "TLSv1.2") == 0 && strcmp(s.suite, "TLS-ECDHE-PSK-WITH-AES-128-CBC-SHA256") == 0);
+    CHECK(atomic_load(&s.hs_rc) == 0);
+    if (stall_every) CHECK(atomic_load(&BE.stalls) > 0);
+    if (busy_every || busy_first) CHECK(atomic_load(&BE.busies) > 0);
+    t->close(t);
+    CHECK(atomic_load(&BE.disconnects) == 1 && atomic_load(&BE.closed) && !t->is_up(t));   // closing the wrapper closes the channel, once
+    server_join(&s);
+    cable_xport_tls_free(t);
+    be_stop();
+    free(l);
+    printf("ok %s: %u frames echoed intact, handshake %lld ms, %d SDUs sent, %d SDUs received, %d stalls, %d busy\n", name, frames, (long long)hs_ms,
+           atomic_load(&BE.sends), atomic_load(&BE.sdus_in), atomic_load(&BE.stalls), atomic_load(&BE.busies));
+}
+
+static void test_over_the_ble_transport(void)
+{
+    run_ble_echo("over BLE, 4032 B SDUs both ways", 4032, 4032, 0, 0, 0, 120);
+    run_ble_echo("over BLE, phone MTU 504, SDUs of 1..504 B", 504, 504, 0, 0, 0, 80);
+    run_ble_echo("over BLE, one-byte SDUs, 23 B MTU", 23, 1, 0, 0, 0, 12);
+    run_ble_echo("over BLE, a stall every 3rd send and a BUSY every 4th", 504, 300, 3, 4, 0, 60);
+    run_ble_echo("over BLE, the first 3 sends BUSY (nothing taken)", 504, 504, 0, 0, 3, 40);
+}
+
+static void test_ble_concurrent_writer_and_reader(void)
+{
+    link_t *l = calloc(1, sizeof(*l));
+    be_start(l, 504, 400, 4, 6, 0);
+    server_t s;
+    server_start(&s, l, SRV_ECHO);
+    server_run(&s);
+    const cable_xport_t *t = be_wrap();
+    CHECK(t->open(t));
+    duo_t d = { .t = t, .frames = 150 };
+    atomic_init(&d.stop, false);
+    pthread_t w, r;
+    CHECK(pthread_create(&r, NULL, duo_reader, &d) == 0);
+    CHECK(pthread_create(&w, NULL, duo_writer, &d) == 0);
+    pthread_join(w, NULL);
+    pthread_join(r, NULL);
+    CHECK(d.rc == 0 && d.seen == d.frames && d.bad == 0);
+    t->close(t);
+    server_join(&s);
+    cable_xport_tls_free(t);
+    be_stop();
+    free(l);
+    printf("ok over BLE, concurrent writer and reader on a stalling link: %u frames, none corrupt, max write %lld ms\n", d.frames, (long long)d.max_write_ms);
+}
+
+static void *be_closer(void *arg)
+{
+    usleep(((unsigned)(uintptr_t)arg) * 1000);
+    cable_xport_ble_channel_down();      // the stack: the channel closed under us
+    q_close(BE.rx);
+    q_close(BE.tx);
+    return NULL;
+}
+
+static void test_ble_channel_closes_mid_handshake(void)
+{
+    // a server that never answers: the phone closes the channel 150 ms in. open() ends then, not at the 5 s deadline, with an error code and no leak.
+    link_t *l = calloc(1, sizeof(*l));
+    be_start(l, 504, 504, 0, 0, 0);
+    server_t s;
+    server_start(&s, l, SRV_SILENT);
+    server_run(&s);
+    const cable_xport_t *t = be_wrap();
+    pthread_t th;
+    CHECK(pthread_create(&th, NULL, be_closer, (void *)(uintptr_t)150) == 0);
+    const int64_t t0 = ms_now();
+    CHECK(!t->open(t));
+    const int64_t ms = ms_now() - t0;
+    pthread_join(th, NULL);
+    CHECK(ms >= 100 && ms < 2500);
+    CHECK(cable_xport_tls_last_error(t) != 0 && !t->is_up(t));
+    server_join(&s);
+    cable_xport_tls_free(t);
+    be_stop();
+    free(l);
+    printf("ok over BLE, channel closed mid-handshake: open failed after %lld ms\n", (long long)ms);
+}
+
+static void test_ble_handshake_deadline(void)
+{
+    // a phone that holds the channel open and a daemon that never answers (the tunnel is down): 5 s, then open() fails and the channel is closed
+    link_t *l = calloc(1, sizeof(*l));
+    be_start(l, 504, 504, 0, 0, 0);
+    server_t s;
+    server_start(&s, l, SRV_SILENT);
+    server_run(&s);
+    const cable_xport_t *t = be_wrap();
+    const int64_t t0 = ms_now();
+    CHECK(!t->open(t));
+    const int64_t ms = ms_now() - t0;
+    CHECK(ms >= 4900 && ms < 5800);
+    CHECK(atomic_load(&BE.disconnects) == 1 && atomic_load(&BE.closed));   // the wrapper closed the channel
+    CHECK(cable_xport_tls_last_error(t) != MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE);   // a timeout is not an alert, so not a refusal (net_hs_class.h)
+    server_join(&s);
+    cable_xport_tls_free(t);
+    be_stop();
+    free(l);
+    printf("ok over BLE, handshake deadline: open failed after %lld ms, channel closed, not a refusal\n", (long long)ms);
+}
+
+static void test_ble_reopen_on_a_new_channel(void)
+{
+    // the channel closes after a good session; the phone opens a new one; a new handshake runs on a clean ring (nothing of the old session leaks in)
+    link_t *l = calloc(1, sizeof(*l));
+    be_start(l, 504, 504, 0, 0, 0);
+    server_t s;
+    server_start(&s, l, SRV_ECHO);
+    server_run(&s);
+    const cable_xport_t *t = be_wrap();
+    CHECK(t->open(t));
+    cable_decoder_buf_t d;
+    decoder_init(&d);
+    check_t c = { 0 };
+    for (uint32_t i = 0; i < 10; i++) CHECK(send_frame(t, i) > 0);
+    read_frames(t, &d, &c, 10, 10000);
+    CHECK(c.seen == 10 && c.bad == 0);
+    t->close(t);
+    server_join(&s);
+    be_stop();
+    // a second channel, a second server, the same wrapper
+    be_start(l, 504, 504, 0, 0, 0);
+    server_t s2;
+    server_start(&s2, l, SRV_ECHO);
+    server_run(&s2);
+    CHECK(t->open(t));
+    decoder_init(&d);
+    c = (check_t){ 0 };
+    for (uint32_t i = 0; i < 10; i++) CHECK(send_frame(t, i) > 0);
+    read_frames(t, &d, &c, 10, 10000);
+    CHECK(c.seen == 10 && c.bad == 0 && d.corrupt_frames == 0);
+    t->close(t);
+    server_join(&s2);
+    cable_xport_tls_free(t);
+    be_stop();
+    free(l);
+    printf("ok over BLE, a new channel after a closed one: second handshake and 10 frames intact\n");
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -1353,6 +1646,12 @@ int main(int argc, char **argv)
     test_poll_and_idle();
     test_handshake_deadline();
     test_no_key_in_logs();
+    // B2d: the same wrapper over the real BLE transport
+    test_over_the_ble_transport();
+    test_ble_concurrent_writer_and_reader();
+    test_ble_channel_closes_mid_handshake();
+    test_ble_handshake_deadline();
+    test_ble_reopen_on_a_new_channel();
     printf("cable_xport_tls: %u checks PASS\n", checks);
     return 0;
 }
