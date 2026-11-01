@@ -4,8 +4,8 @@ Status: DRAFT. Source of truth for the wire format. The design reasoning is in t
 (`briefs/research/2026-10-29-wifi-mode-spec.md` in the workbench repository, sections 4, 5 and 7).
 This file holds only what an implementer on either side needs to be byte-exact.
 
-What is implemented now: section 2 (the ADPCM voice block) and its golden vectors, section 4 (keepalive timing, W13), and section 3 (the provisioning
-messages over the USB cable, W9 and W10). Section 1 describes work that is not finished (W8, W11); it is here so that
+What is implemented now: section 2 (the ADPCM voice block) and its golden vectors, section 4 (keepalive timing, W13), section 3 (the provisioning
+messages over the USB cable, W9 and W10) and section 7 (the settings report and the CLI, W16). Section 1 describes work that is not finished (W8, W11); it is here so that
 the parts of the wire format are in one place.
 
 Labels. "[U]" means "from general knowledge, not yet checked against a document or code". Each [U]
@@ -313,3 +313,27 @@ Boot order in `app_main`: factory-reset countdown, `mode_glue_boot()` (record, N
 if the decision is Wi-Fi, the link, the focus restored, the `mode_sw` task started with the mode that really started. A switch is: log the reason
 (`last_words`: "mode switch"), seal the focus and the flap count in the RTC record, store `boot_usb`, restart. Three switches in a row, then none until 10
 minutes of uptime in one mode; none before 60 s of uptime.
+
+## 7. The settings report, the link-state text, the Settings screen and the CLI (task W16)
+
+Settings report. A dial may add `linkMode` to the `settings` object of `hello` and `settings.state`: the string `"usb"` or `"wifi"`, the link the
+dial chose for the time its cable is out (`wl_mode` 0 or 1). The daemon keeps it as `DeviceSettings.linkMode` for those two strings only. Any other
+value, or none, leaves the key out and the rest of the report parses as before (`cableSession.spec.ts`, the test named "W16"). It is read-only: the
+daemon drops it from a `settings.set` patch, and no firmware reports it yet. The settings never carry the Wi-Fi password, the key or the address of
+the daemon (section 3).
+
+`stay_wl` is on no wire path. No message of this protocol and no CLI verb sets or reads it (`dialWifiHelp.spec.ts` checks the help and the usage
+text). It lives in the dial's NVS (section 6) and is written by nothing yet: the on-dial toggle that must be able to turn it off is not built (see
+"Open" below).
+
+Link-state text. While the dial is not connected it shows the wordmark and, in Wi-Fi mode, one dim line under it from `net_state_caption`
+(`net_state.c`, task W11; drawn by `render_brand` in `ui_habitat.c`): `Joining Wi-Fi` (JOINING), `Wi-Fi: no address` (NO_IP), `Daemon not reachable`
+(DAEMON_UNREACHABLE), `Key refused: reset dial` (AUTH_FAILED). OFF and UP show nothing. The line never shows the network name, the password or the key.
+
+CLI. `harness dial wifi set|show|forget|rotate|on|off|firewall` was built in W9. W16 added only the sentence that the dial joins 2.4 GHz networks
+only (the help and the output of `set`). The user note is `docs/dial-wifi.md`.
+
+Open (decision for the lead, found in W16). The Settings list ("controls") has no touch path in the current firmware: `A_SETTINGS` occurs only in
+the action enum, its `dispatch` case and the UI gallery, and `settings_item()` rows such as Nap and Machines are reached only through it (workbench
+`briefs/research/2026-10-28-dial-ui-map.md`, fact 3). A Link row and a `stay_wl` toggle added to that list could not be reached on the glass, and a
+`stay_wl` that has been switched on could not be switched off. Until a way to reach them is chosen, nothing writes `stay_wl`.
