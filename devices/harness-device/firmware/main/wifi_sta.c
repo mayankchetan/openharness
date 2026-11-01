@@ -87,6 +87,10 @@ static bool fail(const char *what, esp_err_t e, bool driver_inited)
 }
 
 // HOOK 1 (wifi_sta.h). The two profiles are separate names on purpose: the battery plan changes NET_PS_IDLE and nothing else. Default IDLE = ACTIVE.
+// net_link.c power_profile_sync() calls the hook with IDLE while the chip may sleep (S2). IDLE stays MIN_MODEM on purpose: WIFI_PS_MAX_MODEM with
+// the listen interval of 3 (set at association, below) is the spec's candidate, but no measurement of its downlink delay or of the link's survival
+// over it exists, and a wrong guess shows up as a dial that drops its session while asleep. Flip this one line only after the bench A/B (gap report
+// 2026-11-01-sleep-wifi-gaps.md, S2); test_wifi_power_source.py pins the current value so the flip is a deliberate edit of both.
 #define NET_PS_ACTIVE WIFI_PS_MIN_MODEM
 #define NET_PS_IDLE WIFI_PS_MIN_MODEM
 

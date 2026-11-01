@@ -64,6 +64,6 @@ void nwifi_log_ap(void);
 // esp_wifi_set_ps() and nothing else of the driver: it does NOT touch the listen interval, which is a field of the association request and is
 // set once, in nwifi_start(); changing it later would mean disconnecting and re-associating, which drops the TLS session. WIFI_PS_NONE is never
 // used. Today both profiles are WIFI_PS_MIN_MODEM (the mode every RTT number was measured with): ACTIVE = wake every DTIM; IDLE (screen asleep)
-// is the battery plan's to set, and nothing calls it with IDLE yet. Needs a started driver; false on a bad profile or a refused call (logged).
+// is the battery plan's to set, and net_link.c power_profile_sync() calls it with IDLE while the chip may sleep (S2). Needs a started driver; false on a bad profile or a refused call (logged).
 typedef enum { NET_POWER_ACTIVE, NET_POWER_IDLE } net_power_t;
 bool net_power_profile(net_power_t profile);

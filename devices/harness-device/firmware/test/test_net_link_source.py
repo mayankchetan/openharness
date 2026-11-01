@@ -122,13 +122,13 @@ assert 'task_create_psram(net_init_task' not in net
 # ── 3. what the PSRAM-stack task can reach ──────────────────────────────────────────────────────────
 FLASH = re.compile(r'\b(nvs_\w+|config_\w+|esp_ota_\w+|esp_partition_\w+|esp_flash_\w+|spi_flash_\w+|esp_phy_\w+|fw_update_\w+|esp_wifi_init|esp_wifi_start|esp_wifi_stop|esp_wifi_deinit|nwifi_start|nwifi_stop|'
                    r'esp_mmap\w*|esp_vfs_\w+|fopen|fwrite|remove|rename|last_words_\w+)\b')
-reachable = ['net_link_task', 'join_wifi', 'note_open_failure', 'log_stacks', 'serve', 'backoff', 'sleep_ms', 'ui_flush', 'post']
+reachable = ['net_link_task', 'join_wifi', 'note_open_failure', 'log_stacks', 'serve', 'backoff', 'sleep_ms', 'ui_flush', 'post', 'power_profile_sync']
 for name in reachable:
     assert not FLASH.search(body(net, name)), f'{name} (reachable from net_link) names a flash operation: {FLASH.search(body(net, name)).group(0)}'
 task = body(net, 'net_link_task')
 assert 'config_net_load' not in task and 'nwifi_start' not in task, 'net_link reads no NVS'
 sta = code('wifi_sta.c')
-for name in ('nwifi_connect', 'nwifi_disconnect', 'nwifi_bits', 'nwifi_wait', 'nwifi_log_ap', 'on_event'):
+for name in ('nwifi_connect', 'nwifi_disconnect', 'nwifi_bits', 'nwifi_wait', 'nwifi_log_ap', 'on_event', 'net_power_profile'):
     assert not FLASH.search(body(sta, name)), f'{name} (reachable from net_link or the event task) names a flash operation'
 for name in ('cable_xport_tcp.c', 'net_state.c', 'log_ring.c'):
     assert not FLASH.search(code(name)), f'{name} names a flash operation'

@@ -67,9 +67,23 @@ static void ui_flush(void)
     if (atomic_exchange(&s_ui_dirty, false)) ui_net_status_changed();
 }
 
+// POWER (S3). The Wi-Fi power-save profile follows the power policy: IDLE while the chip may sleep (the policy's "relaxed" flag, S2), ACTIVE
+// otherwise. Run from this task's own ticks, so the power code never touches the radio and USB mode (no driver) never gets here. A wake takes
+// effect at the next tick of the task, at most one relaxed wait (1 to 2 s) after the screen woke. The profile is remembered only when the driver
+// took it, so a refused call is tried again at the next tick. Today IDLE is the same mode as ACTIVE (wifi_sta.c NET_PS_IDLE): see there.
+static bool s_idle_profile;   // net_link task only
+
+static void power_profile_sync(void)
+{
+    const bool idle = power_sleep_relaxed();
+    if (idle == s_idle_profile) return;
+    if (net_power_profile(idle ? NET_POWER_IDLE : NET_POWER_ACTIVE)) s_idle_profile = idle;
+}
+
 static void sleep_ms(uint32_t ms)
 {
     while (ms) {
+        power_profile_sync();
         const uint32_t step = power_sleep_wait_ms(PP_POLLER_NET_BACKOFF, SLICE_MS);   // 2 s while the chip may sleep
         const uint32_t slice = ms < step ? ms : step;
         vTaskDelay(pdMS_TO_TICKS(slice));
@@ -197,6 +211,7 @@ static const char *serve(const cable_xport_t *tls)
     int64_t stale_since_us = 0;
     bool held = true;
     for (;;) {
+        power_profile_sync();
         const bool session = cable_client_is_connected();
         if (session == held) {
             if (session) power_sleep_release(PP_HOLD_LINK);
@@ -228,6 +243,7 @@ static void net_link_task(void *arg)
     net_backoff_reset(&ladder);
     for (;;) {
         ui_flush();
+        power_profile_sync();
         // POWER (W13, S1). Idle, this task holds nothing: not in the backoff waits. Over the join and the handshake it holds PP_HOLD_LINK, the power
         // policy's hold for a transport with traffic, so the chip does not light-sleep in the middle of a handshake. A failed join or handshake lets it
         // go before any wait; a link that came up keeps it into serve(), which holds it until the session is up. With battery sleep off these calls

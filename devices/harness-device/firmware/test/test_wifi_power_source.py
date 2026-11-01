@@ -78,7 +78,7 @@ assert 'WIFI_PS_NONE' not in sta and 'WIFI_PS_NONE' not in hdr, 'power save is n
 active = re.search(r'#define\s+NET_PS_ACTIVE\s+(\w+)', sta)
 idle = re.search(r'#define\s+NET_PS_IDLE\s+(\w+)', sta)
 assert active and active.group(1) == 'WIFI_PS_MIN_MODEM', 'ACTIVE is min-modem'
-assert idle and idle.group(1) in ('WIFI_PS_MIN_MODEM', 'WIFI_PS_MAX_MODEM'), 'IDLE is a modem-sleep mode'
+assert idle and idle.group(1) == 'WIFI_PS_MIN_MODEM',     'IDLE stays min-modem until a bench A/B of max-modem (listen interval 3) is in: S3 of the sleep + Wi-Fi work wires the hook, and flips nothing'
 assert 'NET_PS_ACTIVE' in hook and 'NET_PS_IDLE' in hook, 'each profile maps to its mode through the two macros'
 assert re.search(r'typedef enum\s*\{\s*NET_POWER_ACTIVE\s*,\s*NET_POWER_IDLE\s*\}\s*net_power_t;', hdr), 'two profiles in the header'
 assert re.search(r'\bbool\s+net_power_profile\(net_power_t\s+\w+\);', hdr), 'declared in wifi_sta.h'
@@ -116,22 +116,35 @@ h = task.index(HOLD)
 assert h < task.index('join_wifi()') < task.index('tls->open(tls)'), 'the hold covers the join and the handshake'
 r1 = task.index('if (!opened) ' + REL)
 assert task.index('tls->open(tls)') < r1 < task.index('backoff('), 'a failed join or handshake lets the hold go before any wait'
-assert not re.search(r'(continue|return|break|goto)', task[h:r1]), 'no way out between the hold and the release'
+assert not re.search(r'\b(continue|return|break|goto)\b', task[h:r1]), 'no way out between the hold and the release'
 # a link that came up keeps the hold into serve(); the task lets it go when serve() returns, before the relink backoff
 s_idx = task.index('serve(tls)')
 r2 = task.index(REL, s_idx)
 assert r1 < s_idx < r2 < task.rindex('backoff('), 'serve() runs with the hold; it is released right after, before the relink wait'
-assert task.index('post(NET_EV_LINK_UP)') < s_idx and not re.search(r'(continue|return|break|goto)', task[task.index('post(NET_EV_LINK_UP)'):r2]), 'no way out of the held window'
+assert task.index('post(NET_EV_LINK_UP)') < s_idx and not re.search(r'\b(continue|return|break|goto)\b', task[task.index('post(NET_EV_LINK_UP)'):r2]), 'no way out of the held window'
 # serve(): the hold lasts while there is no session (link up to session up); it follows cable_client_is_connected(), and nothing else of power
 assert 'cable_client_is_connected()' in serve_fn and re.search(r'bool held = true;', serve_fn), 'serve() starts with the hold the task passed in'
 assert serve_fn.index(HOLD) < serve_fn.index('nwifi_wait(') and serve_fn.index(REL) < serve_fn.index('nwifi_wait('), 'the hold follows the session once per tick, before the wait'
-assert not re.search(r'(return)', serve_fn[:serve_fn.index('nwifi_wait(')]), 'no way out of serve() between the hold and the wait'
+assert not re.search(r'\b(return)\b', serve_fn[:serve_fn.index('nwifi_wait(')]), 'no way out of serve() between the hold and the wait'
 for name in ('backoff', 'sleep_ms', 'join_wifi', 'note_open_failure'):
     assert 'power_sleep_hold' not in body(net, name) and 'power_sleep_release' not in body(net, name), f'{name} takes or releases no hold of its own'
 assert '#include "power_sleep.h"' in text('net_link.c')
 sleep_h = text('power_sleep.h')
 assert re.search(r'static inline void power_sleep_hold\(uint32_t bits\) \{ \(void\)bits; \}', sleep_h), 'an empty inline when battery sleep is off'
 assert re.search(r'static inline void power_sleep_release\(uint32_t bits\) \{ \(void\)bits; \}', sleep_h)
+
+# ── 3b. The hook is wired (S3): net_link follows the power policy ───────────────────────────────────
+# IDLE while the chip may sleep (the policy's "relaxed", S2), ACTIVE otherwise. One call site, in one helper, run from the task's own ticks (the serve
+# tick, the backoff slice, the top of the task loop): never from the power code, which has no business with the radio, and never in USB mode, where
+# the driver is not started and set_ps would only log an error.
+assert len(re.findall(r'\bnet_power_profile\(', net)) == 1, 'one call site of net_power_profile in net_link.c'
+sync = body(net, 'power_profile_sync')
+assert re.search(r'net_power_profile\(idle \? NET_POWER_IDLE : NET_POWER_ACTIVE\)', sync) and 'power_sleep_relaxed()' in sync, 'IDLE when relaxed, ACTIVE otherwise'
+assert re.search(r'static bool s_idle_profile', net) and 's_idle_profile = idle' in sync, 'the profile is set on an edge, and remembered only when the driver took it'
+for name in ('serve', 'sleep_ms', 'net_link_task'):
+    assert 'power_profile_sync()' in body(net, name), f'{name} follows the policy'
+assert 'net_power_profile' not in stripped('power_sleep.c') and 'net_power_profile' not in stripped('power_policy.c'), 'the power code does not touch the radio'
+assert re.search(r'static inline bool power_sleep_relaxed\(void\) \{ return false; \}', sleep_h), 'flag off: always ACTIVE'
 
 # ── 4. Hook 2: welcome.keepaliveMs on the dial ──────────────────────────────────────────────────────
 kh = re.sub(r'//[^\n]*', '', text('cable_keepalive.h'))
