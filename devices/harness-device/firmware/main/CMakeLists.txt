@@ -158,6 +158,9 @@ if(CONFIG_BT_NIMBLE_ENABLED)
         target_compile_definitions(${COMPONENT_LIB} PRIVATE BLE_DEV_ALLOW_UNBONDED=1)
     endif()
 endif()
+# A development flag does not persist: read once above, then gone from the cache, so the next build in this directory without -D is a product build (the top-level
+# CMakeLists.txt warns and adds +bledev to the version while it is on).
+unset(BLE_DEV_ALLOW_UNBONDED CACHE)
 
 # snprintf() is bounded (it truncates, never overflows), but -O2 enables a noisy
 # format-truncation analysis that errors on safe same-size copies. Keep it as a warning, not error.

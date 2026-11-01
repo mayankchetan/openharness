@@ -76,11 +76,20 @@ contract.
 
 - Pairing: LE Secure Connections, numeric comparison. The dial is DisplayYesNo and shows a 6-digit number with Yes and No.
   Pairing is allowed only inside the window the user opens in Settings (`pair_window_ms` = 120000 ms).
-- The channel is accepted only on a link that is encrypted and bonded. Otherwise the dial refuses the accept with
-  "insufficient encryption". The dial calls `ble_gap_security_initiate` after connect, for a bonded and an unbonded peer. A
+- The channel is accepted only on a link that is encrypted, bonded and AUTHENTICATED (numeric comparison, not Just Works: a phone
+  that says "no input, no output" gets an unauthenticated bond and is refused) with a link key of at least `key_size_min` = 16
+  bytes. Otherwise the dial refuses the accept with "insufficient encryption". The dial calls `ble_gap_security_initiate` after connect, for a bonded and an unbonded peer. A
   link not encrypted `enc_deadline_ms` = 3000 ms after connect is dropped.
 - The phone uses the secure channel call (`createL2capChannel(0x0080)`). Whether Android starts pairing by itself after a refusal
   is [U] until bench B0a; the dial does not rely on it.
+- Bonds. A new bond is made only inside the pairing window (closed unless the user opened it), and never by evicting an old one:
+  with `max_bonds` full a third pairing is refused, and "Forget phone" frees a slot. Outside the window the dial pairs without
+  bonding, so nothing is written and the channel is refused.
+- Abuse bounds. A link that opens and loses `churn_limit` = 3 channels without one reaching TLS is ended, and the dial waits
+  `cooldown_ms` = 10000 ms before it advertises again. A peer that is not authenticated-bonded (any peer on a development build)
+  may stay connected without a channel for `idle_cap_ms` = 10000 ms, then the link is dropped. After three TLS alerts in a row the
+  wait is the flat `cooldown_ms` for such a peer; only an authenticated-bonded peer gets the escalating refused ladder (30 s to
+  5 min), so an attacker cannot walk the ladder up against the real phone.
 - Development flag: a build with `BLE_DEV_ALLOW_UNBONDED=1` accepts the channel without a bond, because TLS-PSK still
   authenticates both ends. It is off in every product config (a source test fails the build if it is on in the shipped
   overlay).
@@ -157,6 +166,10 @@ out of range).
 | `relay_full_close_ms` | 4000 | queue full, then close |
 | `ws_ping_ms` | 25000 | WebSocket ping |
 | `max_bonds` | 2 | bonded phones |
+| `key_size_min` | 16 | link key bytes the dial requires |
+| `churn_limit` | 3 | channels without TLS per link |
+| `cooldown_ms` | 10000 | flat silence after abuse or an unproven refusal |
+| `idle_cap_ms` | 10000 | untrusted peer, connected, no channel |
 | `ws_backoff_jitter_percent` | 20 | back-off jitter, plus or minus |
 
 ## 8. Voice over BLE

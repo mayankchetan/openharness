@@ -84,6 +84,10 @@ CONSTS = [
     ("relay_full_close_ms", 4000, "ms"),      # phone: a queue full this long closes both sides
     ("ws_ping_ms", 25000, "ms"),              # phone: WebSocket ping, keeps the tunnel idle timeout away
     ("max_bonds", 2, "count"),
+    ("key_size_min", 16, "bytes"),            # the link key the dial requires of a phone it trusts
+    ("churn_limit", 3, "count"),              # channels of one link that end without TLS, then the dial ends the link
+    ("cooldown_ms", 10000, "ms"),             # flat silence before advertising again after an abusive or unproven peer
+    ("idle_cap_ms", 10000, "ms"),             # a peer that is not authenticated-bonded may sit connected, with no channel, this long
     ("ws_backoff_jitter_percent", 20, "count"),   # phone: each back-off delay is the ladder step +/- this many percent, uniformly (chosen 2026-11-01; the plan said "with jitter")
 ]
 

@@ -69,8 +69,20 @@ for path in sorted(fw.iterdir()):
         assert FLAG not in path.read_text(), f'{path.name} sets the unbonded development flag'
 top_cmake = (fw / 'CMakeLists.txt').read_text()
 main_cmake = text('CMakeLists.txt')
-assert FLAG not in top_cmake, 'the top-level CMakeLists must not mention the flag'
-assert not re.search(r'set\s*\(\s*' + FLAG, main_cmake, re.I), 'main/CMakeLists.txt must not set the flag'
+# B4e (review M2): the top level reads the flag in ONE block, before project(): a configure warning and the version suffix +bledev (the image's own
+# esp_app_desc version says it is a development image). Nowhere else, and it never sets the flag.
+top_code = re.sub(r'#[^\n]*', '', top_cmake)
+dev_block = re.search(r'if\(' + FLAG + r'\)(.*?)\nendif\(\)', top_code, re.S)
+assert dev_block, 'the top-level CMakeLists has the one block for the development flag'
+assert 'message(WARNING' in dev_block[1] and 'set(PROJECT_VER "${_dev_base_ver}+bledev")' in dev_block[1] and 'version.txt' in dev_block[1]
+assert FLAG not in top_code.replace(dev_block[0], ''), 'the flag is read in that block and nowhere else at the top level'
+assert not re.search(r'(?<![A-Za-z_])set\s*\(\s*' + FLAG, top_code), 'the top level does not set the flag'
+assert top_code.index(dev_block[0]) < top_code.index('project(interns_commander)'), 'PROJECT_VER is set before project()'
+assert not re.search(r'(?<![A-Za-z_])set\s*\(\s*' + FLAG, main_cmake, re.I), 'main/CMakeLists.txt must not set the flag'
+# and it does not persist: read once in the component, then removed from the cache (a later build in the same directory without -D is a product build)
+assert 'unset(' + FLAG + ' CACHE)' in main_cmake
+assert main_cmake.index('unset(' + FLAG + ' CACHE)') > main_cmake.index('target_compile_definitions(${COMPONENT_LIB} PRIVATE ' + FLAG + '=1)')
+assert main_cmake.count('unset(' + FLAG) == 1
 assert not re.search(r'option\s*\(\s*' + FLAG, main_cmake, re.I), 'the flag is not an option with a default'
 guard = re.search(r'if\(CONFIG_BT_NIMBLE_ENABLED\)(.*?)\nendif\(\)', main_cmake, re.S)
 assert guard, 'the phone mode is built only when NimBLE is'
@@ -94,7 +106,7 @@ assert len(re.findall(r'\bDEV_UNBONDED\b', link)) == 5, 'DEV_UNBONDED: two defin
 # nothing in the repository's build scripts under the firmware tree turns it on either
 for path in list((fw / 'scripts').glob('*')) + list((fw / 'tools').rglob('*')):
     if path.is_file() and path.suffix in ('.sh', '.py', '.ps1', '.cmake', '.txt', '.md', ''):
-        assert FLAG not in path.read_text(errors='replace') or path.suffix == '.md', f'{path.name} mentions the flag'
+        assert not re.search(FLAG + r'\s*[=:]\s*(1|ON|TRUE|YES)', path.read_text(errors='replace'), re.I), f'{path.name} turns the development flag on (the guards may name it, never set it)'
 
 # ── 2. no PHY request ───────────────────────────────────────────────────────────────────────────────
 for name in ('ble_link.c', 'cable_xport_ble.c', 'ble_state.c'):
@@ -131,18 +143,59 @@ assert 'ble_l2cap_create_server(COC_PSM, COC_MTU, coc_event, NULL)' in link
 
 # ── 4. the accept policy ────────────────────────────────────────────────────────────────────────────
 accept = body(link, 'coc_event')
-assert 'ble_accept_check(enc, bonded, DEV_UNBONDED, s_chan != NULL)' in accept
+assert 'ble_accept_check(&sec, DEV_UNBONDED, s_chan != NULL)' in accept and 'link_sec(event->accept.conn_handle, &sec)' in accept
 assert re.search(r'case BLE_ACCEPT_REFUSE_ENC:.*?return BLE_HS_EENCRYPT;', accept, re.S), 'a refusal for encryption is "insufficient encryption" on the air'
 assert re.search(r'case BLE_ACCEPT_OK:\s*return rx_arm\(event->accept\.chan\);', accept), 'only OK arms a receive buffer'
-assert 'sec_state.encrypted' in link and 'sec_state.bonded' in link, 'the policy reads the link, not a flag of ours'
+lsec = body(link, 'link_sec')
+for field in ('encrypted', 'bonded', 'authenticated', 'key_size'):
+    assert f'sec_state.{field}' in lsec, f'the policy reads {field} from the link, not from a flag of ours'
 assert 'ble_encryption_required(DEV_UNBONDED)' in body(link, 'gap_event'), 'the 3 s deadline is waived only where the bond is'
-assert re.search(r'if \(enc && \(bonded \|\| DEV_UNBONDED\)\) post\(BLE_EV_ENCRYPTED\);', body(link, 'gap_event')), 'ENCRYPTED needs an encrypted link and a bond (or the dev flag)'
-assert 'ble_hs_cfg.sm_sc = 1' in link and 'ble_hs_cfg.sm_mitm = 1' in link and 'BLE_HS_IO_DISPLAY_YESNO' in link and 'ble_hs_cfg.sm_bonding = 1' in link
+note = body(link, 'note_security')
+assert 'ble_sec_trusted(&sec)' in note and 'ble_set_trusted(&s_ble, true)' in note, 'a link that passes the rule is marked trusted before ENCRYPTED'
+assert re.search(r'if \(trusted \|\| \(DEV_UNBONDED && sec\.encrypted\)\) post\(BLE_EV_ENCRYPTED\);', note), 'ENCRYPTED needs a trusted link (or, in the dev build, any encrypted one)'
+assert 'note_security(event->enc_change.conn_handle)' in body(link, 'gap_event')
+assert 'ble_hs_cfg.sm_sc = 1' in link and 'ble_hs_cfg.sm_mitm = 1' in link and 'BLE_HS_IO_DISPLAY_YESNO' in link and 'ble_hs_cfg.sm_bonding = 0;' in link
 
 # ── 5. the link task: no flash operation, the key read once ─────────────────────────────────────────
+# B4e (review H1): the bond store never evicts; a bond is made only inside the pairing window; a repeat pairing never deletes a bond outside it
+assert 'ble_store_util_status_rr' not in link and 'ble_gap_unpair' not in link and 'ble_store_delete' not in link and 'ble_store_clear' not in link, 'no eviction anywhere'
+assert 'ble_hs_cfg.store_status_cb = store_status;' in link
+st = body(link, 'store_status')
+assert 'BLE_STORE_EVENT_OVERFLOW' in st and 'BLE_STORE_EVENT_FULL' in st and st.count('return BLE_HS_ENOMEM;') == 1 and 'return 0' not in st, 'full or overflowing: refuse the new bond'
+assert 'ble_hs_cfg.sm_bonding = 0;' in link and 'ble_hs_cfg.sm_bonding = 1' not in link, 'bonding starts closed'
+pol = body(link, 'apply_bonding_policy')
+assert 'ble_pair_is_open(&s_pair, now_ms())' in pol and 'ble_hs_cfg.sm_bonding = open ? 1 : 0;' in pol and 'sm_our_key_dist' in pol, 'bonding follows the window, and only the window'
+assert len(re.findall(r'sm_bonding\s*=', link)) == 2, 'sm_bonding is written at init (closed) and by the policy, nowhere else'
+gap = body(link, 'gap_event')
+assert re.search(r'case BLE_GAP_EVENT_REPEAT_PAIRING:.*?ble_pair_is_open\(&s_pair, now_ms\(\)\).*?BLE_GAP_REPEAT_PAIRING_RETRY.*?BLE_GAP_REPEAT_PAIRING_IGNORE', gap, re.S)
+assert 'ble_pair_open(&s_pair, now_ms())' in body(link, 'ble_link_pairing_window') and 'ble_pair_close(&s_pair)' in body(link, 'ble_link_pairing_window')
+assert 'ble_pair_init(&s_pair)' in raw_link
+# review H2 and M1: the abuse bounds
+task_b = body(link, 'ble_link_task')
+assert 'due == BLE_EV_IDLE_TIMEOUT' in task_b
+assert 'ble_churn_exceeded(&s_ble)' in task_b and 'BLE_COOLDOWN_MS' in task_b, 'a link that burns channels is ended and the dial waits'
+assert 'ble_refused_wait_ms(trusted, &s_refused_ladder, esp_random())' in task_b, 'only a trusted peer climbs the refused ladder'
+# review L3: the deadline and its effect are one step under the lock; the glue acts only when the state really changed
+assert re.search(r'const ble_event_t due = ble_poll\(&s_ble, now\);\s*const bool changed = [^;]*ble_post\(&s_ble, due, now\)', task_b, re.S), 'poll and post under one lock'
+assert 'post(BLE_EV_ENC_TIMEOUT)' not in task_b and 'post(BLE_EV_ADV_TIMEOUT)' not in task_b, 'no second, unlocked post after the decision'
+# review L4: a receive buffer the stack did not take is freed
+arm = body(link, 'rx_arm')
+assert re.search(r'rc == BLE_HS_EBUSY \|\| rc == BLE_HS_EINVAL\)\s*os_mbuf_free_chain\(m\);', arm), 'EBUSY and EINVAL leave the mbuf with us'
+# review L5: start-up and the abandonment are decided by one compare-and-swap, like net_link.c
+init = body(link, 'ble_init_task')
+assert 'atomic_compare_exchange_strong(&b->phase, &expected, PHASE_COMMITTED)' in init and init.index('PHASE_COMMITTED') < init.index('ble_link_task')
+start_fn = body(link, 'ble_link_start')
+assert 'atomic_compare_exchange_strong(&b->phase, &expected, PHASE_ABANDONED)' in start_fn
+assert 's_abandoned' not in link, 'the old flag (a race) is gone'
+# review M2: the development marker is in a development image and in no other
+assert raw_link.count('BLE_DEV_UNBONDED_IMAGE') == 1 and re.search(r'#ifdef BLE_DEV_ALLOW_UNBONDED\n\s*ESP_LOGW\(TAG, "DEVELOPMENT BUILD BLE_DEV_UNBONDED_IMAGE', raw_link)
+for path in sorted(main.rglob('*')):
+    if path.suffix in ('.c', '.h') and path.name != 'ble_link.c':
+        assert 'BLE_DEV_UNBONDED_IMAGE' not in path.read_text(errors='replace'), f'{path.name} carries the development marker'
+
 FLASH = re.compile(r'\b(nvs_\w+|config_\w+|esp_ota_\w+|esp_partition_\w+|esp_flash_\w+|spi_flash_\w+|fw_update_\w+)\(')
 for fn in ('ble_link_task', 'handshake', 'advertise', 'terminate_link', 'port_send', 'port_disconnect', 'port_rearm', 'port_peer_mtu', 'log_stacks',
-           'x_read', 'x_write', 'x_is_up', 'post', 'current'):
+           'x_read', 'x_write', 'x_is_up', 'post', 'current', 'link_sec', 'note_security', 'store_status', 'apply_bonding_policy', 'rx_arm'):
     assert not FLASH.search(body(link, fn)), f'{fn} reaches a flash operation (the link task has a PSRAM stack)'
 assert len(re.findall(r'config_ble_load\(', link)) == 1 and 'config_ble_load(&cfg)' in body(link, 'ble_link_start')
 start = body(link, 'ble_link_start')
@@ -164,7 +217,7 @@ assert 'if (closed) post(BLE_EV_CHANNEL_CLOSED);' in hs, 'a close during the han
 assert re.search(r'const bool defer = s_handshaking;\s*if \(defer\) s_close_pending = true;', accept)
 task = body(link, 'ble_link_task')
 assert 'ble_poll(&s_ble, now)' in task and 'BLE_EV_ADV_TIMEOUT' in task and 'BLE_EV_ENC_TIMEOUT' in task
-assert 'cable_link_drain_logs(DRAIN_LINES)' in task and 'net_backoff_next_ms(&s_refused_ladder, true, esp_random())' in task, 'the refused ladder of net_state.h'
+assert 'cable_link_drain_logs(DRAIN_LINES)' in task and 'ble_refused_wait_ms(trusted, &s_refused_ladder, esp_random())' in task, 'the refused ladder of net_state.h, for a trusted peer only (ble_state.c)'
 assert 'ble_gap_adv_stop()' in task and 'terminate_link()' in task
 assert 'tls->close(tls)' in task, 'a finished session is closed before the next handshake'
 tls_h = code('cable_xport_tls.c')
@@ -173,7 +226,7 @@ assert 'inner->kind == CABLE_XPORT_USB' in tls_h, 'the TLS wrapper refuses USB, 
 # ── 6b. B4d: advertising does not stay stopped; the log lines the e2e script reads ──────────────────────
 # The retry out of NOT_FOUND comes from ble_poll (BLE_RETRY_MS, `adv_retry_ms`), and any screen wake restarts it at once. Neither touches flash.
 assert define(text('ble_state.h'), 'BLE_RETRY_MS') == vectors['adv_retry_ms'] == 120000
-assert re.search(r'else if \(due == BLE_EV_START\) \{\s*post\(BLE_EV_START\);', task), 'the retry posts START'
+assert 'changed && due == BLE_EV_START' in task, 'the retry is a START posted by the deadline step (B4e)'
 assert 'const uint32_t wake = display_wake_seq();' in task and 'wake != seen_wake' in task, 'a screen wake is seen by its counter'
 assert re.search(r'if \(wake != seen_wake\) \{\s*seen_wake = wake;\s*if \(st == BLE_ST_NOT_FOUND\) \{\s*post\(BLE_EV_START\);', task), 'a wake posts START only from NOT_FOUND'
 assert task.index('wake != seen_wake') < task.index('advertise();'), 'the wake is looked at before the advertising keeper, so it advertises in the same tick'

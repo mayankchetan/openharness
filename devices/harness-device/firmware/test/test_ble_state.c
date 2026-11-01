@@ -19,16 +19,18 @@ static unsigned checks;
 
 // ── the table, written out a second time from the spec (cable-ble-link.md and the plan's B4a) ───────────────────
 // Letters: O off, A advertising, F not found, S securing, C connected, H channel up (handshake), U tls up, R auth failed (key refused).
-// Event order: START STOP ADV_TIMEOUT LINK_UP LINK_DOWN ENCRYPTED ENC_TIMEOUT CHANNEL_OPEN CHANNEL_CLOSED TLS_UP TLS_FAIL TLS_REFUSED
+// Event order: START STOP ADV_TIMEOUT LINK_UP LINK_DOWN ENCRYPTED ENC_TIMEOUT CHANNEL_OPEN CHANNEL_CLOSED TLS_UP TLS_FAIL TLS_REFUSED IDLE_TIMEOUT
+// (B4e: a link that arrives just as the advertising timer fires is still a link: NOT_FOUND takes LINK_UP; and a peer that is not authenticated-bonded
+// is dropped after BLE_IDLE_CAP_MS in CONNECTED: IDLE_TIMEOUT)
 static const char *const EXPECT[BLE_ST_COUNT] = {
-    /* OFF  */ "AOOOOOOOOOOO",
-    /* ADV  */ "AOFSAAAAAAAA",
-    /* NOTF */ "AOFFFFFFFFFF",
-    /* SEC  */ "SOSSACASSSSS",
-    /* CONN */ "COCCACCHCCCC",
-    /* CHAN */ "HOHHAHHHCUCR",
-    /* TLS  */ "UOUUAUUUCUCU",
-    /* AUTH */ "RORRARRRRRRR",
+    /* OFF  */ "AOOOOOOOOOOOO",
+    /* ADV  */ "AOFSAAAAAAAAA",
+    /* NOTF */ "AOFSFFFFFFFFF",
+    /* SEC  */ "SOSSACASSSSSS",
+    /* CONN */ "COCCACCHCCCCA",
+    /* CHAN */ "HOHHAHHHCUCRH",
+    /* TLS  */ "UOUUAUUUCUCUU",
+    /* AUTH */ "RORRARRRRRRRR",
 };
 
 static ble_state_t letter(char c)
@@ -49,7 +51,7 @@ static ble_state_t letter(char c)
 
 static void test_table(void)
 {
-    CHECK(BLE_ST_COUNT == 8 && BLE_EV_COUNT == 12);
+    CHECK(BLE_ST_COUNT == 8 && BLE_EV_COUNT == 13);
     for (int s = 0; s < BLE_ST_COUNT; s++) {
         CHECK(strlen(EXPECT[s]) == BLE_EV_COUNT);
         for (int e = 0; e < BLE_EV_COUNT; e++) {
@@ -104,6 +106,10 @@ static void test_constants_match_the_vectors(const char *path)
     CHECK(BLE_ENC_DEADLINE_MS == vector_const(path, "enc_deadline_ms"));
     CHECK(BLE_TLS_DEADLINE_MS == vector_const(path, "dial_tls_deadline_ms"));
     CHECK(BLE_RETRY_MS == vector_const(path, "adv_retry_ms"));
+    CHECK(BLE_KEY_SIZE_MIN == vector_const(path, "key_size_min") && BLE_CHURN_LIMIT == vector_const(path, "churn_limit"));
+    CHECK(BLE_COOLDOWN_MS == vector_const(path, "cooldown_ms") && BLE_IDLE_CAP_MS == vector_const(path, "idle_cap_ms"));
+    CHECK(BLE_PAIR_WINDOW_MS == vector_const(path, "pair_window_ms"));
+    CHECK(BLE_KEY_SIZE_MIN == 16 && BLE_CHURN_LIMIT == 3 && BLE_COOLDOWN_MS == 10000 && BLE_IDLE_CAP_MS == 10000 && BLE_PAIR_WINDOW_MS == 120000);
     CHECK(BLE_ADV_TIMEOUT_MS == 30000 && BLE_ENC_DEADLINE_MS == 3000 && BLE_TLS_DEADLINE_MS == 5000 && BLE_RETRY_MS == 120000);
 }
 
@@ -133,6 +139,7 @@ static void test_deadlines(void)
 
     // encrypted in time: the deadline is gone
     CHECK(ble_post(&b, BLE_EV_LINK_UP, 60000) && b.state == BLE_ST_SECURING);
+    ble_set_trusted(&b, true);                                               // an authenticated, bonded peer (B4e: any other is dropped after BLE_IDLE_CAP_MS)
     CHECK(ble_post(&b, BLE_EV_ENCRYPTED, 60500) && b.state == BLE_ST_CONNECTED);
     CHECK(ble_poll(&b, 60500 + 3600000) == BLE_EV_NONE);                     // waiting for the phone to open the channel: no deadline of ours
 
@@ -157,6 +164,138 @@ static void test_deadlines(void)
     // NULL
     CHECK(ble_poll(NULL, 1) == BLE_EV_NONE && !ble_post(NULL, BLE_EV_START, 1));
     ble_init(NULL);
+}
+
+// ── B4e: abuse bounds ─────────────────────────────────────────────────────────────────────────────
+static void to_channel_up(ble_t *b, uint64_t t);
+
+static void test_churn_is_counted_per_link_and_proven_by_tls(void)
+{
+    ble_t b;
+    to_channel_up(&b, 1000);
+    CHECK(b.churn == 0 && !ble_churn_exceeded(&b));
+    CHECK(ble_post(&b, BLE_EV_CHANNEL_CLOSED, 1100) && b.churn == 1);                     // a channel that opened and closed without reaching TLS_UP
+    ble_post(&b, BLE_EV_CHANNEL_OPEN, 1200);
+    CHECK(ble_handshake_failed(&b, false, 1300) == BLE_EV_TLS_FAIL && b.churn == 2);      // a failed handshake is one too
+    CHECK(!ble_churn_exceeded(&b));
+    ble_post(&b, BLE_EV_CHANNEL_OPEN, 1400);
+    ble_post(&b, BLE_EV_CHANNEL_CLOSED, 1500);
+    CHECK(b.churn == BLE_CHURN_LIMIT && ble_churn_exceeded(&b));                          // the third: the glue ends the link
+    // alerts count as well
+    to_channel_up(&b, 2000);
+    ble_handshake_failed(&b, true, 2100);
+    ble_post(&b, BLE_EV_CHANNEL_OPEN, 2200);
+    ble_handshake_failed(&b, true, 2300);
+    ble_post(&b, BLE_EV_CHANNEL_OPEN, 2400);
+    CHECK(ble_handshake_failed(&b, true, 2500) == BLE_EV_TLS_REFUSED && ble_churn_exceeded(&b));
+    // TLS_UP proves the peer: the count restarts, and later closes of an established link are not counted
+    to_channel_up(&b, 3000);
+    ble_post(&b, BLE_EV_CHANNEL_CLOSED, 3100);
+    ble_post(&b, BLE_EV_CHANNEL_OPEN, 3200);
+    CHECK(b.churn == 1 && ble_post(&b, BLE_EV_TLS_UP, 3300) && b.churn == 0);
+    for (int i = 0; i < 10; i++) {
+        ble_post(&b, BLE_EV_CHANNEL_CLOSED, 3400 + 100 * i);                              // the phone closes and reopens, TLS each time
+        ble_post(&b, BLE_EV_CHANNEL_OPEN, 3450 + 100 * i);
+        ble_post(&b, BLE_EV_TLS_UP, 3460 + 100 * i);
+    }
+    CHECK(b.churn == 0 && !ble_churn_exceeded(&b));
+    // a closed channel from CONNECTED (nothing was open) is not churn; a new LINK_UP starts from zero
+    to_channel_up(&b, 4000);
+    ble_post(&b, BLE_EV_CHANNEL_CLOSED, 4100);
+    ble_post(&b, BLE_EV_CHANNEL_CLOSED, 4200);
+    CHECK(b.churn == 1);
+    ble_post(&b, BLE_EV_LINK_DOWN, 4300);
+    ble_post(&b, BLE_EV_LINK_UP, 4400);
+    CHECK(b.churn == 0);
+    CHECK(!ble_churn_exceeded(NULL));
+    // the counter saturates, it never wraps to "fine"
+    to_channel_up(&b, 5000);
+    for (int i = 0; i < 600; i++) { ble_post(&b, BLE_EV_CHANNEL_CLOSED, 5100 + i); ble_post(&b, BLE_EV_CHANNEL_OPEN, 5100 + i); }
+    CHECK(b.churn == 255 && ble_churn_exceeded(&b));
+}
+
+static void test_a_peer_that_is_not_trusted_is_dropped_when_idle(void)
+{
+    ble_t b;
+    ble_init(&b);
+    ble_post(&b, BLE_EV_START, 0);
+    ble_post(&b, BLE_EV_LINK_UP, 1000);
+    ble_post(&b, BLE_EV_ENCRYPTED, 1200);                                                // dev build: "encrypted" at once, the peer is not trusted
+    CHECK(b.state == BLE_ST_CONNECTED && !b.trusted);
+    CHECK(ble_poll(&b, 1200 + BLE_IDLE_CAP_MS - 1) == BLE_EV_NONE);
+    CHECK(ble_poll(&b, 1200 + BLE_IDLE_CAP_MS) == BLE_EV_IDLE_TIMEOUT);
+    CHECK(ble_post(&b, BLE_EV_IDLE_TIMEOUT, 1200 + BLE_IDLE_CAP_MS) && b.state == BLE_ST_ADVERTISING);
+    // a trusted peer may keep the link and wait for the channel as long as it likes
+    ble_post(&b, BLE_EV_LINK_UP, 20000);
+    ble_set_trusted(&b, true);
+    ble_post(&b, BLE_EV_ENCRYPTED, 20100);
+    CHECK(b.state == BLE_ST_CONNECTED && b.trusted);
+    CHECK(ble_poll(&b, 20100 + 3600000) == BLE_EV_NONE);
+    // the trust is per link
+    ble_post(&b, BLE_EV_LINK_DOWN, 30000);
+    CHECK(!b.trusted);
+    ble_post(&b, BLE_EV_LINK_UP, 31000);
+    CHECK(!b.trusted);
+    // an open channel is bounded by the handshake, not by the idle cap
+    to_channel_up(&b, 40000);
+    CHECK(ble_poll(&b, 40000 + BLE_IDLE_CAP_MS) == BLE_EV_TLS_FAIL);
+    // IDLE_TIMEOUT changes nothing outside CONNECTED
+    ble_init(&b);
+    ble_post(&b, BLE_EV_START, 0);
+    CHECK(!ble_post(&b, BLE_EV_IDLE_TIMEOUT, 10) && b.state == BLE_ST_ADVERTISING);
+    ble_set_trusted(NULL, true);
+    // L2: a link that arrives just after the advertising timer fired is a link
+    ble_init(&b);
+    ble_post(&b, BLE_EV_START, 0);
+    ble_post(&b, BLE_EV_ADV_TIMEOUT, 30000);
+    CHECK(b.state == BLE_ST_NOT_FOUND);
+    CHECK(ble_post(&b, BLE_EV_LINK_UP, 30001) && b.state == BLE_ST_SECURING && b.since_ms == 30001);
+}
+
+static void test_the_refused_wait_escalates_only_for_a_trusted_peer(void)
+{
+    net_backoff_t ladder;
+    net_backoff_reset(&ladder);
+    for (int i = 0; i < 20; i++) CHECK(ble_refused_wait_ms(false, &ladder, 12345u * (unsigned)i) == BLE_COOLDOWN_MS);   // flat, no random, no ladder
+    CHECK(ladder.attempt == 0);
+    // a trusted peer gets the refused ladder of net_state.h (30, 60, 120, 300 s, each with jitter)
+    const uint32_t base[] = {30000, 60000, 120000, 300000, 300000};
+    for (unsigned i = 0; i < 5; i++) {
+        const uint32_t w = ble_refused_wait_ms(true, &ladder, 777u);
+        CHECK(w >= base[i] - base[i] / 4 && w <= base[i] + base[i] / 4);
+    }
+    CHECK(ble_refused_wait_ms(false, NULL, 1) == BLE_COOLDOWN_MS && ble_refused_wait_ms(true, NULL, 1) == BLE_COOLDOWN_MS);
+}
+
+// ── B4e: new bonds only inside an explicit pairing window, never by evicting one ───────────────────
+static void test_the_pairing_window(void)
+{
+    ble_pair_window_t w;
+    ble_pair_init(&w);
+    CHECK(!ble_pair_is_open(&w, 0) && !ble_pair_is_open(&w, 123456789));                  // closed by default
+    CHECK(!ble_bond_allowed(&w, 1000, false));
+    ble_pair_open(&w, 5000);
+    CHECK(ble_pair_is_open(&w, 5000) && ble_pair_is_open(&w, 5000 + BLE_PAIR_WINDOW_MS - 1));
+    CHECK(!ble_pair_is_open(&w, 5000 + BLE_PAIR_WINDOW_MS));                              // closes at 120.0 s
+    CHECK(!ble_pair_is_open(&w, 5000 + BLE_PAIR_WINDOW_MS + 1));
+    ble_pair_close(&w);
+    CHECK(!ble_pair_is_open(&w, 6000));                                                   // closed by hand
+    ble_pair_open(&w, 7000);
+    ble_pair_open(&w, 50000);                                                             // opening again restarts the 120 s
+    CHECK(ble_pair_is_open(&w, 50000 + BLE_PAIR_WINDOW_MS - 1) && !ble_pair_is_open(&w, 50000 + BLE_PAIR_WINDOW_MS));
+    CHECK(!ble_pair_is_open(&w, 49999));                                                  // a clock that stepped back before the window opened: closed, the safe side
+    // a clock that wrapped far back closes it rather than holding it open for ever
+    ble_pair_open(&w, 1000000);
+    CHECK(!ble_pair_is_open(&w, 10));
+    // a new bond needs the window AND room: a full store never evicts, window or not
+    ble_pair_open(&w, 2000000);
+    CHECK(ble_bond_allowed(&w, 2000001, false));
+    CHECK(!ble_bond_allowed(&w, 2000001, true));
+    CHECK(!ble_bond_allowed(&w, 2000000 + BLE_PAIR_WINDOW_MS, false));
+    CHECK(!ble_bond_allowed(NULL, 1, false) && !ble_pair_is_open(NULL, 1));
+    ble_pair_open(NULL, 1);
+    ble_pair_close(NULL);
+    ble_pair_init(NULL);
 }
 
 // ── B4d: advertising does not stay stopped ──────────────────────────────────────────────────────────
@@ -299,21 +438,35 @@ static void test_refusal_run(void)
     CHECK(ble_handshake_failed(NULL, true, 2) == BLE_EV_NONE);
 }
 
-// ── the accept policy: only an encrypted, bonded peer gets the channel ─────────────────────────────
+// ── the accept policy: only an authenticated, bonded peer on a long-key encrypted link gets the channel ───────────────────────
+static ble_sec_t sec(bool enc, bool bonded, bool auth, unsigned key) { ble_sec_t s = { enc, bonded, auth, (uint8_t)key }; return s; }
+
 static void test_accept_policy(void)
 {
-    // product: encrypted AND bonded, one channel
-    CHECK(ble_accept_check(true, true, false, false) == BLE_ACCEPT_OK);
-    CHECK(ble_accept_check(false, true, false, false) == BLE_ACCEPT_REFUSE_ENC);     // bonded but this link is not encrypted
-    CHECK(ble_accept_check(true, false, false, false) == BLE_ACCEPT_REFUSE_ENC);     // encrypted with a key that is not bonded (Just Works, an unsaved pairing)
-    CHECK(ble_accept_check(false, false, false, false) == BLE_ACCEPT_REFUSE_ENC);
-    CHECK(ble_accept_check(true, true, false, true) == BLE_ACCEPT_REFUSE_SECOND);    // second channel
-    CHECK(ble_accept_check(false, false, false, true) == BLE_ACCEPT_REFUSE_SECOND);  // the second-channel refusal ranks first: nothing else matters
-    // the dev flag (BLE_DEV_ALLOW_UNBONDED, off in every product config) waives the bond and the encryption, never the one-channel rule
-    CHECK(ble_accept_check(false, false, true, false) == BLE_ACCEPT_OK);
-    CHECK(ble_accept_check(true, false, true, false) == BLE_ACCEPT_OK);
-    CHECK(ble_accept_check(false, false, true, true) == BLE_ACCEPT_REFUSE_SECOND);
-    // the encryption deadline applies to the product link; with the dev flag the glue posts ENCRYPTED at connect (ble_link.c) so nothing is dropped
+    // the predicate: every combination of the three flags and the key sizes around the limit; trusted only when ALL hold
+    static const unsigned keys[] = {0, 1, 15, 16, 17, 32};
+    for (unsigned m = 0; m < 8; m++)
+        for (unsigned k = 0; k < sizeof keys / sizeof keys[0]; k++) {
+            const ble_sec_t s = sec(m & 1, m & 2, m & 4, keys[k]);
+            CHECK(ble_sec_trusted(&s) == (m == 7 && keys[k] >= 16));
+        }
+    CHECK(!ble_sec_trusted(NULL));
+    // product: trusted and one channel
+    ble_sec_t s = sec(true, true, true, 16);
+    CHECK(ble_accept_check(&s, false, false) == BLE_ACCEPT_OK);
+    s = sec(true, true, true, 15);   CHECK(ble_accept_check(&s, false, false) == BLE_ACCEPT_REFUSE_ENC);     // a short key
+    s = sec(true, true, false, 16);  CHECK(ble_accept_check(&s, false, false) == BLE_ACCEPT_REFUSE_ENC);     // Just Works: encrypted and bonded, not authenticated
+    s = sec(true, false, true, 16);  CHECK(ble_accept_check(&s, false, false) == BLE_ACCEPT_REFUSE_ENC);     // authenticated pairing that was not saved
+    s = sec(false, true, true, 16);  CHECK(ble_accept_check(&s, false, false) == BLE_ACCEPT_REFUSE_ENC);     // this link is not encrypted
+    s = sec(false, false, false, 0); CHECK(ble_accept_check(&s, false, false) == BLE_ACCEPT_REFUSE_ENC);
+    CHECK(ble_accept_check(NULL, false, false) == BLE_ACCEPT_REFUSE_ENC);                                      // nothing known about the link: refuse
+    s = sec(true, true, true, 16);
+    CHECK(ble_accept_check(&s, false, true) == BLE_ACCEPT_REFUSE_SECOND);                                      // second channel
+    s = sec(false, false, false, 0);
+    CHECK(ble_accept_check(&s, false, true) == BLE_ACCEPT_REFUSE_SECOND);                                      // ranks first
+    // the dev flag (BLE_DEV_ALLOW_UNBONDED, off in every product config) waives the whole security rule, never the one-channel rule
+    CHECK(ble_accept_check(&s, true, false) == BLE_ACCEPT_OK && ble_accept_check(NULL, true, false) == BLE_ACCEPT_OK);
+    CHECK(ble_accept_check(&s, true, true) == BLE_ACCEPT_REFUSE_SECOND);
     CHECK(ble_encryption_required(false) && !ble_encryption_required(true));
 }
 
@@ -395,6 +548,10 @@ int main(int argc, char **argv)
     test_table();
     test_constants_match_the_vectors(argv[1]);
     test_deadlines();
+    test_churn_is_counted_per_link_and_proven_by_tls();
+    test_a_peer_that_is_not_trusted_is_dropped_when_idle();
+    test_the_refused_wait_escalates_only_for_a_trusted_peer();
+    test_the_pairing_window();
     test_advertising_restarts_by_itself_and_on_a_wake();
     test_post_keeps_the_clock_of_a_state_that_did_not_change();
     test_refusal_run();

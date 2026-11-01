@@ -74,6 +74,8 @@ python3 "$here/test_ble_state_source.py"
 cc -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -O1 -g -pthread -fsanitize=address,undefined -DCABLE_XPORT_BLE_WRITE_CAP_MS=300 -I "$here/host_tls" -I "$here/../main" -o "$out/test_cable_xport_ble" "$here/test_cable_xport_ble.c" "$here/../main/cable_xport_ble.c"
 ASAN_OPTIONS=detect_leaks=0 "$out/test_cable_xport_ble"
 python3 "$here/test_ble_link_source.py"
+# B4e: a development image (unbonded phone accepted) is refused by the upload and flash scripts
+python3 "$here/test_dev_image_guard.py"
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -pthread -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" \
    -o "$out/test_log_ring" "$here/test_log_ring.c" "$here/../main/log_ring.c"
 "$out/test_log_ring"

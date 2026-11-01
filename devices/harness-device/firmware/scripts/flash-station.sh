@@ -78,6 +78,8 @@ if [ -z "$IMAGE" ]; then
   IMAGE="$MERGED"
 fi
 [ -f "$IMAGE" ] || { echo "error: image not found: $IMAGE" >&2; exit 1; }
+# A development image (built with -DBLE_DEV_ALLOW_UNBONDED, which accepts an unbonded phone) is never flashed by the station.
+python3 "$HERE/scripts/refuse_dev_image.py" "$IMAGE" || { echo "error: refusing to flash a development image" >&2; exit 1; }
 SZ=$($PY -c "import os,sys; print(f'{os.path.getsize(sys.argv[1])/1048576:.2f}')" "$IMAGE")
 echo ">> image: $IMAGE  (${SZ} MB)"
 [ "$MERGE_ONLY" = "1" ] && exit 0

@@ -36,6 +36,9 @@ bool ble_link_start(void);
 const cable_xport_t *ble_link_xport(void);
 // The link state, for the Link screen and the logs. BLE_ST_OFF when not started. Cheap; any task.
 ble_state_t ble_link_state(void);
+// Open (true) or close (false) the pairing window: new bonds are made only inside it, for BLE_PAIR_WINDOW_MS (120 s). Closed by default. B5 calls it from
+// the Settings row "Pair phone". False/no-op when the phone mode is not running. Any task.
+void ble_link_pairing_window(bool open);
 // Begin advertising again after NOT_FOUND ("Phone not found") or an earlier stop: a START event. False when the phone mode is not running. Any task.
 bool ble_link_restart(void);
 
@@ -45,5 +48,6 @@ static inline bool ble_link_start(void) { return false; }
 static inline const cable_xport_t *ble_link_xport(void) { return NULL; }
 static inline ble_state_t ble_link_state(void) { return BLE_ST_OFF; }
 static inline bool ble_link_restart(void) { return false; }
+static inline void ble_link_pairing_window(bool open) { (void)open; }
 
 #endif

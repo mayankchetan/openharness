@@ -64,7 +64,8 @@ void ble_store_config_init(void);   // the NVS-backed bond store of the IDF's ni
 static ble_t s_ble;
 static SemaphoreHandle_t s_lock;               // s_ble and the flags below
 static bool s_started;
-static atomic_bool s_abandoned;                // ble_link_start gave up while ble_init was still running
+static ble_pair_window_t s_pair;               // new bonds only inside this window (closed by default); guarded by s_lock
+static volatile bool s_churn_cut;              // this link was already ended for burning channels
 static _Atomic(const cable_xport_t *) s_tls;
 static char s_mac[DEVICE_MAC_STR_LEN];
 static uint8_t s_own_addr_type;
@@ -146,7 +147,9 @@ static int rx_arm(struct ble_l2cap_chan *chan)
 {
     struct os_mbuf *m = os_mbuf_get_pkthdr(&s_rx_pool, 0);
     if (!m) return BLE_HS_ENOMEM;
-    return ble_l2cap_recv_ready(chan, m);
+    const int rc = ble_l2cap_recv_ready(chan, m);
+    if (rc == BLE_HS_EBUSY || rc == BLE_HS_EINVAL) os_mbuf_free_chain(m);   // the stack did not take it: ours to free (ENOENT: taken, the channel owns it)
+    return rc;
 }
 
 // ── the port of the transport (cable_xport_ble.h) ───────────────────────────────────────────────────
@@ -213,15 +216,69 @@ static const cable_xport_ble_port_t PORT = {NULL, port_send, port_rearm, port_di
 static int coc_event(struct ble_l2cap_event *event, void *arg);
 static int gap_event(struct ble_gap_event *event, void *arg);
 
-static bool link_encrypted_and_bonded(uint16_t conn, bool *bonded)
+// What the stack says about this connection. A link it cannot find reads as nothing at all (not trusted).
+static bool link_sec(uint16_t conn, ble_sec_t *sec)
 {
+    memset(sec, 0, sizeof *sec);
     struct ble_gap_conn_desc d;
-    if (ble_gap_conn_find(conn, &d) != 0) {
-        *bonded = false;
-        return false;
+    if (ble_gap_conn_find(conn, &d) != 0) return false;
+    sec->encrypted = d.sec_state.encrypted;
+    sec->bonded = d.sec_state.bonded;
+    sec->authenticated = d.sec_state.authenticated;
+    sec->key_size = d.sec_state.key_size;
+    return true;
+}
+
+// The link's security changed: if it now passes the product rule (encrypted, bonded, authenticated, a 16-byte key) it is TRUSTED and counts as encrypted;
+// the development build also counts any encrypted link (and trusts nobody, so every abuse bound applies to it).
+static void note_security(uint16_t conn)
+{
+    ble_sec_t sec;
+    (void)link_sec(conn, &sec);
+    const bool trusted = ble_sec_trusted(&sec);
+    if (trusted) {
+        state_lock();
+        ble_set_trusted(&s_ble, true);
+        state_unlock();
     }
-    *bonded = d.sec_state.bonded;
-    return d.sec_state.encrypted;
+    if (trusted || (DEV_UNBONDED && sec.encrypted)) post(BLE_EV_ENCRYPTED);
+}
+
+// The bond store is a small fixed list (max_bonds). When it is full, or a write would overflow it, the answer is NO: the stack must not delete the oldest bond to
+// make room (ble_store_util_status_rr does), because that bond is the real phone and the one asking for room is not.
+static int store_status(struct ble_store_status_event *event, void *arg)
+{
+    (void)arg;
+    switch (event->event_code) {
+    case BLE_STORE_EVENT_OVERFLOW:
+    case BLE_STORE_EVENT_FULL:
+        ESP_LOGW(TAG, "bond store full: the new bond is refused (nothing is evicted)");
+        return BLE_HS_ENOMEM;
+    default:
+        return BLE_HS_EUNKNOWN;
+    }
+}
+
+// Bonds follow the pairing window and nothing else: closed, the dial pairs without bonding, so nothing is saved and the channel is refused (no bond).
+static void apply_bonding_policy(void)
+{
+    state_lock();
+    const bool open = ble_pair_is_open(&s_pair, now_ms());
+    state_unlock();
+    ble_hs_cfg.sm_bonding = open ? 1 : 0;
+    ble_hs_cfg.sm_our_key_dist = open ? (BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID) : 0;
+    ble_hs_cfg.sm_their_key_dist = open ? (BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID) : 0;
+}
+
+void ble_link_pairing_window(bool open)
+{
+    if (!s_started) return;
+    state_lock();
+    if (open) ble_pair_open(&s_pair, now_ms());
+    else ble_pair_close(&s_pair);
+    state_unlock();
+    apply_bonding_policy();
+    ESP_LOGI(TAG, "pairing window %s", open ? "open" : "closed");
 }
 
 static void advertise(void)
@@ -269,6 +326,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             s_conn = event->connect.conn_handle;
             s_conn_ms = now_ms();
             s_dle_done = false;
+            s_churn_cut = false;
             post(BLE_EV_LINK_UP);
             // Development build: no bond is asked for, so the link counts as encrypted from the start and the 3 s deadline never fires.
             if (!ble_encryption_required(DEV_UNBONDED)) post(BLE_EV_ENCRYPTED);
@@ -286,12 +344,21 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         post(BLE_EV_LINK_DOWN);
         return 0;
     case BLE_GAP_EVENT_ENC_CHANGE:
-        if (event->enc_change.status == 0) {
-            bool bonded = false;
-            const bool enc = link_encrypted_and_bonded(event->enc_change.conn_handle, &bonded);
-            if (enc && (bonded || DEV_UNBONDED)) post(BLE_EV_ENCRYPTED);
-        }
+        if (event->enc_change.status == 0) note_security(event->enc_change.conn_handle);
         return 0;
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        // A peer pairs again although a bond exists. Inside the pairing window the user asked for it: the old bond of THAT peer goes and the pairing goes on.
+        // Outside it the request is ignored, so a spoofed address cannot delete the real phone's bond.
+        state_lock();
+        const bool open = ble_pair_is_open(&s_pair, now_ms());
+        state_unlock();
+        if (open) {
+            struct ble_gap_conn_desc d;
+            if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &d) == 0) ble_store_util_delete_peer(&d.peer_id_addr);
+            return BLE_GAP_REPEAT_PAIRING_RETRY;
+        }
+        return BLE_GAP_REPEAT_PAIRING_IGNORE;
+    }
     case BLE_GAP_EVENT_ADV_COMPLETE:
         s_adv_active = false;
         return 0;
@@ -305,13 +372,14 @@ static int coc_event(struct ble_l2cap_event *event, void *arg)
     (void)arg;
     switch (event->type) {
     case BLE_L2CAP_EVENT_COC_ACCEPT: {
-        bool bonded = false;
-        const bool enc = link_encrypted_and_bonded(event->accept.conn_handle, &bonded);
-        switch (ble_accept_check(enc, bonded, DEV_UNBONDED, s_chan != NULL)) {
+        ble_sec_t sec;
+        (void)link_sec(event->accept.conn_handle, &sec);
+        switch (ble_accept_check(&sec, DEV_UNBONDED, s_chan != NULL)) {
         case BLE_ACCEPT_OK:
             return rx_arm(event->accept.chan);
         case BLE_ACCEPT_REFUSE_ENC:
-            ESP_LOGW(TAG, "channel refused: link not encrypted and bonded");
+            ESP_LOGW(TAG, "channel refused: link not authenticated-bonded (enc=%d bonded=%d auth=%d key=%u)", (int)sec.encrypted, (int)sec.bonded,
+                     (int)sec.authenticated, (unsigned)sec.key_size);
             return BLE_HS_EENCRYPT;   // reaches the peer as "insufficient encryption" (ble_l2cap_sig.c)
         case BLE_ACCEPT_REFUSE_SECOND:
         default:
@@ -439,21 +507,28 @@ static void ble_link_task(void *arg)
         uint64_t since = 0;
         ble_state_t st = current(&since);
 
-        // 1. deadlines
+        // 1. deadlines. The poll and the state change are ONE step under the lock, and the glue acts only if the state really changed: a link that was
+        // encrypted a moment ago is not dropped, and one that arrived as the advertising timer fired is not lost.
         state_lock();
+        const ble_state_t before = s_ble.state;
         const ble_event_t due = ble_poll(&s_ble, now);
+        const bool changed = (due == BLE_EV_ADV_TIMEOUT || due == BLE_EV_ENC_TIMEOUT || due == BLE_EV_IDLE_TIMEOUT || due == BLE_EV_START) && ble_post(&s_ble, due, now);
         state_unlock();
-        if (due == BLE_EV_ADV_TIMEOUT) {
+        if (changed) ESP_LOGI(TAG, "state %s -> %s (deadline)", ble_state_name(before), ble_state_name(current(NULL)));
+        if (changed && due == BLE_EV_ADV_TIMEOUT) {
             ble_gap_adv_stop();
             s_adv_active = false;
-            post(BLE_EV_ADV_TIMEOUT);
             ESP_LOGI(TAG, "no phone in %u ms: not found", (unsigned)BLE_ADV_TIMEOUT_MS);
-        } else if (due == BLE_EV_ENC_TIMEOUT) {
+        } else if (changed && due == BLE_EV_ENC_TIMEOUT) {
             ESP_LOGW(TAG, "link not encrypted after %u ms: dropped", (unsigned)BLE_ENC_DEADLINE_MS);
             terminate_link();
-            post(BLE_EV_ENC_TIMEOUT);
-        } else if (due == BLE_EV_START) {
-            post(BLE_EV_START);   // "Phone not found" has lasted BLE_RETRY_MS: advertise again (30 s on the air, 120 s off)
+        } else if (changed && due == BLE_EV_IDLE_TIMEOUT) {
+            // a peer that is not authenticated-bonded holds the one link slot with no channel: drop it, and stay quiet for a while
+            ESP_LOGW(TAG, "peer idle for %u ms without a channel: dropped, %u ms cooldown", (unsigned)BLE_IDLE_CAP_MS, (unsigned)BLE_COOLDOWN_MS);
+            terminate_link();
+            s_adv_not_before_ms = now + BLE_COOLDOWN_MS;
+        } else if (changed && due == BLE_EV_START) {
+            // "Phone not found" has lasted BLE_RETRY_MS: advertise again (30 s on the air, 120 s off)
             ESP_LOGI(TAG, "no phone for %u ms: advertising again", (unsigned)BLE_RETRY_MS);
         } else if (due == BLE_EV_TLS_FAIL && !tls_open) {
             // open() has its own 5 s deadline, so this is a channel that opened and never got a handshake: close it, and count an ordinary failure
@@ -463,6 +538,19 @@ static void ble_link_task(void *arg)
             state_unlock();
         }
         st = current(&since);
+
+        // 1a. a link that opens and loses channels without TLS (the phone's TLS fails, or an attacker plays one): end it, and wait before advertising
+        state_lock();
+        const bool burn = ble_churn_exceeded(&s_ble) && !s_churn_cut && s_conn != BLE_HS_CONN_HANDLE_NONE;
+        if (burn) s_churn_cut = true;
+        state_unlock();
+        if (burn) {
+            ESP_LOGW(TAG, "%u channels without TLS on one link: dropped, %u ms cooldown", (unsigned)BLE_CHURN_LIMIT, (unsigned)BLE_COOLDOWN_MS);
+            terminate_link();
+            s_adv_not_before_ms = now + BLE_COOLDOWN_MS;
+        }
+
+        apply_bonding_policy();   // the pairing window opens and closes the bonding switch
 
         // 1b. a screen wake (a touch, the PWR button) while "not found": advertise again at once
         const uint32_t wake = display_wake_seq();
@@ -516,7 +604,10 @@ static void ble_link_task(void *arg)
         // 6. a refused key: drop the link, and wait out the refused back-off before advertising again
         if (st == BLE_ST_AUTH_FAILED && !refused_seen) {
             refused_seen = true;
-            const uint32_t wait = net_backoff_next_ms(&s_refused_ladder, true, esp_random());
+            state_lock();
+            const bool trusted = s_ble.trusted;
+            state_unlock();
+            const uint32_t wait = ble_refused_wait_ms(trusted, &s_refused_ladder, esp_random());   // flat for a peer that is not authenticated-bonded
             s_adv_not_before_ms = now + wait;
             ESP_LOGW(TAG, "key refused: dropping the link, advertising again in %u ms", (unsigned)wait);
             terminate_link();
@@ -575,10 +666,24 @@ static void zero(void *p, size_t n)
     while (n--) *v++ = 0;
 }
 
+// Hand-off between ble_link_start() (app_main) and ble_init_task, as in net_link.c: two parties hold `b`, each releases it, the last frees it.
+//   WAITING    start() is waiting for ble_init
+//   COMMITTED  ble_init passed its point of no return: start() waits for it for as long as it takes
+//   ABANDONED  start() timed out first: ble_init finds this at the same point and starts nothing
 typedef struct {
     SemaphoreHandle_t done;
+    atomic_int phase;
+    atomic_int refs;
     bool ok;
 } boot_t;
+enum { PHASE_WAITING = 0, PHASE_COMMITTED = 1, PHASE_ABANDONED = 2 };
+
+static void boot_release(boot_t *b)
+{
+    if (atomic_fetch_sub(&b->refs, 1) != 1) return;
+    if (b->done) vSemaphoreDelete(b->done);
+    free(b);
+}
 
 // The internal-stack half of start-up. Ends by deleting itself.
 static void ble_init_task(void *arg)
@@ -598,15 +703,15 @@ static void ble_init_task(void *arg)
         }
         ble_hs_cfg.reset_cb = on_reset;
         ble_hs_cfg.sync_cb = on_sync;
-        ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
-        // Pairing (B5 adds the screen): numeric comparison with a number on the dial, LE Secure Connections, bonds kept. With no passkey UI a pairing
-        // that needs one fails, so a product image accepts only a phone that is already bonded.
+        ble_hs_cfg.store_status_cb = store_status;   // a full store refuses the new bond; it never evicts an old one
+        // Pairing (B5 adds the screen): numeric comparison with a number on the dial, LE Secure Connections. Bonding starts CLOSED: bonds are made only inside the
+        // pairing window (ble_link_pairing_window), and the product channel gate wants an authenticated bond.
         ble_hs_cfg.sm_io_cap = BLE_HS_IO_DISPLAY_YESNO;
-        ble_hs_cfg.sm_bonding = 1;
+        ble_hs_cfg.sm_bonding = 0;
         ble_hs_cfg.sm_mitm = 1;
         ble_hs_cfg.sm_sc = 1;
-        ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
-        ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+        ble_pair_init(&s_pair);
+        apply_bonding_policy();
         ble_svc_gap_init();
         ble_svc_gatt_init();
         char name[24];
@@ -618,7 +723,10 @@ static void ble_init_task(void *arg)
             ESP_LOGE(TAG, "the BLE host did not sync");
             break;
         }
-        if (atomic_load(&s_abandoned)) {
+        // The point of no return, decided against ble_link_start's timeout by one compare-and-swap: from here start() waits for us; before it, start() has
+        // already told app_main "USB" and we start nothing.
+        int expected = PHASE_WAITING;
+        if (!atomic_compare_exchange_strong(&b->phase, &expected, PHASE_COMMITTED)) {
             ESP_LOGW(TAG, "start-up was given up on: not starting the link");
             break;
         }
@@ -639,6 +747,7 @@ static void ble_init_task(void *arg)
     } while (0);
     ESP_LOGI(TAG, "ble_init done ok=%d stack free_min=%u B", (int)b->ok, (unsigned)uxTaskGetStackHighWaterMark(NULL));
     xSemaphoreGive(b->done);
+    boot_release(b);
     vTaskDelete(NULL);
 }
 
@@ -668,7 +777,7 @@ bool ble_link_start(void)
     }
     atomic_store(&s_tls, tls);
 #ifdef BLE_DEV_ALLOW_UNBONDED
-    ESP_LOGW(TAG, "DEVELOPMENT BUILD (BLE_DEV_ALLOW_UNBONDED): the phone is accepted without a bond; TLS-PSK is the only authentication");
+    ESP_LOGW(TAG, "DEVELOPMENT BUILD BLE_DEV_UNBONDED_IMAGE: an unbonded phone is accepted; TLS-PSK is the only authentication. Do not ship this image.");
 #endif
     boot_t *b = calloc(1, sizeof *b);
     if (!b) {
@@ -676,22 +785,29 @@ bool ble_link_start(void)
         return false;
     }
     b->done = xSemaphoreCreateBinary();
+    atomic_init(&b->phase, PHASE_WAITING);
+    atomic_init(&b->refs, 2);   // this caller and ble_init_task
     if (!b->done || xTaskCreate(ble_init_task, "ble_init", BLE_INIT_STACK, b, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "ble_init task create failed: USB mode");
-        if (b->done) vSemaphoreDelete(b->done);
-        free(b);
+        atomic_store(&b->refs, 1);   // no second party exists
+        boot_release(b);
         return false;
     }
     ESP_LOGI(TAG, "phone mode (wl_mode = 2): starting the BLE host");
-    if (xSemaphoreTake(b->done, pdMS_TO_TICKS(INIT_WAIT_MS)) != pdTRUE) {
-        // ble_init is still working. It sees the flag before it starts the link task and does not start it; `b` is leaked on purpose (it is still in use).
-        atomic_store(&s_abandoned, true);
-        ESP_LOGE(TAG, "the phone mode did not start in time: USB mode");
-        return false;
+    bool finished = xSemaphoreTake(b->done, pdMS_TO_TICKS(INIT_WAIT_MS)) == pdTRUE;
+    if (!finished) {
+        int expected = PHASE_WAITING;
+        if (atomic_compare_exchange_strong(&b->phase, &expected, PHASE_ABANDONED)) {
+            // ble_init is still working and has not passed its point of no return: it will see ABANDONED there and start nothing. `b` is its now.
+            ESP_LOGE(TAG, "the phone mode did not start in time: USB mode");
+            boot_release(b);
+            return false;
+        }
+        // ble_init had already committed: all that is left for it is creating the link task, so waiting for it is bounded
+        finished = xSemaphoreTake(b->done, portMAX_DELAY) == pdTRUE;
     }
-    const bool ok = b->ok;
-    vSemaphoreDelete(b->done);
-    free(b);
+    const bool ok = finished && b->ok;
+    boot_release(b);
     if (!ok) ESP_LOGE(TAG, "the phone mode did not start: USB mode");
     return ok;
 }

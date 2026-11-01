@@ -12,16 +12,16 @@
 #define H BLE_ST_CHANNEL_UP
 #define U BLE_ST_TLS_UP
 #define R BLE_ST_AUTH_FAILED
-//                         START STOP ADV_TO LINK_UP LINK_DOWN ENC ENC_TO CH_OPEN CH_CLOSED TLS_UP TLS_FAIL TLS_REFUSED
+//                         START STOP ADV_TO LINK_UP LINK_DOWN ENC ENC_TO CH_OPEN CH_CLOSED TLS_UP TLS_FAIL TLS_REFUSED IDLE_TO
 static const uint8_t NEXT[BLE_ST_COUNT][BLE_EV_COUNT] = {
-    /* OFF         */ { A,    O,   O,     O,      O,        O,  O,     O,      O,        O,     O,       O },
-    /* ADVERTISING */ { A,    O,   F,     S,      A,        A,  A,     A,      A,        A,     A,       A },
-    /* NOT_FOUND   */ { A,    O,   F,     F,      F,        F,  F,     F,      F,        F,     F,       F },
-    /* SECURING    */ { S,    O,   S,     S,      A,        C,  A,     S,      S,        S,     S,       S },
-    /* CONNECTED   */ { C,    O,   C,     C,      A,        C,  C,     H,      C,        C,     C,       C },
-    /* CHANNEL_UP  */ { H,    O,   H,     H,      A,        H,  H,     H,      C,        U,     C,       R },
-    /* TLS_UP      */ { U,    O,   U,     U,      A,        U,  U,     U,      C,        U,     C,       U },
-    /* AUTH_FAILED */ { R,    O,   R,     R,      A,        R,  R,     R,      R,        R,     R,       R },
+    /* OFF         */ { A,    O,   O,     O,      O,        O,  O,     O,      O,        O,     O,       O, O },
+    /* ADVERTISING */ { A,    O,   F,     S,      A,        A,  A,     A,      A,        A,     A,       A, A },
+    /* NOT_FOUND   */ { A,    O,   F,     S,      F,        F,  F,     F,      F,        F,     F,       F, F },
+    /* SECURING    */ { S,    O,   S,     S,      A,        C,  A,     S,      S,        S,     S,       S, S },
+    /* CONNECTED   */ { C,    O,   C,     C,      A,        C,  C,     H,      C,        C,     C,       C, A },
+    /* CHANNEL_UP  */ { H,    O,   H,     H,      A,        H,  H,     H,      C,        U,     C,       R, H },
+    /* TLS_UP      */ { U,    O,   U,     U,      A,        U,  U,     U,      C,        U,     C,       U, U },
+    /* AUTH_FAILED */ { R,    O,   R,     R,      A,        R,  R,     R,      R,        R,     R,       R, R },
 };
 #undef O
 #undef A
@@ -69,6 +69,11 @@ bool ble_post(ble_t *b, ble_event_t event, uint64_t now_ms)
     if (event == BLE_EV_START || event == BLE_EV_TLS_UP) net_refusal_reset(&b->refusals);
     const ble_state_t next = ble_state_next(b->state, event);
     if (next == b->state) return false;
+    // what the change means for the abuse counters
+    if (event == BLE_EV_LINK_UP) { b->churn = 0; b->trusted = false; }                       // a new link starts clean
+    if (event == BLE_EV_LINK_DOWN) b->trusted = false;
+    if (event == BLE_EV_TLS_UP) b->churn = 0;                                                // proven: the peer holds the key
+    if (b->state == BLE_ST_CHANNEL_UP && (event == BLE_EV_CHANNEL_CLOSED || event == BLE_EV_TLS_FAIL || event == BLE_EV_TLS_REFUSED) && b->churn < 255) b->churn++;
     b->state = next;
     b->since_ms = now_ms;
     return true;
@@ -93,13 +98,15 @@ uint32_t ble_deadline_ms(ble_state_t state)
 ble_event_t ble_poll(const ble_t *b, uint64_t now_ms)
 {
     if (!b) return BLE_EV_NONE;
-    const uint32_t limit = ble_deadline_ms(b->state);
+    uint32_t limit = ble_deadline_ms(b->state);
+    if (b->state == BLE_ST_CONNECTED && !b->trusted) limit = BLE_IDLE_CAP_MS;   // only a trusted peer may wait for ever
     if (limit == 0 || now_ms < b->since_ms || now_ms - b->since_ms < limit) return BLE_EV_NONE;
     switch (b->state) {
     case BLE_ST_ADVERTISING: return BLE_EV_ADV_TIMEOUT;
     case BLE_ST_SECURING:    return BLE_EV_ENC_TIMEOUT;
     case BLE_ST_CHANNEL_UP:  return BLE_EV_TLS_FAIL;
     case BLE_ST_NOT_FOUND:   return BLE_EV_START;
+    case BLE_ST_CONNECTED:   return BLE_EV_IDLE_TIMEOUT;
     default:                 break;
     }
     return BLE_EV_NONE;
@@ -114,11 +121,60 @@ ble_event_t ble_handshake_failed(ble_t *b, bool refused, uint64_t now_ms)
     return event;
 }
 
-ble_accept_t ble_accept_check(bool encrypted, bool bonded, bool dev_unbonded, bool channel_open)
+bool ble_sec_trusted(const ble_sec_t *sec)
+{
+    return sec && sec->encrypted && sec->bonded && sec->authenticated && sec->key_size >= BLE_KEY_SIZE_MIN;
+}
+
+ble_accept_t ble_accept_check(const ble_sec_t *sec, bool dev_unbonded, bool channel_open)
 {
     if (channel_open) return BLE_ACCEPT_REFUSE_SECOND;
     if (dev_unbonded) return BLE_ACCEPT_OK;
-    return encrypted && bonded ? BLE_ACCEPT_OK : BLE_ACCEPT_REFUSE_ENC;
+    return ble_sec_trusted(sec) ? BLE_ACCEPT_OK : BLE_ACCEPT_REFUSE_ENC;
+}
+
+void ble_set_trusted(ble_t *b, bool trusted)
+{
+    if (b) b->trusted = trusted;
+}
+
+bool ble_churn_exceeded(const ble_t *b)
+{
+    return b && b->churn >= BLE_CHURN_LIMIT;
+}
+
+uint32_t ble_refused_wait_ms(bool trusted, net_backoff_t *ladder, uint32_t random_word)
+{
+    if (!trusted || !ladder) return BLE_COOLDOWN_MS;
+    return net_backoff_next_ms(ladder, true, random_word);
+}
+
+void ble_pair_init(ble_pair_window_t *w)
+{
+    if (w) memset(w, 0, sizeof *w);
+}
+
+void ble_pair_open(ble_pair_window_t *w, uint64_t now_ms)
+{
+    if (!w) return;
+    w->open = true;
+    w->from_ms = now_ms;
+    w->until_ms = now_ms + BLE_PAIR_WINDOW_MS;
+}
+
+void ble_pair_close(ble_pair_window_t *w)
+{
+    if (w) w->open = false;
+}
+
+bool ble_pair_is_open(const ble_pair_window_t *w, uint64_t now_ms)
+{
+    return w && w->open && now_ms >= w->from_ms && now_ms < w->until_ms;
+}
+
+bool ble_bond_allowed(const ble_pair_window_t *w, uint64_t now_ms, bool store_full)
+{
+    return !store_full && ble_pair_is_open(w, now_ms);
 }
 
 bool ble_encryption_required(bool dev_unbonded) { return !dev_unbonded; }

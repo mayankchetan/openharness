@@ -30,6 +30,11 @@
 #define BLE_ADV_TIMEOUT_MS   30000u
 #define BLE_RETRY_MS         120000u   // NOT_FOUND to advertising again, with no wake
 #define BLE_ENC_DEADLINE_MS  3000u
+#define BLE_IDLE_CAP_MS      10000u    // CONNECTED, waiting for a channel, for a peer that is not authenticated-bonded
+#define BLE_CHURN_LIMIT      3u        // channels that opened and closed without reaching TLS_UP, per link, then the link is ended
+#define BLE_COOLDOWN_MS      10000u    // flat wait before advertising again after an abusive or unproven peer (no escalation)
+#define BLE_KEY_SIZE_MIN     16u       // bytes of the link key
+#define BLE_PAIR_WINDOW_MS   120000u   // the window the user opens to pair a phone (B5 opens it)
 #define BLE_TLS_DEADLINE_MS  5000u
 
 typedef enum {
@@ -59,6 +64,7 @@ typedef enum {
     BLE_EV_TLS_UP,           // the handshake finished
     BLE_EV_TLS_FAIL,         // the handshake failed (an ordinary failure, a first or second alert, or the deadline), or an up link failed
     BLE_EV_TLS_REFUSED,      // the third alert in a row
+    BLE_EV_IDLE_TIMEOUT,     // CONNECTED for BLE_IDLE_CAP_MS with a peer that is not authenticated-bonded: the glue drops the link
     BLE_EV_COUNT
 } ble_event_t;
 
@@ -72,12 +78,22 @@ typedef struct {
     uint64_t      since_ms;   // when the state was entered (the deadlines count from here)
     uint64_t      last_ms;    // the newest clock reading: a clock that steps back is held at it
     net_refusal_t refusals;   // alerts in a row (net_state.h)
+    bool          trusted;    // this link is authenticated, bonded and long-keyed (ble_sec_trusted); set by the glue, cleared at every new link
+    uint8_t       churn;      // channels of this link that ended without reaching TLS_UP (saturates); cleared by TLS_UP and by a new link
 } ble_t;
 
 void ble_init(ble_t *b);   // OFF, zeroed
 // Fold one event in. True when the state changed (and since_ms is now). START and TLS_UP clear the run of refusals; LINK_DOWN does not (the refused
 // ladder is about the daemon refusing this dial, not about which link it came over).
 bool ble_post(ble_t *b, ble_event_t event, uint64_t now_ms);
+
+// The glue says this link passed the security rule (ble_sec_trusted) before it posts ENCRYPTED. Only a trusted peer may sit in CONNECTED without limit.
+void ble_set_trusted(ble_t *b, bool trusted);
+// This link has opened and lost BLE_CHURN_LIMIT channels without one reaching TLS_UP: the glue ends it and waits BLE_COOLDOWN_MS before advertising.
+bool ble_churn_exceeded(const ble_t *b);
+// How long to stay silent after a refused key (three alerts in a row): a peer that is not trusted gets the flat BLE_COOLDOWN_MS, always, so an attacker
+// cannot walk the ladder up; a trusted one gets the refused ladder of net_state.h (30 s to 5 min, with jitter from `random_word`). NULL ladder: flat.
+uint32_t ble_refused_wait_ms(bool trusted, net_backoff_t *ladder, uint32_t random_word);
 
 // How long a state may last, 0 for no deadline. ADVERTISING, SECURING, CHANNEL_UP and NOT_FOUND (the retry) have one; nothing else does.
 uint32_t ble_deadline_ms(ble_state_t state);
@@ -102,14 +118,31 @@ size_t ble_adv_data(const char *mac, uint8_t *out, size_t cap);
 size_t ble_scan_rsp_data(uint8_t *out, size_t cap);
 
 // ── admission ───────────────────────────────────────────────────────────────────────────────────────
-// Only an encrypted, bonded peer gets the channel; one channel at a time. `dev_unbonded` is the build flag BLE_DEV_ALLOW_UNBONDED (off in every product
-// config; TLS-PSK still authenticates both ends): it waives the bond and the encryption, never the one-channel rule.
+// What the link says about itself (NimBLE's sec_state of the connection).
+typedef struct { bool encrypted, bonded, authenticated; uint8_t key_size; } ble_sec_t;
+// The product rule: encrypted AND bonded AND authenticated (numeric comparison, not Just Works) AND a key of at least BLE_KEY_SIZE_MIN bytes. A peer
+// that says NoInputNoOutput gets Just Works and a bond with authenticated = 0; it is not trusted. NULL: not trusted.
+bool ble_sec_trusted(const ble_sec_t *sec);
+
+// Only a trusted peer gets the channel; one channel at a time. `dev_unbonded` is the build flag BLE_DEV_ALLOW_UNBONDED (off in every product
+// config; TLS-PSK still authenticates both ends): it waives the whole security rule, never the one-channel rule.
 typedef enum {
     BLE_ACCEPT_OK = 0,
     BLE_ACCEPT_REFUSE_ENC,      // not encrypted, or encrypted without a bond: refuse with "insufficient encryption"
     BLE_ACCEPT_REFUSE_SECOND,   // a channel is already open
 } ble_accept_t;
 
-ble_accept_t ble_accept_check(bool encrypted, bool bonded, bool dev_unbonded, bool channel_open);
+ble_accept_t ble_accept_check(const ble_sec_t *sec, bool dev_unbonded, bool channel_open);
 // Does the link need to become encrypted at all? With the dev flag it does not, so the glue posts ENCRYPTED at the connect and the 3 s deadline never fires.
 bool ble_encryption_required(bool dev_unbonded);
+
+// ── bonds ───────────────────────────────────────────────────────────────────────────────────────────
+// A new bond is made only inside an explicit pairing window, and never by evicting an old one. The window is closed by default and closes by itself at
+// BLE_PAIR_WINDOW_MS (120.0 s); B5 opens it from the Settings row. A clock that stepped back before the window opened reads as closed.
+typedef struct { bool open; uint64_t from_ms, until_ms; } ble_pair_window_t;
+void ble_pair_init(ble_pair_window_t *w);                       // closed
+void ble_pair_open(ble_pair_window_t *w, uint64_t now_ms);      // open (again) for BLE_PAIR_WINDOW_MS from now
+void ble_pair_close(ble_pair_window_t *w);
+bool ble_pair_is_open(const ble_pair_window_t *w, uint64_t now_ms);
+// May a pairing that wants to save a bond do so: the window is open AND the store has room (`store_full` = the stack asked to evict). Full means no.
+bool ble_bond_allowed(const ble_pair_window_t *w, uint64_t now_ms, bool store_full);

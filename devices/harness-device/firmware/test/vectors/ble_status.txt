@@ -57,6 +57,10 @@ const	relay_queue_bytes	65536	bytes
 const	relay_full_close_ms	4000	ms
 const	ws_ping_ms	25000	ms
 const	max_bonds	2	count
+const	key_size_min	16	bytes
+const	churn_limit	3	count
+const	cooldown_ms	10000	ms
+const	idle_cap_ms	10000	ms
 const	ws_backoff_jitter_percent	20	count
 
 ladder	1000,2000,4000,8000,16000,30000	ms
