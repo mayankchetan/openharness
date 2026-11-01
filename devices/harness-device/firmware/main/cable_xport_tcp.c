@@ -206,6 +206,21 @@ static int tcpx_read(const cable_xport_t *x, uint8_t *buf, size_t cap, int wait_
     return -1;
 }
 
+// Waits for the socket to become readable and consumes nothing. The TLS wrapper calls it WITHOUT its mutex (so a 2 s reader wait is one
+// select, not 200 polls, and a writer never queues behind it), so it touches no state but a single read of s_fd. A socket closed under it
+// is not guaranteed to end the select at once; the caller bounds each wait. An error here is not recorded: the next read() sees it
+// and ends the link under the lock.
+static int tcpx_wait_readable(const cable_xport_t *x, int wait_ms)
+{
+    (void)x;
+    if (wait_ms < 0) wait_ms = 0;
+    const int fd = s_fd;
+    if (fd < 0) return -1;
+    const int r = sk_wait(fd, false, wait_ms);
+    if (r < 0) return errno == EINTR ? 0 : -1;
+    return r > 0 ? 1 : 0;
+}
+
 static int tcpx_write(const cable_xport_t *x, const uint8_t *buf, size_t len, int wait_ms)
 {
     (void)x;
@@ -240,6 +255,7 @@ static const cable_xport_t s_tcp = {
     .read = tcpx_read,
     .write = tcpx_write,
     .is_up = tcpx_is_up,
+    .wait_readable = tcpx_wait_readable,
 };
 
 const cable_xport_t *cable_xport_tcp(void) { return &s_tcp; }

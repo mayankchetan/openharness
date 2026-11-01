@@ -10,9 +10,12 @@
 //               be fewer than len. 0 means "none now, try again with the SAME buffer"; that is the mbedTLS "want write" rule and the TLS
 //               wrapper relies on it. A hard error closes the socket and returns -1.
 //   is_up       The socket is connected and has not failed.
+//   wait_readable  select() for read for at most wait_ms; consumes and records nothing. 1 readable (data, end of stream or an error is
+//               waiting), 0 timeout, -1 no socket or a select error. The TLS wrapper calls it WITHOUT its mutex, so an idle reader costs one
+//               select per wait and holds nothing a writer needs. A socket closed during the wait may not end it at once.
 //
-// One instance: the dial has one link. open/read/write/close are serialised by the TLS wrapper's mutex; is_up and the introspection calls
-// may be read from any task.
+// One instance: the dial has one link. open/read/write/close are serialised by the TLS wrapper's mutex; is_up, wait_readable and the
+// introspection calls may be read from any task.
 #pragma once
 
 #include <stdbool.h>

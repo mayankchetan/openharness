@@ -96,8 +96,8 @@ static int fake_write(const cable_xport_t *x, const uint8_t *p, size_t len, int 
     return (int)n;
 }
 static bool fake_is_up(const cable_xport_t *x) { assert(x == s_xport); is_up_calls++; return up; }
-static const cable_xport_t fake_ble = { "fake", CABLE_XPORT_BLE, NULL, NULL, fake_read, fake_write, fake_is_up, NULL, NULL };
-static const cable_xport_t fake_wifi = { "fake", CABLE_XPORT_WIFI, NULL, NULL, fake_read, fake_write, fake_is_up, NULL, NULL };
+static const cable_xport_t fake_ble = { "fake", CABLE_XPORT_BLE, NULL, NULL, fake_read, fake_write, fake_is_up, NULL, NULL, NULL };
+static const cable_xport_t fake_wifi = { "fake", CABLE_XPORT_WIFI, NULL, NULL, fake_read, fake_write, fake_is_up, NULL, NULL, NULL };
 
 typedef struct { uint8_t type; size_t len; uint8_t first; } seen_t;
 static seen_t seen[16];

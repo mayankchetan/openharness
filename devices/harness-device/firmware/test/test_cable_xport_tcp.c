@@ -153,7 +153,7 @@ static void test_shape(void)
     fresh(CONN_NOW);
     const cable_xport_t *x = tcp();
     CHECK(x == cable_xport_tcp() && !strcmp(x->name, "tcp") && x->kind == CABLE_XPORT_WIFI && x->inner == NULL);
-    CHECK(x->open && x->close && x->read && x->write && x->is_up);
+    CHECK(x->open && x->close && x->read && x->write && x->is_up && x->wait_readable);
     CHECK(!x->is_up(x));
     // Before any peer is set open() fails without making a socket; a bad address is refused too and keeps the old one unset.
     CHECK(!x->open(x) && fk.sockets_made == 0 && cable_xport_tcp_last_errno() != 0);
@@ -244,6 +244,37 @@ static void test_read(void)
     CHECK(fk.closed_fds == 1);
 }
 
+// wait_readable: one select, nothing consumed, no state changed (the TLS wrapper calls it without its mutex).
+static void test_wait_readable(void)
+{
+    const cable_xport_t *x = tcp();
+    uint8_t buf[8];
+    // No socket yet: -1, and no select.
+    fresh(CONN_NOW);
+    CHECK(x->wait_readable(x, 50) == -1 && fk.wait_calls_read == 0);
+    open_ok();
+    // Nothing to read: one select of the whole wait, 0, the link is fine.
+    int64_t t0 = now_us;
+    CHECK(x->wait_readable(x, 70) == 0 && fk.wait_calls_read == 1 && fk.last_wait_ms == 70 && (now_us - t0) / 1000 == 70 && x->is_up(x));
+    CHECK(x->wait_readable(x, -5) == 0 && fk.last_wait_ms == 0);   // a negative wait is a poll
+    // Data waiting: 1 at once, and the data is still there for read().
+    fk.rd[0].data = "abc";
+    fk.rd_n = 1;
+    const int waits = fk.wait_calls_read;
+    t0 = now_us;
+    CHECK(x->wait_readable(x, 500) == 1 && fk.wait_calls_read == waits + 1 && now_us == t0);
+    CHECK(fk.rd_at == 0 && fk.rd_off == 0);                         // nothing was received by the wait
+    CHECK(x->read(x, buf, sizeof buf, 0) == 3 && !memcmp(buf, "abc", 3));
+    // An end of stream also counts as readable (the read() that follows reports it); the wait itself does not close anything.
+    fk.rd[0] = (rd_t){ NULL, -1 };
+    fk.rd_n = 1; fk.rd_at = 0;
+    CHECK(x->wait_readable(x, 500) == 1 && x->is_up(x) && fk.open_fds == 1 && fk.closed_fds == 0);
+    CHECK(x->read(x, buf, sizeof buf, 0) == -1 && !x->is_up(x));
+    // After the socket is gone: -1 again, no select.
+    const int waits2 = fk.wait_calls_read;
+    CHECK(x->wait_readable(x, 50) == -1 && fk.wait_calls_read == waits2);
+}
+
 // What the TLS wrapper's BIO does: keep offering the rest of the same record until it is all taken or the link dies.
 static int drain(const cable_xport_t *x, const uint8_t *rec, size_t len, int wait_ms, int max_calls)
 {
@@ -329,6 +360,7 @@ int main(void)
     test_shape();
     test_open();
     test_read();
+    test_wait_readable();
     test_write();
     printf("cable_xport_tcp: PASS (%u checks; connect success, hang, refusal; reads in pieces, close, reset; partial writes keep the same buffer, EAGAIN is 0, errors close)\n", checks);
     return 0;

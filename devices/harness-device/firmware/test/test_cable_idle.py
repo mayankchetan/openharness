@@ -43,7 +43,7 @@ static int fake_read(const cable_xport_t *x, uint8_t *out, size_t cap, int wait)
     if (r.len) memcpy(out, r.bytes, r.len);
     return (int)r.len;
 }
-static const cable_xport_t fake_xport = { "fake", CABLE_XPORT_USB, NULL, NULL, fake_read, NULL, NULL, NULL, NULL };
+static const cable_xport_t fake_xport = { "fake", CABLE_XPORT_USB, NULL, NULL, fake_read, NULL, NULL, NULL, NULL, NULL };
 static void tick(void *ctx) { assert(!ctx); ticks++; }
 static void collect(uint8_t version, uint8_t type, const uint8_t *p, size_t n, void *ctx) {
     assert(!ctx && version == CABLE_FRAME_VERSION && type == CABLE_TYPE_JSON);

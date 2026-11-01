@@ -25,7 +25,8 @@ static const char *TAG = "tls";
 #define TLS_HANDSHAKE_MS 5000   // from the moment the inner transport is up
 #define TLS_INNER_UP_MS  5000   // how long open() waits for the inner transport to report up
 #define TLS_WRITE_CAP_MS 2000   // once a record is composed: finish it or close (finding F3)
-#define TLS_SLICE_MS     10     // longest a reader holds the mutex while it waits for data
+#define TLS_SLICE_MS     10     // longest a reader holds the mutex while it waits for data (inner transport without wait_readable, and the handshake)
+#define TLS_WAIT_SLICE_MS 500   // longest one reader wait on the socket (no mutex held): bounds how late a reader notices a close
 #define TLS_CLOSE_MS     100    // best effort close_notify
 
 // Only TLS-ECDHE-PSK-AES-CBC suites. mbedtls_ssl_conf_ciphersuites keeps the pointer, so the list is static.
@@ -223,30 +224,64 @@ static void tls_close(const cable_xport_t *x)
 
 // ── read ───────────────────────────────────────────────────────────────────────────────────────────
 
-// A failed stream still waits out its time (cable_xport.h), or the reader task would spin.
-static int read_dead(int wait_ms)
+static int64_t left_ms_up(int64_t end_us)
 {
-    if (wait_ms > 0) vTaskDelay(pdMS_TO_TICKS(wait_ms));
+    int64_t left_us = end_us - now_us();
+    return left_us <= 0 ? 0 : (left_us + 999) / 1000;
+}
+
+// A failed stream still waits out the rest of the reader's time (cable_xport.h), or the reader task would spin.
+static int read_dead(int64_t end_us)
+{
+    int64_t left_ms = (end_us - now_us()) / 1000;
+    if (left_ms > 0) vTaskDelay(pdMS_TO_TICKS(left_ms));
     return -1;
 }
 
+// How the reader waits (wake count is the point: a 2 s wait in S2 must not be 200 polls).
+//   Inner transport with wait_readable (TCP): the reader waits for the socket WITHOUT the mutex, in waits of at most
+//   TLS_WAIT_SLICE_MS, then takes the mutex and reads with no wait of its own. A writer finds the mutex free all the time.
+//   The slice is a bound, not a poll rate: a close from another task ends the reader's wait through the socket where the
+//   stack wakes a select on a closed socket, and within one slice where it does not (then `up` is seen false at the top).
+//   Inner transport without it: the older way, polling in TLS_SLICE_MS slices with the mutex held per slice.
+// Bytes mbedTLS already holds (the rest of a record the caller's buffer was too small for, or a record that arrived with the one
+// before) never reach the socket again, so each call looks for them first, once, before it waits on the socket.
 static int tls_read(const cable_xport_t *x, uint8_t *buf, size_t cap, int wait_ms)
 {
     tls_t *t = x->ctx;
     if (wait_ms < 0) wait_ms = 0;
     const int64_t end = now_us() + (int64_t)wait_ms * 1000;
+    const bool can_wait = t->inner->wait_readable != NULL;
+    bool socket_next = false;   // mbedTLS holds nothing more: the next step is to wait on the socket
     for (;;) {
-        if (!atomic_load(&t->up) || atomic_load(&t->closing)) return read_dead(wait_ms);
-        int64_t left_ms = (end - now_us()) / 1000;
-        if (left_ms < 0) left_ms = 0;
+        if (!atomic_load(&t->up) || atomic_load(&t->closing)) return read_dead(end);
+        int64_t left_ms = left_ms_up(end);   // rounded up: a last fraction of a millisecond is one more wait, not a spin of zero waits
+        if (can_wait && socket_next) {
+            int w = left_ms > TLS_WAIT_SLICE_MS ? TLS_WAIT_SLICE_MS : (int)left_ms;
+            // No mutex here. > 0: readable, or the end of the stream, which the read below reports. < 0: the inner transport
+            // failed; the read below finds the same error and ends the link under the mutex. 0: timeout, look at the state again.
+            if (t->inner->wait_readable(t->inner, w) == 0) {
+                if (now_us() >= end) return 0;
+                continue;
+            }
+            left_ms = left_ms_up(end);
+        }
         if (xSemaphoreTake(t->lock, pdMS_TO_TICKS(left_ms)) == pdTRUE) {
             if (!atomic_load(&t->up) || !t->ssl_ready) {
                 xSemaphoreGive(t->lock);
-                return read_dead(wait_ms);
+                return read_dead(end);
             }
-            int64_t slice = (end - now_us()) / 1000;
-            if (slice < 0) slice = 0;
-            if (slice > TLS_SLICE_MS) slice = TLS_SLICE_MS;
+            int64_t slice = 0;   // with a wait op the socket is readable (or mbedTLS holds bytes): read, do not wait
+            if (can_wait && !socket_next && mbedtls_ssl_get_bytes_avail(&t->ssl) == 0 && mbedtls_ssl_check_pending(&t->ssl) == 0) {
+                xSemaphoreGive(t->lock);
+                socket_next = true;
+                continue;
+            }
+            if (!can_wait) {
+                slice = (end - now_us()) / 1000;
+                if (slice < 0) slice = 0;
+                if (slice > TLS_SLICE_MS) slice = TLS_SLICE_MS;
+            }
             mbedtls_ssl_conf_read_timeout(&t->conf, (uint32_t)slice);
             int r = mbedtls_ssl_read(&t->ssl, buf, cap);
             if (r > 0) {
@@ -258,8 +293,9 @@ static int tls_read(const cable_xport_t *x, uint8_t *buf, size_t cap, int wait_m
                 if (r != MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) ESP_LOGW(TAG, "read failed: -0x%04X", (unsigned)-r);
                 kill_link(t);
                 xSemaphoreGive(t->lock);
-                return read_dead(wait_ms);
+                return read_dead(end);
             }
+            socket_next = true;   // mbedTLS took all it could from what was there and needs more from the socket
             xSemaphoreGive(t->lock);
         } else if (now_us() < end) {
             vTaskDelay(1);   // the mutex was busy and time remains: do not spin

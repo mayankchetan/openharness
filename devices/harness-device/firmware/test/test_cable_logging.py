@@ -69,7 +69,7 @@ static int fake_write(const cable_xport_t *x,const uint8_t *p,size_t len,int wai
     if(stalled)return 0;
     assert(wire_bytes+len<=sizeof wire);memcpy(wire+wire_bytes,p,len);wire_bytes+=len;return (int)len;
 }
-static const cable_xport_t fake_xport = { "fake", CABLE_XPORT_USB, NULL, NULL, NULL, fake_write, NULL, NULL, NULL };
+static const cable_xport_t fake_xport = { "fake", CABLE_XPORT_USB, NULL, NULL, NULL, fake_write, NULL, NULL, NULL, NULL };
 static void last_words_add(const char *p,size_t n) { assert(n<sizeof saved);memcpy(saved,p,n);saved[n]=0; }
 static vprintf_like_t esp_log_set_vprintf(vprintf_like_t next) {
     vprintf_like_t old=hook;hook=next;installed++;return old;

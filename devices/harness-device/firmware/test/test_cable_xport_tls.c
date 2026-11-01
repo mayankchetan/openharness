@@ -190,6 +190,10 @@ typedef struct {
     atomic_int write_calls;
     atomic_int open_calls;
     atomic_int close_calls;
+    atomic_int read_calls;       // inner read() calls (each one is a wake of the dial)
+    atomic_int wait_calls;       // inner wait_readable() calls
+    atomic_int wait_blocked;     // ... of which found nothing to read at the start (they would really sleep)
+    atomic_bool wait_ignores_close;   // the wait does not end when the stream closes (a socket close that selects do not notice)
 } end_t;
 
 static bool end_open(const cable_xport_t *x) { end_t *e = x->ctx; atomic_fetch_add(&e->open_calls, 1); atomic_store(&e->closed_by_wrapper, false); atomic_store(&e->up, true); return true; }
@@ -207,7 +211,32 @@ static void end_close(const cable_xport_t *x)
 static int end_read(const cable_xport_t *x, uint8_t *buf, size_t cap, int wait_ms)
 {
     end_t *e = x->ctx;
+    atomic_fetch_add(&e->read_calls, 1);
     return q_read(e->rx, buf, cap, wait_ms, (size_t)atomic_load(&e->max_read));
+}
+
+// like a select() on the socket: > 0 when a read would not block (data, or the end of the stream), 0 on timeout. Consumes nothing.
+static int end_wait(const cable_xport_t *x, int wait_ms)
+{
+    end_t *e = x->ctx;
+    atomic_fetch_add(&e->wait_calls, 1);
+    q_t *q = e->rx;
+    bool ignore_close = atomic_load(&e->wait_ignores_close);
+    pthread_mutex_lock(&q->m);
+    if (q->len == 0 && (ignore_close || !q->closed)) atomic_fetch_add(&e->wait_blocked, 1);
+    if (q->len == 0 && (ignore_close || !q->closed) && wait_ms > 0) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        ts.tv_sec += wait_ms / 1000;
+        ts.tv_nsec += (long)(wait_ms % 1000) * 1000000L;
+        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+        while (q->len == 0 && (ignore_close || !q->closed)) {
+            if (pthread_cond_timedwait(&q->c, &q->m, &ts) != 0) break;
+        }
+    }
+    int ret = (q->len > 0 || (q->closed && !ignore_close)) ? 1 : 0;
+    pthread_mutex_unlock(&q->m);
+    return ret;
 }
 
 static int end_write(const cable_xport_t *x, const uint8_t *buf, size_t len, int wait_ms)
@@ -247,8 +276,13 @@ static void link_init(link_t *l, cable_xport_kind_t kind)
     atomic_init(&e->write_calls, 0);
     atomic_init(&e->open_calls, 0);
     atomic_init(&e->close_calls, 0);
+    atomic_init(&e->read_calls, 0);
+    atomic_init(&e->wait_calls, 0);
+    atomic_init(&e->wait_blocked, 0);
+    atomic_init(&e->wait_ignores_close, false);
+    // wait_readable is present, as the TCP transport's is; a test that wants the older shape (no such op) sets it to NULL
     e->x = (cable_xport_t){ .name = "fake", .kind = kind, .open = end_open, .close = end_close, .read = end_read,
-                            .write = end_write, .is_up = end_is_up, .ctx = e };
+                            .write = end_write, .is_up = end_is_up, .ctx = e, .wait_readable = end_wait };
 }
 
 static void link_reset(link_t *l)
@@ -828,11 +862,14 @@ static void test_concurrent_echo(void)
     }
 }
 
-static void test_writer_not_starved(void)
+// with_wait_op: the inner transport has wait_readable (the TCP one does: the reader waits without the mutex); without it the
+// wrapper falls back to polling in TLS_SLICE_MS slices under the mutex, and that older path must keep its writer latency
+static void run_writer_not_starved(bool with_wait_op)
 {
     // The server swallows everything and says nothing, so the reader thread waits for data the whole time.
     link_t *l = calloc(1, sizeof(*l));
     link_init(l, CABLE_XPORT_WIFI);
+    if (!with_wait_op) l->client.x.wait_readable = NULL;
     server_t s;
     server_start(&s, l, SRV_SINK);
     server_run(&s);
@@ -843,6 +880,7 @@ static void test_writer_not_starved(void)
     pthread_t r;
     CHECK(pthread_create(&r, NULL, duo_reader, &d) == 0);
     usleep(50000);
+    const int reads_before = atomic_load(&l->client.read_calls);
     int64_t worst = 0, total = 0;
     const int N = 300;
     for (int i = 0; i < N; i++) {
@@ -852,15 +890,164 @@ static void test_writer_not_starved(void)
         total += ms;
         if (ms > worst) worst = ms;
     }
+    const int reads = atomic_load(&l->client.read_calls) - reads_before;
     atomic_store(&d.stop, true);
     pthread_join(r, NULL);
     CHECK(d.rc == 0);
     CHECK(worst < 120);   // one 10 ms read slice, a yield tick, and the record itself
+    if (with_wait_op) CHECK(reads <= 5);   // the reader waited in select, not in inner reads: it does not poll the socket
     t->close(t);
     server_join(&s);
     cable_xport_tls_free(t);
     free(l);
-    printf("ok writer not starved by a waiting reader: %d writes, worst %lld ms, mean %lld ms\n", N, (long long)worst, (long long)(total / N));
+    printf("ok writer not starved by a waiting reader (%s): %d writes, worst %lld ms, mean %lld ms, %d inner reads meanwhile\n",
+           with_wait_op ? "reader waits on the socket" : "reader polls in slices", N, (long long)worst, (long long)(total / N), reads);
+}
+
+static void test_writer_not_starved(void)
+{
+    run_writer_not_starved(false);
+    run_writer_not_starved(true);
+}
+
+// An idle 2 s read (the S2 reader wait) must cost a handful of wakes, not one per 10 ms slice (about 200).
+static void test_idle_read_few_wakes(void)
+{
+    link_t *l = calloc(1, sizeof(*l));
+    link_init(l, CABLE_XPORT_WIFI);
+    server_t s;
+    server_start(&s, l, SRV_SINK);
+    server_run(&s);
+    const cable_xport_t *t = wrap(l, KEY_A);
+    CHECK(t->open(t));
+    usleep(50000);
+    const int reads0 = atomic_load(&l->client.read_calls), waits0 = atomic_load(&l->client.wait_calls);
+    uint8_t b[64];
+    int64_t t0 = ms_now();
+    CHECK(t->read(t, b, sizeof(b), 2000) == 0);
+    int64_t ms = ms_now() - t0;
+    const int reads = atomic_load(&l->client.read_calls) - reads0, waits = atomic_load(&l->client.wait_calls) - waits0;
+    CHECK(ms >= 1900 && ms < 2300);
+    CHECK(waits >= 1 && waits <= 6);   // 2000 ms in waits of at most 500 ms
+    CHECK(reads <= 3);                 // and no inner read at all while nothing arrives
+    CHECK(t->is_up(t));
+    t->close(t);
+    server_join(&s);
+    cable_xport_tls_free(t);
+    free(l);
+    printf("ok idle 2 s read: %lld ms, %d inner waits, %d inner reads (a 10 ms poll would make about 200)\n", (long long)ms, waits, reads);
+}
+
+typedef struct { const cable_xport_t *t; int wait_ms; int rc; int64_t ms; } rd_arg_t;
+
+static void *timed_reader(void *p)
+{
+    rd_arg_t *a = p;
+    uint8_t b[64];
+    int64_t t0 = ms_now();
+    a->rc = a->t->read(a->t, b, sizeof(b), a->wait_ms);
+    a->ms = ms_now() - t0;
+    return NULL;
+}
+
+// A reader parked in a long wait still hears the peer at once: data in the middle of the wait ends it.
+static void test_data_ends_wait(void)
+{
+    link_t *l = calloc(1, sizeof(*l));
+    link_init(l, CABLE_XPORT_WIFI);
+    server_t s;
+    server_start(&s, l, SRV_ECHO);
+    server_run(&s);
+    const cable_xport_t *t = wrap(l, KEY_A);
+    CHECK(t->open(t));
+    rd_arg_t a = { .t = t, .wait_ms = 3000 };
+    pthread_t th;
+    CHECK(pthread_create(&th, NULL, timed_reader, &a) == 0);
+    usleep(200000);
+    CHECK(send_frame(t, 3) > 0);   // the server echoes it
+    pthread_join(th, NULL);
+    CHECK(a.rc > 0);
+    CHECK(a.ms < 1000);   // 200 ms of waiting plus the round trip, not the 3 s given (the wait slice is 500 ms and data cuts it short)
+    t->close(t);
+    server_join(&s);
+    cable_xport_tls_free(t);
+    free(l);
+    printf("ok data in the middle of a 3 s wait ends it: %d bytes after %lld ms\n", a.rc, (long long)a.ms);
+}
+
+// Bytes already inside mbedTLS (the rest of a record the caller's buffer was too small for) are returned at once: the reader must
+// not go and wait on a socket that has nothing more to say.
+static void test_buffered_bytes_without_wait(void)
+{
+    link_t *l = calloc(1, sizeof(*l));
+    link_init(l, CABLE_XPORT_WIFI);
+    server_t s;
+    server_start(&s, l, SRV_ECHO);
+    server_run(&s);
+    const cable_xport_t *t = wrap(l, KEY_A);
+    CHECK(t->open(t));
+    uint8_t frame[CABLE_MAX_FRAME];
+    const uint32_t seq = 17;   // a frame of several thousand bytes (payload_len_for), one echoed record
+    int n = make_frame(seq, frame, sizeof(frame));
+    CHECK(n > 3000);
+    CHECK(t->write(t, frame, (size_t)n, 1000) == n);
+    usleep(300000);   // the whole echo is in the queue
+    atomic_store(&l->client.wait_blocked, 0);
+    uint8_t out[CABLE_MAX_FRAME];
+    int got = 0, calls = 0;
+    int64_t t0 = ms_now();
+    while (got < n) {
+        int r = t->read(t, out + got, 64 > (size_t)(n - got) ? (size_t)(n - got) : 64, 2000);   // 64 bytes a call: most of the record stays inside mbedTLS
+        CHECK(r > 0);
+        got += r;
+        calls++;
+    }
+    int64_t ms = ms_now() - t0;
+    CHECK(memcmp(out, frame, (size_t)n) == 0);
+    CHECK(calls > 20);
+    CHECK(atomic_load(&l->client.wait_blocked) == 0);   // no wait ever found an empty socket: the bytes came from mbedTLS's buffer
+    CHECK(ms < 400);
+    t->close(t);
+    server_join(&s);
+    cable_xport_tls_free(t);
+    free(l);
+    printf("ok buffered bytes come back without a wait: %d bytes in %d reads, %lld ms, no wait on an empty socket\n", n, calls, (long long)ms);
+}
+
+// close() during a reader's wait: close is not held up by the reader, and the reader comes back dead inside its own wait.
+static void run_close_during_wait(bool wait_wakes_on_close)
+{
+    link_t *l = calloc(1, sizeof(*l));
+    link_init(l, CABLE_XPORT_WIFI);
+    atomic_store(&l->client.wait_ignores_close, !wait_wakes_on_close);
+    server_t s;
+    server_start(&s, l, SRV_SINK);
+    server_run(&s);
+    const cable_xport_t *t = wrap(l, KEY_A);
+    CHECK(t->open(t));
+    rd_arg_t a = { .t = t, .wait_ms = 1500 };
+    pthread_t th;
+    CHECK(pthread_create(&th, NULL, timed_reader, &a) == 0);
+    usleep(150000);
+    int64_t t0 = ms_now();
+    t->close(t);
+    int64_t close_ms = ms_now() - t0;
+    pthread_join(th, NULL);
+    CHECK(close_ms < 100);        // the reader holds no mutex while it waits, so close gets in at once
+    CHECK(a.rc < 0);              // dead, not a timeout
+    CHECK(a.ms < 1500 + 300);     // inside its own wait (a dead stream waits out the time it was given), plus slack
+    CHECK(!t->is_up(t));
+    server_join(&s);
+    cable_xport_tls_free(t);
+    free(l);
+    printf("ok close during a reader wait (%s): close took %lld ms, reader returned -1 after %lld ms\n",
+           wait_wakes_on_close ? "the wait sees the close" : "the wait does not see the close", (long long)close_ms, (long long)a.ms);
+}
+
+static void test_close_during_wait(void)
+{
+    run_close_during_wait(true);
+    run_close_during_wait(false);
 }
 
 // ── partial write and stalls ───────────────────────────────────────────────────────────────────────
@@ -1342,6 +1529,10 @@ int main(int argc, char **argv)
     test_partial_write_same_buffer();
     test_concurrent_echo();
     test_writer_not_starved();
+    test_idle_read_few_wakes();
+    test_data_ends_wait();
+    test_buffered_bytes_without_wait();
+    test_close_during_wait();
     test_write_stall_closes();
     test_busy_mutex_returns_zero();
     test_reads_continue_during_write_stall();

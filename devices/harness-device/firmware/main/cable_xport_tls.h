@@ -26,8 +26,11 @@
 //   * open() again without close() frees the old TLS state and closes the inner transport first.
 //
 // Concurrency. One mbedtls_ssl_context is never used by two tasks at once: one mutex covers every ssl_read, ssl_write and
-// handshake step. read() waits for data in slices of 10 ms and drops the mutex between slices, so a waiting reader never
-// starves a writer (and a reader yields when a writer is queued). The inner transport is called only from under that mutex.
+// handshake step. read() waits for data WITHOUT the mutex when the inner transport has wait_readable (TCP does): waits of at
+// most 500 ms on the socket, then the mutex for a read that does not wait, so an idle reader costs a wake every 500 ms and a
+// writer never queues behind it (bytes mbedTLS already holds are returned without a wait). An inner transport without
+// wait_readable is polled in slices of 10 ms under the mutex, dropped between slices. A reader yields when a writer is queued.
+// The inner transport's read, write and close are called only from under that mutex; its wait_readable is the one exception.
 //
 // Write rule (finding F3 of the Wi-Fi spec). write() takes the whole buffer or the link dies. mbedTLS copies the record
 // into its own buffer on the first ssl_write call and then needs the SAME arguments on every retry, so once that call has

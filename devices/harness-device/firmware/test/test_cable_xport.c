@@ -287,8 +287,8 @@ static void test_wrapper_over_loopback(void)
     static loop_t loop;
     static wrap_t wrap;
     memset(&loop, 0, sizeof loop);
-    const cable_xport_t inner = { "loop", CABLE_XPORT_BLE, loop_open, loop_close, loop_read, loop_write, loop_is_up, &loop, NULL };
-    const cable_xport_t outer = { "xor", inner.kind, wrap_open, wrap_close, wrap_read, wrap_write, wrap_is_up, &wrap, &inner };
+    const cable_xport_t inner = { "loop", CABLE_XPORT_BLE, loop_open, loop_close, loop_read, loop_write, loop_is_up, &loop, NULL, NULL };
+    const cable_xport_t outer = { "xor", inner.kind, wrap_open, wrap_close, wrap_read, wrap_write, wrap_is_up, &wrap, &inner, NULL };
     wrap.self = &outer;
 
     CHECK(outer.kind == CABLE_XPORT_BLE && !strcmp(cable_xport_kind_name(outer.kind), "ble"));

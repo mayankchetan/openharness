@@ -132,7 +132,7 @@ static bool fake_open(const cable_xport_t *x) {
     driver = allocation() && !fail_driver; return driver;
 }
 static void fake_close(const cable_xport_t *x) { assert(x == s_xport); driver = false; }
-static const cable_xport_t fake_xport = { "fake", CABLE_XPORT_USB, fake_open, fake_close, fake_read, NULL, NULL, NULL, NULL };
+static const cable_xport_t fake_xport = { "fake", CABLE_XPORT_USB, fake_open, fake_close, fake_read, NULL, NULL, NULL, NULL, NULL };
 const cable_xport_t *cable_xport_usb(void) { return &fake_xport; }
 static void cable_machines_init(int *m) { *m = 1; }
 static void session_task(void *arg) { (void)arg; }
@@ -203,7 +203,7 @@ int main(void) {
     assert(!live&&!hellos);
     // Wi-Fi mode: a stream that closed ends the session at once, without waiting out the 15 s silence rule. USB (the cable) keeps the silence rule only.
     {
-        static const cable_xport_t wifi = { "wifi", CABLE_XPORT_WIFI, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+        static const cable_xport_t wifi = { "wifi", CABLE_XPORT_WIFI, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
         owner = 1; s_session = true; s_last_rx_us = now; down_count = 0; s_xport = &wifi; host_up = true;
         session_tick(NULL); assert(down_count == 0 && s_session);
         host_up = false; session_tick(NULL); assert(down_count == 1 && !s_session);

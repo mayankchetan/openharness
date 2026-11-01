@@ -39,6 +39,14 @@
 //                  is established; BLE: the channel is open; TLS: the handshake finished).
 //   kind           Which wire this is. Read-only. A wrapper reports the kind of its inner transport, so
 //                  the layers above (refuse firmware over radio, label the status) see usb | wifi | ble.
+//   wait_readable(x, wait_ms)   OPTIONAL (NULL = absent; keep it the LAST member so a positional initializer need not name it).
+//                  Wait at most wait_ms for the stream to become readable and consume nothing. Returns > 0 when a
+//                  read() would not block (bytes, an end of stream or an error is pending), 0 on timeout, < 0 when
+//                  the stream is closed or failed. It changes no state of the transport, and unlike read() and write()
+//                  it may run while another task is inside them: a wrapper uses it to wait WITHOUT holding its lock
+//                  (a reader parked in a 2 s wait then costs one wake, not one per poll slice). A close from another
+//                  task may not wake it at once, so a caller bounds each wait (cable_xport_tls.c: 500 ms) and checks
+//                  its own state between waits.
 //
 // ── WRAPPING: A TLS TRANSPORT OVER ANY INNER TRANSPORT (phone-bridge task B2) ───────────────────────
 // A wrapper is a cable_xport_t whose `inner` points at another cable_xport_t. It implements the same six
@@ -105,6 +113,7 @@ struct cable_xport {
     bool (*is_up)(const cable_xport_t *x);
     void               *ctx;        // the transport's private state
     const cable_xport_t *inner;     // wrapper transports only (TLS over TCP or CoC); NULL for a plain one
+    int  (*wait_readable)(const cable_xport_t *x, int wait_ms);   // optional, see above; LAST member on purpose
 };
 
 // The USB-Serial-JTAG transport (cable_xport_usb.c). One static instance.
