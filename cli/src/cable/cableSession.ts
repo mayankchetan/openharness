@@ -1013,6 +1013,7 @@ export class CableSession {
   }
 
   private openAt = 0
+  private probeLogged = false   // this port open's first probe has been logged (a new open is a new plug-in)
   private opening = false
   /**
    * The version an OTA is moving TO, or '' when none is in flight.
@@ -1091,6 +1092,7 @@ export class CableSession {
     if (opened.path !== this.foreignPort) this.foreignPort = null
     this.bytesSinceOpen = 0
     this.framesSinceOpen = 0
+    this.probeLogged = false
     this.traffic = {
       at: Date.now(), tx: 0, txFrames: 0, rx: 0, rxFrames: 0,
       corrupt: this.decoder.corruptFrames, discarded: this.decoder.discardedBytes, run: '', noise: '',
@@ -1337,6 +1339,12 @@ export class CableSession {
         // mode is greeted in full. Only the number 1 counts (a stray `true` or "1" is an ordinary hello). The welcome is minimal on purpose: the
         // dial's probe reads one frame of at most 1 KB, and a welcome too big for it would be a dial that never comes back from Wi-Fi to USB.
         if (msg.probe === 1) {
+          // The first probe of a plug-in is logged, once per port open: before this a replug that took minutes to switch the dial back left no line saying
+          // whether the probe had arrived (review Low 3 of 2026-11-01). No MAC, no key: the port path only.
+          if (!this.probeLogged) {
+            this.probeLogged = true
+            this.log(`cable: a Wi-Fi dial is probing this cable (${this.link?.path ?? 'port'}) — answered with a welcome; it may now come back to USB`)
+          }
           await this.send({ t: 'welcome', proto: CABLE_PROTO_VERSION, app: this.host.appName(), probe: 1 })
           return
         }

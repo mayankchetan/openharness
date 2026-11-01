@@ -45,6 +45,8 @@ export interface NetProvisionDeps {
   lan(): Promise<string | null>
   /** The port of the listener (CABLE_NET_PORT): what a dial is told. */
   port: number
+  /** False when the listener is switched off (CABLE_NET_ENABLE=false): no dial can be given a key that this computer would honour. Absent means on. */
+  enabled?: boolean
   log(line: string): void
 }
 
@@ -78,6 +80,11 @@ export class NetProvisioner {
   }
 
   private async provision(dial: string | undefined, payload: Answer): Promise<Answer> {
+    // Before anything is asked of the dial or made: a dial that took these settings could never reach a listener that is off, and would sit on its
+    // retry ladder with a key nobody honours (review Low 4 of 2026-11-01; welcome.features still names `net`, so the CLI would otherwise succeed).
+    if (this.deps.enabled === false) {
+      return bad(undefined, 'The Wi-Fi listener of this computer is switched off (CABLE_NET_ENABLE=false), so a dial set up now could not reach it. Turn it on, restart Harness, and run this again.')
+    }
     const { ssid, pass } = payload
     if (!validSsid(ssid)) return badField('ssid')
     if (!validPass(pass)) return badField('pass')

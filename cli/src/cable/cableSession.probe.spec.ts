@@ -209,4 +209,32 @@ describe('hello{probe:1}', () => {
     expect(port.sent).toEqual([])
     await session.stop()
   })
+
+  it('logs the first probe welcome of a plug-in, once, and again for the next plug-in (review Low 3)', async () => {
+    fake()
+    const lines: string[] = []
+    const { session, port, ports } = await connect(host({ log: (line) => lines.push(line) }))
+    const probeLines = () => lines.filter((l) => /probing this cable/.test(l))
+    for (let i = 0; i < 10; i++) {
+      port.say(PROBE)
+      vi.advanceTimersByTime(2_000)
+      await settle()
+    }
+    expect(probeLines()).toHaveLength(1)
+    expect(probeLines()[0]).not.toMatch(/aa:bb/i)   // no MAC, no key: the line names the cable's port only
+    // an ordinary hello is not a probe and logs nothing of this kind
+    port.say(HELLO)
+    await settle()
+    expect(probeLines()).toHaveLength(1)
+    // unplugged and plugged in again: a new port, a new first line
+    await port.close('unplugged')
+    vi.advanceTimersByTime(10_000)
+    await vi.waitFor(() => expect(ports.length).toBeGreaterThan(1))
+    await settle()   // the session assigns the new port after its open resolves
+    await settle()
+    ports[ports.length - 1]!.say(PROBE)
+    await settle()
+    expect(probeLines()).toHaveLength(2)
+    await session.stop()
+  })
 })

@@ -468,7 +468,7 @@ export function startDevices(core: CoreApi, ports: CorePorts, deps: DevicesDeps)
     netDials.start()
     provisioner = new NetProvisioner({
       net: (dial, request) => cable.net(dial, request),
-      keys, port: net.port, lan: deps.lan ?? lanAddress,
+      keys, port: net.port, lan: deps.lan ?? lanAddress, enabled: net.enabled,
       // Only `cable: net: ...` lines of its own: no value of a request is ever in one (netProvision.ts).
       log: (line) => log(`[cable] ${line}`),
     })

@@ -103,6 +103,7 @@ export class CableFleet {
   private netClosed = false
   /** When a Wi-Fi link was last refused because the same dial is on USB, by MAC: said once a minute, as the dial retries every few seconds. */
   private readonly netRefusedAt = new Map<string, number>()
+  private readonly wifiSilentAt = new Map<string, number>()
   private timer?: ReturnType<typeof setInterval>
   private scanTask?: Promise<void>
   private stopped = true
@@ -280,7 +281,13 @@ export class CableFleet {
           if (key === 'onDialAttached') return attached
           if (key === 'onDialGone') return gone
           if (key === 'onForeignPort') return (path: string, why: string) => {
-            if (why === 'silent' && this.knownPro(port)) return this.silentPro(id, entry)
+            if (why === 'silent' && this.knownPro(port)) {
+              // A dial that is live over Wi-Fi under this MAC is not stuck: Keep Wi-Fi is on, so its USB probe is off and the cable stays quiet on
+              // purpose. Resetting it would reboot a working Wi-Fi dial on every plug-in. The cable session goes on, so the day Keep Wi-Fi is
+              // turned off the dial's probe finds a daemon at once; the line is said once a minute, not on every 20 s reopen.
+              if (this.wifiLive(port.serialNumber)) return this.silentOnCableWifiLive(id, port)
+              return this.silentPro(id, entry)
+            }
             this.verdicts.markForeign(port)
             this.host.log(`cable: ${path} is not a Harness dial (${why}) — leaving it alone until it is unplugged or reset [usb ${id}]`)
             // Off this call stack: the session is in the middle of deciding this, and stop() waits on it.
@@ -369,6 +376,19 @@ export class CableFleet {
       held.stage = 'told'
       this.publish()
     })(), 0)
+  }
+
+  /** Is there a live Wi-Fi link for the dial with this USB serial (its MAC)? */
+  private wifiLive(serial: string | undefined): boolean {
+    const net = serial ? this.netEntries.get(serial.toUpperCase()) : undefined
+    return !!net && (net.attached || net.slot.active)
+  }
+
+  private silentOnCableWifiLive(id: string, port: DialPort): void {
+    const now = Date.now()
+    if (now - (this.wifiSilentAt.get(id) ?? 0) < 60_000) return
+    this.wifiSilentAt.set(id, now)
+    this.host.log(`cable: ${port.path} is silent on the cable but live over Wi-Fi — Keep Wi-Fi is on, so it is not reset [usb ${id}]`)
   }
 
   // ── dials over Wi-Fi ───────────────────────────────────────────────────────────────────────────────

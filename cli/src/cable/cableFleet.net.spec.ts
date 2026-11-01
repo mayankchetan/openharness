@@ -11,6 +11,7 @@ import { CableDecoder, CableType, encodeCableFrame } from './cableFrame.js'
 import { CableFleet, type CableFleetOptions } from './cableFleet.js'
 import { CableSession, type CableHost, type CablePort } from './cableSession.js'
 import { DialLog } from './dialLog.js'
+import { DialVerdicts } from './dialPortVerdicts.js'
 import { DIAL_KEY_FILE, DialKeys } from './dialKeys.js'
 import { NetDials } from './netDials.js'
 import type { DialPort } from './serial.js'
@@ -405,5 +406,79 @@ describe('one dial on both links', () => {
     s.usb[0].say({ t: 'hello', product: 'harness', mac: B, fw: 'fixture', proto: 3 })
     await vi.waitFor(() => expect(s.fleet.devices()[0]?.attached).toBe(true))
     expect(s.netLog.filter((l) => /in use/.test(l))).toHaveLength(1)
+  })
+
+  describe('Keep Wi-Fi on, cable in (review Medium 1 of 2026-11-01)', () => {
+    // With stay_wl set the dial's USB probe is off, so its port enumerates and says nothing. The session's 20 s silence rule reports that as
+    // 'silent', and for a known Harness Pro the fleet resets it over the cable: a Wi-Fi dial rebooted on every plug-in, twice, then a "replug" notice.
+    // A dial that is live over Wi-Fi under the same MAC is not stuck: the fleet leaves its cable alone. These sessions are the real CableSession, with
+    // the host they were given kept, so the test can say what the 20 s rule would say.
+    class Tap extends CableSession {
+      static hosts: CableHost[] = []
+      constructor(...args: ConstructorParameters<typeof CableSession>) {
+        super(...args)
+        Tap.hosts.push(args[0])
+      }
+    }
+
+    async function liveOverWifi(withDial: boolean) {
+      Tap.hosts = []
+      const verdicts = new DialVerdicts()
+      const reset = vi.fn(async () => true)
+      const s = setup({ verdicts, reset }, {}, Tap as unknown as typeof CableSession)
+      const key = randomBytes(32)
+      s.keys.set(A, key)
+      await s.net.settled()
+      let wifi: Awaited<ReturnType<typeof s.dial>> | undefined
+      if (withDial) {
+        wifi = await s.dial(A, key)
+        wifi.hello()
+        await wifi.next('agents.end')
+        await vi.waitFor(() => expect(s.fleet.devices()[0]?.transport).toBe('wifi'))
+      }
+      const port = usbDevice(A)
+      verdicts.markDial(port, 'pro')
+      s.setUsb([port])
+      s.fleet.start()
+      await vi.waitFor(() => expect(s.usb).toHaveLength(1))
+      const usbHost = Tap.hosts.at(-1)!
+      return { s, reset, port, wifi, usbHost }
+    }
+    const stuckLines = (s: { host: CableHost }) => vi.mocked(s.host.log).mock.calls.filter((c) => /silent on the cable but live over Wi-Fi/.test(String(c[0])))
+
+    it('does not reset a Pro that is silent on the cable while its Wi-Fi link is live; says so once', async () => {
+      const { s, reset, port, wifi, usbHost } = await liveOverWifi(true)
+      usbHost.onForeignPort?.(port.path, 'silent')
+      await vi.waitFor(() => expect(stuckLines(s)).toHaveLength(1))
+      usbHost.onForeignPort?.(port.path, 'silent')   // the 20 s rule fires again on every reopen
+      usbHost.onForeignPort?.(port.path, 'silent')
+      await new Promise((r) => setTimeout(r, 20))
+      expect(reset).not.toHaveBeenCalled()
+      expect(stuckLines(s)).toHaveLength(1)
+      expect(wifi!.closed).toBe(false)
+      const rows = s.fleet.devices()
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({ attached: true, transport: 'wifi' })
+      expect(rows[0]).not.toHaveProperty('problem')
+      expect(s.usb[0].isOpen).toBe(true)   // the cable session goes on: when Keep Wi-Fi is turned off the dial's probe finds a daemon at once
+    })
+
+    it('still resets it when no Wi-Fi link is live', async () => {
+      const { s, reset, port, usbHost } = await liveOverWifi(false)
+      usbHost.onForeignPort?.(port.path, 'silent')
+      await vi.waitFor(() => expect(reset).toHaveBeenCalledWith(port.path))
+      expect(stuckLines(s)).toHaveLength(0)
+    })
+
+    it('resets it once the Wi-Fi link has gone', async () => {
+      const { s, reset, port, wifi, usbHost } = await liveOverWifi(true)
+      usbHost.onForeignPort?.(port.path, 'silent')
+      await vi.waitFor(() => expect(stuckLines(s)).toHaveLength(1))
+      expect(reset).not.toHaveBeenCalled()
+      await wifi!.close()
+      await vi.waitFor(() => expect(s.fleet.devices().some((d) => d.transport === 'wifi' && d.attached)).toBe(false))
+      usbHost.onForeignPort?.(port.path, 'silent')
+      await vi.waitFor(() => expect(reset).toHaveBeenCalledWith(port.path))
+    })
   })
 })

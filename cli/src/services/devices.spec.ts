@@ -1302,12 +1302,22 @@ describe('the Wi-Fi dials', () => {
 describe('the dial Wi-Fi request', () => {
   const owner = { local: true, owner: true }
   const ID = 'B8:1F:3F:CA:E5:58'
-  const withKeys = async () => {
+  const withKeys = async (enabled = true) => {
     const { DIAL_KEY_FILE, DialKeys } = await import('../cable/dialKeys.js')
     const keysFile = join(dataDir, 'devices', DIAL_KEY_FILE)
     const keys = new DialKeys(keysFile)
-    return { keys, net: { keysFile, keys, port: 18480, bind: '127.0.0.1', enabled: false } }
+    return { keys, net: { keysFile, keys, port: 18480, bind: '127.0.0.1', enabled } }
   }
+
+  it('refuses to provision while the Wi-Fi listener is switched off, and says which setting (review Low 4)', async () => {
+    const { net, keys } = await withKeys(false)
+    const { requests } = start({ net, lan: async () => '192.168.1.20' })
+    const answer = await requests.dial_net({ op: 'provision', ssid: 'home-net', pass: 'correct horse battery' }, owner)
+    expect(answer).toMatchObject({ ok: false, kind: 'bad_request' })
+    expect(String((answer as { message: string }).message)).toMatch(/CABLE_NET_ENABLE/)
+    expect(seen.cable.net).not.toHaveBeenCalled()
+    expect(keys.has(ID)).toBe(false)
+  })
 
   it('is not answered at all where the Wi-Fi link is not set up in this process', async () => {
     const { requests } = start()

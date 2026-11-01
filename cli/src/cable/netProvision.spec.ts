@@ -27,7 +27,7 @@ afterEach(async () => { for (const run of cleanup.splice(0).reverse()) await run
 
 type Net = (dial: string | undefined, request: NetRequest) => Promise<FleetNetResult>
 
-function rig(over: { net?: Net; lan?: () => Promise<string | null>; keys?: DialKeys; port?: number } = {}) {
+function rig(over: { net?: Net; lan?: () => Promise<string | null>; keys?: DialKeys; port?: number; enabled?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'net-provision-'))
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }))
   const keys = over.keys ?? new DialKeys(join(dir, DIAL_KEY_FILE))
@@ -49,7 +49,7 @@ function rig(over: { net?: Net; lan?: () => Promise<string | null>; keys?: DialK
     }
   })
   const wrapped: Net = over.net ? async (dial, request) => { calls.push({ dial, request }); return over.net!(dial, request) } : net
-  const prov = new NetProvisioner({ net: wrapped, keys, lan: over.lan ?? (async () => LAN), port: over.port ?? 18480, log: (line) => lines.push(line) })
+  const prov = new NetProvisioner({ net: wrapped, keys, lan: over.lan ?? (async () => LAN), port: over.port ?? 18480, log: (line) => lines.push(line), enabled: over.enabled })
   return { prov, keys, calls, seen, held, lines, dir, file: join(dir, DIAL_KEY_FILE) }
 }
 
@@ -59,6 +59,32 @@ const refusingSet = (real: DialKeys): DialKeys => new Proxy(real, {
   get: (target, key) => key === 'set' ? () => { throw new Error('disk full') } : typeof target[key as keyof DialKeys] === 'function' ? (target[key as keyof DialKeys] as (...args: unknown[]) => unknown).bind(target) : target[key as keyof DialKeys],
 })
 const refusal = (err = 'pass'): FleetNetResult => ({ ok: false, kind: 'device', err, message: `the dial refused: ${err}`, saved: false, dial: MAC })
+
+describe('provision with the listener switched off (review Low 4 of 2026-11-01)', () => {
+  it('is refused before the dial is asked or a key is made: a dial set up now could not reach this computer', async () => {
+    const { prov, keys, calls, lines } = rig({ enabled: false })
+    const answer = await prov.handle(provision)
+    expect(answer).toMatchObject({ ok: false, kind: 'bad_request' })
+    expect(String(answer.message)).toMatch(/CABLE_NET_ENABLE/)
+    expect(calls).toHaveLength(0)
+    expect(keys.has(MAC)).toBe(false)
+    expect(lines.join('\n')).not.toContain(PASS)
+  })
+
+  it('still lets a dial be forgotten or asked about: only a new key is withheld', async () => {
+    const { prov, calls } = rig({ enabled: false })
+    expect(await prov.handle({ op: 'status' })).toMatchObject({ ok: true })
+    await prov.handle({ op: 'forget' })
+    expect(calls.length).toBeGreaterThan(0)
+  })
+
+  it('is as before when the listener is on, whether said or left out', async () => {
+    for (const enabled of [true, undefined]) {
+      const { prov } = rig({ enabled })
+      expect(await prov.handle(provision)).toMatchObject({ ok: true, dial: MAC })
+    }
+  })
+})
 
 describe('provision', () => {
   it('sends the network, this computer\'s address and a fresh 32-byte key, and stores the key once the dial says ok', async () => {
