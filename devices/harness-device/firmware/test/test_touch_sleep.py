@@ -53,6 +53,9 @@ static atomic_bool controller_ready = true;
 typedef enum { PP_POLLER_TOUCH } pp_poller_t;
 static bool relaxed_now;   /* the sleep policy's answer: the 1 s S2 poll when relaxed, 20 ms otherwise */
 static unsigned power_sleep_wait_ms(pp_poller_t who, unsigned awake_ms) { (void)who; return relaxed_now && awake_ms < 1000 ? 1000 : awake_ms; }
+static bool screen_asleep, input_ok = true;   /* display_is_asleep() and power_sleep_input_allowed() (D1: false on the battery with the screen off) */
+static bool display_is_asleep(void) { return screen_asleep; }
+static bool power_sleep_input_allowed(void) { return input_ok; }
 typedef void *SemaphoreHandle_t; typedef void *esp_lcd_touch_handle_t; typedef void *TaskHandle_t;
 typedef enum { TOUCH_NONE, TOUCH_CST9217, TOUCH_CST816S } touch_chip_t;
 typedef struct { touch_chip_t touch; } board_t;
@@ -170,7 +173,18 @@ int main(void) {
     assert(touch_wait_ticks(false) == 200 && touch_wait_ticks(true) == 4);
     atomic_store(&s_parked, false);
     relaxed_now = false; assert(touch_wait_ticks(false) == 20); touch_sleep_disarm();
-    puts("touch sleep: arm order, first-hit interrupt switch-off, 3 re-reads 5 ms apart, park and re-arm, disarm order, other chips PASS");
+    // --- a contact on a dark battery screen is dropped (D1), so a held contact is read at the relaxed rate, not every 4 ms (2026-11-02 review) ---
+    reset();
+    screen_asleep = true; input_ok = false; relaxed_now = true;                           /* S2: dark, input refused */
+    assert(touch_wait_ticks(true) == 1000 && touch_wait_ticks(false) == 1000);            /* a held contact waits as long as an idle one */
+    relaxed_now = false;                                                                  /* S1 in its 3 s settle: dark, input refused, not yet relaxed */
+    assert(touch_wait_ticks(true) == 20 && touch_wait_ticks(false) == 20);
+    input_ok = true; relaxed_now = true;                                                  /* external power: a dark screen takes touch, so a contact is read at 4 ms */
+    assert(touch_wait_ticks(true) == 4);
+    screen_asleep = false; input_ok = false;                                              /* the screen is on: input is allowed whatever the flag says; 4 ms */
+    assert(touch_wait_ticks(true) == 4);
+    screen_asleep = false; input_ok = true; relaxed_now = false;
+    puts("touch sleep: arm order, a held contact on a dark battery screen is read at the idle rate, first-hit interrupt switch-off, 3 re-reads 5 ms apart, park and re-arm, disarm order, other chips PASS");
     return 0;
 }
 '''

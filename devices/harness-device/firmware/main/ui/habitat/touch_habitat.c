@@ -201,7 +201,9 @@ static bool open_touch(void)
 // task at once, this only catches a missed one). While the chip may sleep the idle wait is the relaxed poll (power_policy.h).
 static TickType_t touch_wait_ticks(bool down)
 {
-    if (down)
+    // A contact on a dark battery screen is dropped whole (D1, "PWR only": power_sleep_input_allowed), so there is nothing to track at 4 ms: a held
+    // finger, pocket or conductive object is read at the idle rate, which in S2 is the relaxed poll. Awake, or on external power, a contact is 4 ms.
+    if (down && !(display_is_asleep() && !power_sleep_input_allowed()))
         return pdMS_TO_TICKS(4);
     uint32_t ms = power_sleep_wait_ms(PP_POLLER_TOUCH, 20);
     if (ms > 200 && touch_sleep_parked())
