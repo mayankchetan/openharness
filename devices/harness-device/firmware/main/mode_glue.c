@@ -307,14 +307,13 @@ static void mode_sw_task(void *arg)
                 (void)usb_probe_start(now);
             }
             usb_probe_poll(now, PROBE_READ_MS);
-            // A probe that is not running reads nothing and usb_probe_poll returns at once, so this pass would not wait at all: the task would spin and
-            // starve the idle task (the idle task watchdog trips). Wait as a running probe does while the chip is awake (PROBE_READ_MS keeps the step
-            // cadence), and as the no-probe branch does while it may sleep (the relaxed poll: there is nothing to read, so no reason to wake 25 times a second).
-            if (!usb_probe_running())
-                vTaskDelay(pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_MODE_SW, PROBE_READ_MS)));
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_MODE_SW, IDLE_MS)));   // 2 s while the chip may sleep
         }
+        // Every pass waits. A running probe waits in usb_probe_poll (its read). Without the probe, or with the probe wanted but not installed (it reads
+        // nothing and usb_probe_poll returns at once: without this wait the task would spin, starve the idle task and trip its watchdog), the task
+        // sleeps here: IDLE_MS, or PROBE_READ_MS when the probe is wanted (the step cadence a running probe gives), and the relaxed poll (2 s) while the
+        // chip may sleep, since there is nothing to read.
+        if (!s_mg.probe_on || !usb_probe_running())
+            vTaskDelay(pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_MODE_SW, s_mg.probe_on ? PROBE_READ_MS : IDLE_MS)));
         // The stack was sized without a measurement (4,096 B, internal): the high-water mark goes in the log 10 s after start, then every 10 minutes,
         // and just before a restart, so the bench can read it and the size can be cut to what is used.
         if (now >= next_mark) {

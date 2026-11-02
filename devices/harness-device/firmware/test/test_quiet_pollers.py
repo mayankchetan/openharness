@@ -94,7 +94,7 @@ assert 'nwifi_wait(NWIFI_GOT_IP | NWIFI_DISCONNECTED, SLICE_MS)' in net
 checked.append('net backoff 250 ms')
 glue = read('mode_glue.c')
 assert re.search(r'#define IDLE_MS 250\b', glue)
-assert 'vTaskDelay(pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_MODE_SW, IDLE_MS)));' in glue and 'vTaskDelay(pdMS_TO_TICKS(IDLE_MS))' not in glue
+assert 'vTaskDelay(pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_MODE_SW, s_mg.probe_on ? PROBE_READ_MS : IDLE_MS)));' in glue and 'vTaskDelay(pdMS_TO_TICKS(IDLE_MS))' not in glue   # one call site; behaviour: test_mode_sw_wait.py
 checked.append('mode switch 250 ms')
 
 # --- every poller in the policy table has exactly one caller ---
