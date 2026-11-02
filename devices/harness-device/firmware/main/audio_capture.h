@@ -41,6 +41,8 @@ uint32_t audio_capture_overruns(void);
 // channels end READY, the state esp_codec_dev_close leaves after every beep and capture, so the next capture or beep opens the codec
 // as it always does (its set_fmt reconfigures from READY and enables what it needs). audio_capture_idle(false) therefore enables
 // nothing; it only records that audio may start again.
+// With S2_AMP_OFF (s2_switches.h) the same stop also drives the amplifier enable (GPIO46) low; with S2_CODEC_OFF it first writes the ES7210 and ES8311
+// stop sequences of the codec driver (only if a probe shows them still powered), while MCLK still runs. Neither is undone here: the next codec open does it.
 // idle(true) returns false and does nothing while a capture is open or requested or a beep is playing; the caller tries again later.
 // Safe to repeat. Needs audio_capture_init() to have run, otherwise it does nothing and returns true.
 bool audio_capture_idle(bool idle);

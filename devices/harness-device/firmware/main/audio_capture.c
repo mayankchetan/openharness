@@ -99,6 +99,60 @@ static void s2_amp_off(void)
 }
 #endif
 
+#if S2_CODEC_OFF
+// THE CODECS' LOWEST-POWER STATE. After audio_capture_init and audio_notify_init each codec is "opened": es7210_open / es8311_open (run by
+// es7210_codec_new / es8311_codec_new) leave the microphone bias, the ADC and the clock tree powered and enabled, and nothing powers them down
+// until the first capture or beep has closed (esp_codec_dev_close -> codec->enable(false) -> es7210_stop / es8311_suspend). A dial that is
+// left alone after boot never has such a close, so both codecs sit powered through every S2. This writes the driver's own stop sequence at S2
+// entry, over the driver's own register interface (esp_codec_dev_write_reg -> codec set_reg), so the state S2 leaves is the state every
+// close leaves: a later capture or beep starts from it exactly as a second capture or beep does today (esp_codec_dev_open: set_fs, then
+// enable(true) -> es7210_start / es8311_start, which write every register they depend on). Nothing is restored on S2 exit on purpose:
+// the open path does it, and it is the one path the dial already runs after each close.
+// The probe register tells "still opened" from "already stopped", and it must be read BEFORE the I2S clocks stop: the driver writes these
+// registers only while MCLK runs (esp_codec_dev_close disables the codec first, the I2S channel second).
+// Source: managed_components/espressif__esp_codec_dev 1.6.2, device/es7210/es7210.c es7210_stop() lines 313-326 and device/es8311/es8311.c
+// es8311_suspend() lines 243-261; register numbers from es7210_reg.h and es8311_reg.h. test/test_audio_s2_powerdown.py compares these two
+// tables with those functions write for write, when the component is on disk.
+typedef struct { uint8_t reg, val; } s2_reg_t;
+static const s2_reg_t ES7210_STOP[] = {   // es7210_stop
+    {0x47, 0xff}, {0x48, 0xff}, {0x49, 0xff}, {0x4A, 0xff},   // MIC1..MIC4_POWER_REG47..4A
+    {0x4B, 0xff}, {0x4C, 0xff},                               // MIC12/MIC34_POWER_REG4B/4C (bias, ADC, PGA)
+    {0x40, 0xc0},                                             // ANALOG_REG40
+    {0x01, 0x7f},                                             // CLOCK_OFF_REG01
+    {0x06, 0x07},                                             // POWER_DOWN_REG06
+};
+static const s2_reg_t ES8311_SUSPEND[] = {   // es8311_suspend
+    {0x32, 0x00}, {0x17, 0x00}, {0x0E, 0xFF}, {0x12, 0x02}, {0x14, 0x00}, {0x0D, 0xFA}, {0x15, 0x00}, {0x02, 0x10},   // DAC_REG32, ADC_REG17, SYSTEM_REG0E/12/14/0D, ADC_REG15, CLK_MANAGER_REG02
+    {0x00, 0x00}, {0x00, 0x1F}, {0x01, 0x30}, {0x01, 0x00},   // RESET_REG00 twice, CLK_MANAGER_REG01 twice
+    {0x45, 0x00}, {0x0D, 0xFC}, {0x02, 0x00},                 // GP_REG45, SYSTEM_REG0D (0xFC: the value the probe looks for), CLK_MANAGER_REG02
+};
+#define S2_ES7210_PROBE_REG   0x4B   // MIC12_POWER_REG4B: 0x00 after es7210_open (es7210_mic_select), 0xff after es7210_stop
+#define S2_ES7210_PROBE_STOP  0xff
+#define S2_ES8311_PROBE_REG   0x0D   // SYSTEM_REG0D: 0xFA after es8311_open, 0x01 while running (es8311_start), 0xFC after es8311_suspend
+#define S2_ES8311_PROBE_STOP  0xFC
+
+// Writes `seq` to `dev` unless its probe register already shows the stopped value. Returns the number of writes done, 0 when it was already
+// stopped (or there is no such codec), -1 when the probe could not be read, -2 when a write failed (the rest of that codec's sequence is
+// skipped; the next open writes every register again).
+static int s2_codec_stop(esp_codec_dev_handle_t dev, int probe_reg, int stopped, const s2_reg_t *seq, size_t count)
+{
+    int value = 0;
+    if (!dev) return 0;
+    if (esp_codec_dev_read_reg(dev, probe_reg, &value) != ESP_CODEC_DEV_OK) return -1;
+    if (value == stopped) return 0;
+    for (size_t i = 0; i < count; i++)
+        if (esp_codec_dev_write_reg(dev, seq[i].reg, seq[i].val) != ESP_CODEC_DEV_OK) return -2;
+    return (int)count;
+}
+
+static void s2_codec_off(void)
+{
+    const int mic = s2_codec_stop(s_mic, S2_ES7210_PROBE_REG, S2_ES7210_PROBE_STOP, ES7210_STOP, sizeof ES7210_STOP / sizeof ES7210_STOP[0]);
+    const int spk = s2_codec_stop(s_spk, S2_ES8311_PROBE_REG, S2_ES8311_PROBE_STOP, ES8311_SUSPEND, sizeof ES8311_SUSPEND / sizeof ES8311_SUSPEND[0]);
+    if (mic || spk) ESP_LOGI(TAG, "S2 codec power-down: ES7210 writes=%d, ES8311 writes=%d (0 already stopped, -1 probe failed, -2 write failed)", mic, spk);
+}
+#endif
+
 // i2s_channel_disable() on a channel that is not running logs an error ("the channel has not been enabled yet") and fails. That is
 // ordinary here: esp_codec_dev_close disables the channels after every beep and capture. Silence the driver's own tag for the call.
 static void i2s_stop_quiet(i2s_chan_handle_t channel)
@@ -125,6 +179,9 @@ bool audio_capture_idle(bool idle)
             // esp_codec_dev_open disables, reconfigures clock and slot (only possible from READY) and enables what it needs.
 #if S2_AMP_OFF
             s2_amp_off();   // before the clocks stop; the lock is ours, so no beep can raise the pin meanwhile
+#endif
+#if S2_CODEC_OFF
+            s2_codec_off();   // before the clocks stop too: the codecs take these writes while MCLK runs
 #endif
             if (s_rx) i2s_stop_quiet(s_rx);
             if (s_tx) i2s_stop_quiet(s_tx);
