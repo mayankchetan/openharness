@@ -98,6 +98,7 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
 # The IDF side of that glue, as source rules: boot order and the radio gate, SOF settle, record trusted after a software reset only, internal task stack,
 # the reboot sequence, the probe retry, no Bluetooth target, no stay_wl writer, the UI busy rows, the last_words reason, the build list.
 python3 "$here/test_mode_glue_source.py"
+python3 "$here/test_mode_sw_wait.py"   # the mode switch task waits every pass, also when the USB probe would not install (idle task watchdog)
 # The Link screen (W16): the edge swipe, no session needed, NVS on the worker only, stay_wl as a toggle with one writer.
 python3 "$here/test_link_screen.py"
 # W15e: reset_class() compiled and called for every reason the SDK defines (needs IDF_PATH, like the other SDK checks).

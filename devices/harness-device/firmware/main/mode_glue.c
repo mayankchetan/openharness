@@ -307,6 +307,11 @@ static void mode_sw_task(void *arg)
                 (void)usb_probe_start(now);
             }
             usb_probe_poll(now, PROBE_READ_MS);
+            // A probe that is not running reads nothing and usb_probe_poll returns at once, so this pass would not wait at all: the task would spin and
+            // starve the idle task (the idle task watchdog trips). Wait as a running probe does while the chip is awake (PROBE_READ_MS keeps the step
+            // cadence), and as the no-probe branch does while it may sleep (the relaxed poll: there is nothing to read, so no reason to wake 25 times a second).
+            if (!usb_probe_running())
+                vTaskDelay(pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_MODE_SW, PROBE_READ_MS)));
         } else {
             vTaskDelay(pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_MODE_SW, IDLE_MS)));   // 2 s while the chip may sleep
         }
