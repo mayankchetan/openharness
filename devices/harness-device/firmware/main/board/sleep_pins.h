@@ -52,7 +52,7 @@ static const sleep_pin_t SLEEP_PINS[] = {
     {"LCD D3",              BSP_LCD_QSPI_D3,     SLEEP_DIR_OUT,  SLEEP_LIGHT_KEEP,        SLEEP_DEEP_HOLD_IDLE},
     {"LCD reset",           SLEEP_PIN_LCD_RST,   SLEEP_DIR_OUT,  SLEEP_LIGHT_KEEP,        SLEEP_DEEP_HOLD_HIGH},
     {"Touch reset",         SLEEP_PIN_TOUCH_RST, SLEEP_DIR_OUT,  SLEEP_LIGHT_KEEP,        SLEEP_DEEP_HOLD_HIGH},
-    {"Speaker amp enable",  BSP_PA_IO,           SLEEP_DIR_OUT,  SLEEP_LIGHT_KEEP,        SLEEP_DEEP_HOLD_LOW},
+    {"Speaker amp enable",  BSP_PA_IO,           SLEEP_DIR_OUT,  SLEEP_LIGHT_KEEP,        SLEEP_DEEP_HOLD_LOW},    // low in S2: the codec library drops it after every beep, and audio_capture_idle(true) drives it low (S2_AMP_OFF); KEEP holds that level through the sleep
     {"I2S MCLK",            BSP_I2S_MCLK,        SLEEP_DIR_OUT,  SLEEP_LIGHT_ISOLATE,     SLEEP_DEEP_ISOLATE},    // clocks stopped while the chip sleeps (audio_capture_idle)
     {"I2S BCLK",            BSP_I2S_BCLK,        SLEEP_DIR_OUT,  SLEEP_LIGHT_ISOLATE,     SLEEP_DEEP_ISOLATE},
     {"I2S WS",              BSP_I2S_WS,          SLEEP_DIR_OUT,  SLEEP_LIGHT_ISOLATE,     SLEEP_DEEP_ISOLATE},

@@ -275,6 +275,14 @@ if(DEVICE_BATTERY_SLEEP)
     endif()
     target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_BATTERY_SLEEP=1)
     target_sources(${COMPONENT_LIB} PRIVATE "power_policy.c" "power_sleep.c" "usb_bounce.c" "sleep_wdt.c")
+    # S2 power-down switches (s2_switches.h): what the dial turns off when the chip may light-sleep with the screen dark. Each is ON in a battery
+    # sleep image unless the build line says -D<NAME>=0, so two images can differ in one thing.
+    foreach(s2_switch S2_AMP_OFF)
+        if(NOT DEFINED ${s2_switch})
+            set(${s2_switch} 1)
+        endif()
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE ${s2_switch}=${${s2_switch}})
+    endforeach()
     # Bench aid, off by default: arm the RTC watchdog at S2 entry and never feed it (power_sleep.c WDT_STARVE). -DSLEEP_WDT_SELFTEST=1. Never for a product image.
     if(SLEEP_WDT_SELFTEST)
         target_compile_definitions(${COMPONENT_LIB} PRIVATE SLEEP_WDT_SELFTEST=1)

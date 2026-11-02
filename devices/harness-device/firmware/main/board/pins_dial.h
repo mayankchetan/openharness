@@ -38,7 +38,7 @@
 #define BSP_I2S_WS           45
 #define BSP_I2S_DOUT         8            // codec → ESP (mic data in to ESP)
 #define BSP_I2S_DIN          10           // ESP → codec (speaker; unused for mic-only)
-#define BSP_PA_IO            46           // speaker power-amp enable (unused for mic-only)
+#define BSP_PA_IO            46           // speaker power-amp enable: used by the completion beep only (audio_notify_done); low at all other times (S2_AMP_OFF)
 // ES7210 (ADC) + ES8311 (codec) default I2C addresses (esp_codec_dev defaults).
 
 // ---- Buttons ----

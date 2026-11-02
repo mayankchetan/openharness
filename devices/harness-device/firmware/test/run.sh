@@ -384,6 +384,8 @@ python3 "$here/test_audio_init.py"
 python3 "$here/test_audio_stream.py"
 python3 "$here/test_audio_threads.py"
 python3 "$here/test_audio_idle.py"
+# S2 power-down (2026-11-02): the amplifier enable low when the clocks stop; the codecs' lowest-power state (added by the next commits)
+python3 "$here/test_audio_s2_powerdown.py"
 
 # These exercise the exact cJSON version linked into the board, when its SDK is
 # available. The rest of the suite remains independent of ESP-IDF.

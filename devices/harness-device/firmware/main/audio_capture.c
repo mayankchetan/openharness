@@ -3,6 +3,8 @@
 #include "audio_probe.h"
 #include "board_pins.h"
 #include "board/board_i2c.h"
+#include "s2_switches.h"
+#include "driver/gpio.h"
 #include "driver/i2s_std.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
@@ -76,6 +78,27 @@ static void render_tone(size_t offset, size_t count)
 #ifdef DEVICE_BATTERY_SLEEP
 static bool s_idle;   // the I2S channels are stopped by audio_capture_idle(true); read and written under s_codec_lock
 
+#if S2_AMP_OFF
+// The speaker amplifier (NS4150B) enable, GPIO46. es8311.c drops it in es8311_codec_new (es8311_pa_power SETUP|DISABLE, line 752) and in every
+// es8311_enable(false), and raises it only in es8311_enable(true) (line 643), i.e. while a beep plays. So it is low in S2 when audio_notify_init
+// worked; this makes it so on purpose, also when the speaker never came up (notify_init_failed, the gallery build), and the sleep-pin table keeps
+// the level through the light sleep (sleep_pins.h: KEEP). The latch is written first so the pad cannot pulse high when it becomes an output.
+// Nothing here raises the pin: the beep path (play_beep) is unchanged and the codec library does that when it opens the speaker.
+static void s2_amp_off(void)
+{
+    gpio_set_level(BSP_PA_IO, 0);
+    const gpio_config_t io = {
+        .pin_bit_mask = 1ULL << BSP_PA_IO,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io);
+    gpio_set_level(BSP_PA_IO, 0);
+}
+#endif
+
 // i2s_channel_disable() on a channel that is not running logs an error ("the channel has not been enabled yet") and fails. That is
 // ordinary here: esp_codec_dev_close disables the channels after every beep and capture. Silence the driver's own tag for the call.
 static void i2s_stop_quiet(i2s_chan_handle_t channel)
@@ -88,13 +111,21 @@ static void i2s_stop_quiet(i2s_chan_handle_t channel)
 
 bool audio_capture_idle(bool idle)
 {
-    if (!s_codec_lock) return true;   // audio never came up: nothing runs, nothing to stop
+    if (!s_codec_lock) {   // audio never came up: nothing runs, nothing to stop
+#if S2_AMP_OFF
+        if (idle) s2_amp_off();   // the pin is nobody's then: hold it low anyway
+#endif
+        return true;
+    }
     if (idle) {
         if (atomic_load(&s_capture_requested) || s_open) return false;
         if (xSemaphoreTake(s_codec_lock, 0) != pdTRUE) return false;   // a beep is playing, or a capture is opening
         if (!atomic_load(&s_capture_requested) && !s_open && !s_idle) {
             // RX, then TX; both end READY, the state esp_codec_dev_close leaves. Nothing enables them again here: the next
             // esp_codec_dev_open disables, reconfigures clock and slot (only possible from READY) and enables what it needs.
+#if S2_AMP_OFF
+            s2_amp_off();   // before the clocks stop; the lock is ours, so no beep can raise the pin meanwhile
+#endif
             if (s_rx) i2s_stop_quiet(s_rx);
             if (s_tx) i2s_stop_quiet(s_tx);
             s_idle = true;
