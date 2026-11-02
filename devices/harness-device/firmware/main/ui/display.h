@@ -31,6 +31,10 @@ unsigned display_render_stage(void);
 // A second power hook beside display_set_power_cb(), for the sleep policy: cb(true) is called FIRST on every wake, from whichever
 // task woke the screen (touch, ptt, render), cb(false) on every sleep. It must be quick and must not take display_lock.
 void display_set_sleep_cb(void (*cb)(bool on));
+// S2_PANEL_SLPIN (s2_switches.h; defined in display_habitat.c only with the switch on): sleep = true sends DISPOFF and the CO5300 sleep-in command and waits
+// the 120 ms the panel driver waits; false sends sleep-out, waits 120 ms, and arms "light the panel after the first full frame, and send the brightness
+// again" for the render loop. Render task only (power_sleep.c enter_s2 / exit_s2). Until the false call has run the render loop writes nothing to the panel.
+void display_panel_sleep(bool sleep);
 #endif
 
 // Idle battery-save: turn the AMOLED panel off / back on. `display_wake()` repaints the current

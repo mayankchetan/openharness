@@ -6,11 +6,13 @@
 //
 //   S2_AMP_OFF      GPIO46 (BSP_PA_IO, the NS4150B amplifier enable) is driven low when the audio clocks stop for S2 (audio_capture.c).
 //   S2_CODEC_OFF    the ES7210 and ES8311 codecs are put in the driver's own stopped state when the audio clocks stop for S2 (audio_capture.c).
+//   S2_PANEL_SLPIN  the CO5300 panel gets DISPOFF and DCS sleep-in (0x10) at S2 entry, sleep-out (0x11) at S2 exit (display_habitat.c, power_sleep.c).
 #pragma once
 
 #ifndef DEVICE_BATTERY_SLEEP
 #undef S2_AMP_OFF
 #undef S2_CODEC_OFF
+#undef S2_PANEL_SLPIN
 #endif
 
 #ifndef S2_AMP_OFF
@@ -19,4 +21,8 @@
 
 #ifndef S2_CODEC_OFF
 #define S2_CODEC_OFF 0
+#endif
+
+#ifndef S2_PANEL_SLPIN
+#define S2_PANEL_SLPIN 0
 #endif

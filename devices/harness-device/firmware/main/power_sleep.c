@@ -28,6 +28,7 @@
 #include "esp_timer.h"
 #include "fw_update.h"
 #include "power_policy.h"
+#include "s2_switches.h"
 #include "sdkconfig.h"
 #include "esp_attr.h"
 #include "ui/display.h"
@@ -367,6 +368,9 @@ static void enter_s2(void)
 {
     atomic_store(&s_in_s2, true);                // from here the screen hook takes the lock back on a wake
     s_audio_idle = audio_capture_idle(true);     // the I2S clocks stop; refused (and retried) while a beep plays
+#if S2_PANEL_SLPIN
+    display_panel_sleep(true);                   // DISPOFF, DCS sleep-in, 120 ms; the lock is still ours, so a wake in these 120 ms is handled by exit_s2
+#endif
     display_render_guard(false);                 // the 1 s stall-guard timer would cap every sleep at one second
     sleep_wdt_arm(SLEEP_WDT_MS);                 // before the lock goes: from here a chip that does not wake is reset within a minute
     atomic_store(&s_wdt_armed, true);
@@ -384,6 +388,9 @@ static void exit_s2(void)
     s_s2_live = false;
 #if PP_TOUCH_WAKE_ON_BATTERY
     touch_sleep_disarm();                        // the pin goes back to the touch driver's falling-edge interrupt
+#endif
+#if S2_PANEL_SLPIN
+    display_panel_sleep(false);                  // sleep-out + 120 ms first: it is the part the user waits for; the loop lights the panel after the first frame
 #endif
     if (s_audio_idle) audio_capture_idle(false);
     s_audio_idle = false;

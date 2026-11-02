@@ -17,10 +17,12 @@ void cable_transport_benchmark(void);
 #include "ram_telemetry.h"
 #include "battery.h"
 #include "power_sleep.h"
+#include "s2_switches.h"
 #include "board_pins.h"
 #include "board.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
+#include "esp_lcd_panel_commands.h"
 #include "esp_lcd_co5300.h"
 #include "driver/spi_master.h"
 #include "esp_heap_caps.h"
@@ -95,6 +97,11 @@ static void (*power_cb)(bool);
 static void (*sleep_cb)(bool);   // the sleep policy's hook (display_set_sleep_cb); called before power_cb on a wake
 static atomic_bool screen_dimmed;   // the render task has dimmed the panel for the battery screen policy (power_policy.h)
 #endif
+#if S2_PANEL_SLPIN
+static esp_lcd_panel_io_handle_t panel_io;   // kept at display_init for the two DCS commands of display_panel_sleep
+static atomic_bool s_panel_slpin;            // the panel is in sleep-in: the render loop writes nothing to it until display_panel_sleep(false) has run
+static bool s_panel_woke;                    // render task only: sleep-out is done; the panel is lit after the first full frame, and the brightness is sent again
+#endif
 // Watch actual renderer progress independently of the USB and touch tasks.
 // A blocked panel call must not leave a responsive host controlling a frozen screen.
 enum { RENDER_MODEL, RENDER_POWER, RENDER_DAMAGE, RENDER_RASTER, RENDER_DMA,
@@ -164,6 +171,37 @@ void display_render_guard(bool run)
     }
     running = run;
 }
+#if S2_PANEL_SLPIN
+// PANEL SLEEP-IN FOR S2 (S2_PANEL_SLPIN). The AMOLED got only DISPOFF in S2 before (render_task's disp_on_off); the driver chip kept running. This adds the DCS
+// sleep-in (0x10) after DISPOFF, and the sleep-out (0x11) on the way back. Frame memory is kept in sleep-in (esp_lcd_panel_commands.h, LCD_CMD_SLPIN), but the
+// render loop does not rely on that: after the sleep-out it sends the brightness again and lights the panel (DISPON) only after the first full frame.
+// esp_lcd_panel_disp_sleep() is NOT used: with a reset GPIO (this board has one) the panel driver follows SLPIN with DSTBON, deep standby (esp_lcd_co5300_spi.c
+// lines 403-409), and wakes with a hardware reset and its full init (panel_co5300_reset 10 + 150 ms, then this file's init_cmds with two 600 ms delays that end in
+// DISPON): about 1.4 s with the render task blocked (its stall limit is 4 s), and a frame memory that is undefined when DISPON arrives. Plain sleep-in wakes in
+// 120 ms. Whether deep standby saves enough more to be worth that is a bench question.
+// 120 ms is the driver's CO5300_SLEEP_SETTLE_TIME_MS (esp_lcd_co5300_spi.c line 43), which it waits after its SLPIN (line 402) and its SLPOUT (line 421).
+// The command word is what the driver's tx_param builds for QSPI: opcode 0x02 (LCD_OPCODE_WRITE_CMD) in bits 31..24, the DCS command in bits 15..8.
+// Render task only (power_sleep.c enter_s2 / exit_s2). A failed panel write aborts, as every other panel write in this file does.
+#define PANEL_SETTLE_MS 120
+#define PANEL_DCS(cmd) ((int)((0x02u << 24) | ((unsigned)(cmd) << 8)))
+void display_panel_sleep(bool sleep)
+{
+    if (sleep == atomic_load(&s_panel_slpin))
+        return;
+    render_progress(RENDER_POWER);
+    if (sleep) {
+        ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, false));
+        ESP_ERROR_CHECK(esp_lcd_panel_io_tx_param(panel_io, PANEL_DCS(LCD_CMD_SLPIN), NULL, 0));
+        vTaskDelay(pdMS_TO_TICKS(PANEL_SETTLE_MS));
+        atomic_store(&s_panel_slpin, true);
+    } else {
+        ESP_ERROR_CHECK(esp_lcd_panel_io_tx_param(panel_io, PANEL_DCS(LCD_CMD_SLPOUT), NULL, 0));
+        vTaskDelay(pdMS_TO_TICKS(PANEL_SETTLE_MS));
+        s_panel_woke = true;
+        atomic_store(&s_panel_slpin, false);
+    }
+}
+#endif
 #endif
 #ifdef DEVICE_RENDER_FAULT
 // Diagnostic image only. One deliberate blocked render task, then normal boot.
@@ -579,7 +617,11 @@ static void render_task(void *arg)
 #ifdef DEVICE_BATTERY_SLEEP
         // The screen state is sampled ONCE for this pass (also used for `on` below): no panel writes while it is asleep, and on a wake
         // the user's brightness goes out in the pass that lights the panel, before the first frame.
-        const bool awake = !display_is_asleep();
+        const bool awake = !display_is_asleep()
+#if S2_PANEL_SLPIN
+            && !atomic_load(&s_panel_slpin)   // the screen woke but the panel is still in sleep-in: exit_s2 brings it out at the top of the next pass
+#endif
+            ;
         {   // battery screen policy: dim after 30 s without a touch to a quarter of the user's setting (never below 3 percent), and
             // stay dimmed until the panel goes off at 60 s, so the glass does not flash bright just before it turns off. On external
             // power the level is only FULL or OFF: nothing was dimmed, so nothing stays dimmed.
@@ -589,6 +631,12 @@ static void render_task(void *arg)
             if (dim)
                 brightness = pp_dimmed_percent(brightness);
         }
+#endif
+#if S2_PANEL_SLPIN
+        if (s_panel_woke)
+            applied_brightness = 101;   // the panel just left sleep-in: the level goes out again before it is lit
+        if (!display_is_asleep() && !awake)
+            habitat_render_notify();    // woke while the panel is still in sleep-in: look again at once, not after the 5 s sleep ceiling
 #endif
         if (brightness != applied_brightness
 #ifdef DEVICE_BATTERY_SLEEP
@@ -605,10 +653,20 @@ static void render_task(void *arg)
 #else
         bool on = !display_is_asleep();
 #endif
+#if S2_PANEL_SLPIN
+        bool defer_dispon = false;   // the panel left sleep-in: it is lit after the first full frame below
+#endif
         if (on != panel_on) {
             render_progress(RENDER_POWER);
-            ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, on));
-            panel_on = on;
+#if S2_PANEL_SLPIN
+            if (on && s_panel_woke) {
+                defer_dispon = true;
+            } else
+#endif
+            {
+                ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, on));
+                panel_on = on;
+            }
 #ifdef DEVICE_SLEEP_PROFILE
             if (!on) { s_slp.off_us = esp_timer_get_time(); s_slp.off_seq++; }
 #endif
@@ -648,6 +706,15 @@ static void render_task(void *arg)
             painted = true;
             if (receipt) habitat_scene_presented(receipt);
         }
+#if S2_PANEL_SLPIN
+        if (defer_dispon) {   // the first full frame after the sleep-out is in the panel's memory: light it (queued behind the frame's transfers)
+            render_progress(RENDER_POWER);
+            ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
+            panel_on = true;
+        }
+        if (on)
+            s_panel_woke = false;
+#endif
         if (!on && fresh) {
             front ^= 1;
             painted = false;
@@ -695,6 +762,9 @@ void display_init(void)
 #endif
     esp_lcd_panel_io_handle_t io;
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI2_HOST, &io_cfg, &io));
+#if S2_PANEL_SLPIN
+    panel_io = io;
+#endif
     co5300_vendor_config_t vendor = {.init_cmds = init_cmds,
                                      .init_cmds_size = sizeof(init_cmds) / sizeof(init_cmds[0]),
                                      .flags = {.use_qspi_interface = 1}};

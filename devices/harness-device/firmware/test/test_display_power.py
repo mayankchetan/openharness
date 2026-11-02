@@ -32,6 +32,12 @@ static atomic_bool asleep, force_frame;
 static atomic_uint last_activity;
 static atomic_uint wake_seq;   /* display_wake_seq(): the habitat UI shows the battery percent for 3 s after each wake */
 static atomic_uint requested_brightness = 40;
+#if S2_PANEL_SLPIN
+static atomic_bool s_panel_slpin;   /* the production file's flags (display_panel_sleep sets them; power_sleep.c calls it) */
+static bool s_panel_woke;
+static bool preset_slpin, preset_woke, woke_after_wait;   /* what run() starts a run with / sets during the first wait */
+static unsigned frames_at_dispon;
+#endif
 #define ESP_LOGI(...) ((void)0)
 static unsigned last_brightness, brightness_writes, writes_at_panel_on;
 #ifdef DEVICE_BATTERY_SLEEP
@@ -94,18 +100,25 @@ static void display_lock(void) {
 }
 static void display_unlock(void) {}
 static void habitat_tick(void) { ticks++; }
-static bool habitat_scene_take(ht_scene_t *out) { (void)out; return mode==4 || mode==5; }
+static bool habitat_scene_take(ht_scene_t *out) { (void)out; return mode==4 || mode==5 || mode==8; }
 #ifdef DEVICE_UI_METRICS
 static const char *habitat_view_name(void) { return "test"; }
 static void uim_scene(const char *view, const ht_scene_t *scene) { (void)view; (void)scene; }
 #endif
 static unsigned receipts;
-static uint32_t habitat_scene_receipt(void) { return mode==4 || mode==5 ? 77 : 0; }
+static uint32_t habitat_scene_receipt(void) { return mode==4 || mode==5 || mode==8 ? 77 : 0; }
+#if S2_PANEL_SLPIN
+static void habitat_scene_presented(uint32_t receipt) { assert(receipt==77 && (panel_on || s_panel_woke) && frames>0); receipts++; }   /* lit after the frame when the panel just left sleep-in */
+#else
 static void habitat_scene_presented(uint32_t receipt) { assert(receipt==77 && panel_on && frames>0); receipts++; }
+#endif
 static uint32_t habitat_next_wake_ms(void) { return next_wake_ms; }
 static int esp_lcd_panel_disp_on_off(int p, bool on) {
     (void)p; panel_on=on;
     if (on) writes_at_panel_on = brightness_writes;   /* how many brightness writes came before the panel was lit */
+#if S2_PANEL_SLPIN
+    if (on) frames_at_dispon = frames;                /* how many frames were drawn before the panel was lit */
+#endif
     // Power input arrives after the renderer sampled asleep, during panel OFF.
     if (!on && mode==1) display_wake();
     return 0;
@@ -115,14 +128,21 @@ void ht_damage(const ht_scene_t *before, const ht_scene_t *after, ht_damage_t *o
     if (!before) { out->count=1; out->pixels=HT_WIDTH*HT_HEIGHT; full_frames++; }
 }
 static uint32_t paint(const ht_scene_t *scene, const ht_damage_t *damage) {
+#if S2_PANEL_SLPIN
+    assert(scene && (panel_on || s_panel_woke) && !atomic_load(&s_panel_slpin) && damage->count); frames++; return 0;   /* never to a panel in sleep-in */
+#else
     assert(scene && panel_on && damage->count); frames++; return 0;
+#endif
 }
 static unsigned ulTaskNotifyTake(int clear, uint32_t timeout) {
     assert(clear && timeout<=wait_limit);
     last_wait = timeout;
     if (++waits==stop_after) longjmp(finished,1);
     // Normal idle wake follows a quiet/asleep iteration, with no fresh model.
-    if (mode==3 && waits==1) display_wake();
+    if ((mode==3 || mode==8) && waits==1) display_wake();
+#if S2_PANEL_SLPIN
+    if (waits==1 && woke_after_wait) s_panel_woke = true;   /* display_panel_sleep(false) ran on the render task between two passes */
+#endif
     return 0;
 }
 '''
@@ -138,7 +158,13 @@ static void run(int which, uint32_t now, uint32_t activity, bool sleep, unsigned
     memset(scenes,0,sizeof scenes); painted=mode!=4; panel_on=true; receipts=0; power_cb=power;
     frames=ticks=waits=locks=sleeps=wakes=full_frames=notifications=0;
     stop_after=loops;
+#if S2_PANEL_SLPIN
+    atomic_store(&s_panel_slpin, preset_slpin); s_panel_woke = preset_woke; preset_slpin = preset_woke = false; frames_at_dispon = 99;
+#endif
     if (!setjmp(finished)) render_task(NULL);
+#if S2_PANEL_SLPIN
+    woke_after_wait = false;
+#endif
     assert(waits==loops);
 }
 int main(void) {
@@ -212,13 +238,43 @@ int main(void) {
     assert(brightness_writes == 1 && last_brightness == 40 && panel_on && writes_at_panel_on == 1);   /* written before the panel lit */
     fake_state = PP_S0;
 #endif
+#if S2_PANEL_SLPIN
+    /* S2_PANEL_SLPIN (display_panel_sleep(), display_habitat.c; the calls are power_sleep.c's, tested in test_power_sleep_glue.py). After the
+       sleep-out the render loop (a) sends the brightness again, (b) lights the panel only after the first full frame, so no stale or
+       undefined frame memory is ever shown, and (c) writes nothing to a panel that is still in sleep-in. */
+    fake_state = PP_S1;
+    /* (b) asleep, then the wake lands during the first wait and the sleep-out has been done: DISPON comes after exactly one full frame */
+    brightness_writes = 0; woke_after_wait = true;
+    run(3,1000,1000,true,2);
+    assert(frames == 1 && full_frames == 1 && frames_at_dispon == 1 && panel_on && !s_panel_woke);
+    assert(brightness_writes == 1 && last_brightness == 40);                                   /* the level went out before the frame */
+    /* ... the same wake with a fresh scene (the frame the model made): one frame, its receipt given, THEN DISPON */
+    woke_after_wait = true;
+    run(8,1000,1000,true,2);
+    assert(frames == 1 && receipts == 1 && frames_at_dispon == 1 && panel_on && !s_panel_woke);
+    /* ... a wake that did not come from sleep-in lights the panel first, as it always did */
+    run(3,1000,1000,true,2);
+    assert(frames == 1 && full_frames == 1 && frames_at_dispon == 0 && panel_on);
+    /* (a) an awake loop whose panel has just left sleep-in sends the level again, and the flag does not outlive the pass */
+    brightness_writes = 0; woke_after_wait = true;
+    run(0,1000,1000,false,2);
+    assert(brightness_writes == 2 && panel_on && !s_panel_woke);
+    brightness_writes = 0;
+    run(0,1000,1000,false,2); assert(brightness_writes == 1);                                  /* without the flag: written once, as before */
+    /* (c) the screen woke while the panel is still in sleep-in (the render task has not yet run the sleep-out): nothing is drawn or lit,
+       the wake is kept, and another pass is asked for at once so the sleep-out is not left waiting for the 5 s ceiling */
+    brightness_writes = 0; preset_slpin = true;
+    run(6,1000,1000,false,1);
+    assert(frames == 0 && !panel_on && brightness_writes == 0 && notifications >= 1 && atomic_load(&s_panel_slpin));
+    fake_state = PP_S0;
+#endif
     puts("Display power: production render-loop wake/repaint and touch/idle races, quiet wake, boundaries and wrap PASS");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='harness-display-power-') as folder:
     folder = Path(folder)
     (folder / 'power.c').write_text(code)
-    for flags in ([], ['-DDEVICE_BATTERY_SLEEP=1']):
+    for flags in ([], ['-DDEVICE_BATTERY_SLEEP=1'], ['-DDEVICE_BATTERY_SLEEP=1', '-DS2_PANEL_SLPIN=1']):
         subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g'] + flags + [
                         '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
                         '-I', str(root / 'main/ui/habitat'), '-I', str(root / 'main'), str(folder / 'power.c')] +

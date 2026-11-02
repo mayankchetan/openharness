@@ -136,6 +136,7 @@ bool display_is_asleep(void);
 void display_set_sleep_cb(void (*cb)(bool on));
 void display_render_guard(bool run);
 unsigned display_render_stage(void);
+void display_panel_sleep(bool sleep);
 ''',
 'ui/habitat/runtime.h': '#pragma once\nvoid habitat_render_notify(void);\n',
 'ui/touch.h': '''
@@ -232,6 +233,8 @@ bool fw_update_active(void) { return false; }
 bool display_is_asleep(void) { return asleep; }
 void display_set_sleep_cb(void (*cb)(bool)) { sleep_cb = cb; }
 void display_render_guard(bool run) { if (run) { guard_starts++; ev("GUARD+"); } else { guard_stops++; ev("GUARD-"); } }
+static int panel_sleeps, panel_wakes;   // display_panel_sleep(): the CO5300 sleep-in / sleep-out (S2_PANEL_SLPIN only)
+void display_panel_sleep(bool sleep) { if (sleep) { panel_sleeps++; ev("PANEL-"); } else { panel_wakes++; ev("PANEL+"); } }
 void habitat_render_notify(void) { notifies++; }
 static int touch_pokes;               // touch_wake_task(): the touch task is woken from its long S2 wait
 void touch_wake_task(void) { touch_pokes++; ev("TPOKE"); }
@@ -274,7 +277,7 @@ static void reset_world(void) {
     memset(&the_lock, 0, sizeof the_lock); lock_creates = lock_acquires = lock_releases = 0;
     configure_calls = configure_battery = configure_usb = 0; pads_kept = 0; pmic_reads = 0;
     cache_chg = -1; usb_host = asleep = voice = session = false; transport = CABLE_XPORT_USB; audio_stopped = false; audio_idle_ok = true; pmu0 = 0x08; g_logs[0] = 0;
-    guard_stops = guard_starts = audio_idles = audio_resumes = touch_arms = touch_disarms = 0; pmic_state = 0; retention_result = ESP_OK;
+    guard_stops = guard_starts = audio_idles = audio_resumes = touch_arms = touch_disarms = panel_sleeps = panel_wakes = 0; pmic_state = 0; retention_result = ESP_OK;
     wdt_arms = wdt_feeds = wdt_disarms = 0; crumbs = 0; fake_stage = 3; bounces = 0; arm_adds_hold = false; release_wakes_screen = false; release_plugs_usb = false; arm_fails = false; touch_armed = false; touch_pokes = 0;
     off_calls = off_first_reason = off_last_reason = 0; off_last_force = false; off_accept = true;
     clear_events();
@@ -331,6 +334,9 @@ static void scenario_boot_and_cycle(void) {
     assert(touch_disarms == 0 && guard_starts == 1 && audio_resumes == 1 && !audio_stopped);
     assert(in_order("LOCK+", "AUDIO+") && in_order("AUDIO+", "GUARD+"));
     assert(the_lock.count == 1);
+#if !S2_PANEL_SLPIN
+    assert(panel_sleeps == 0 && panel_wakes == 0);         // the panel switch is off: the glue never calls display_panel_sleep
+#endif
 
     // ---------- plug in while asleep ----------
     screen(false);
@@ -861,6 +867,36 @@ static void scenario_off_never_on_external_power_3(void) {
 }
 #endif
 
+#if S2_PANEL_SLPIN
+static void scenario_panel(void) {
+    // S2_PANEL_SLPIN: the render task puts the CO5300 in sleep-in at S2 entry and brings it out at S2 exit (display_panel_sleep, display_habitat.c).
+    reset_world();
+    power_sleep_init();
+    unplug(); tick(4000);
+    screen(false); tick(3500);
+    assert(!strcmp(power_sleep_state_name(), "S2") && panel_sleeps == 1 && panel_wakes == 0 && the_lock.count == 0);
+    assert(in_order("AUDIO-", "PANEL-") && in_order("PANEL-", "GUARD-") && in_order("PANEL-", "LOCK-"));   // panel asleep, then the stall guard stops, THEN the lock goes
+    // a wake: the screen hook takes the lock back first and does not touch the panel; the render task brings it out right after, before the audio and the guard
+    clear_events();
+    screen(true);
+    assert(strncmp(g_events, "LOCK+", 5) == 0 && panel_wakes == 0);
+    tick(300);
+    assert(panel_wakes == 1 && in_order("LOCK+", "PANEL+") && in_order("PANEL+", "AUDIO+") && in_order("PANEL+", "GUARD+"));
+    // many cycles stay paired
+    for (int i = 0; i < 20; i++) { screen(false); tick(3500); assert(panel_sleeps == panel_wakes + 1); screen(true); tick(300); assert(panel_sleeps == panel_wakes); }
+    assert(panel_sleeps == 21);
+    // the screen wakes just as the lock is let go (a PWR press while S2 is being entered): still paired, and the next pass brings the panel out
+    release_wakes_screen = true;
+    screen(false); tick(3500); tick(500);
+    assert(panel_sleeps == panel_wakes && the_lock.count == 1 && !power_sleep_relaxed());
+    // a USB host appears in S2: the policy leaves S2 and the panel comes out with the rest
+    screen(false); tick(3500);
+    assert(panel_sleeps == panel_wakes + 1);
+    usb_host = true; tick(600);
+    assert(panel_sleeps == panel_wakes && !power_sleep_relaxed() && the_lock.count == 1);
+}
+#endif
+
 static void scenario_stats(void) {
     reset_world();
     power_sleep_init();
@@ -894,6 +930,9 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "audio")) scenario_audio_retry();
     else if (!strcmp(argv[1], "input")) scenario_input_gate();
     else if (!strcmp(argv[1], "stats")) scenario_stats();
+#if S2_PANEL_SLPIN
+    else if (!strcmp(argv[1], "panel")) scenario_panel();
+#endif
 #ifdef DEVICE_BATTERY_POWEROFF
     else if (!strcmp(argv[1], "off_s2_timeout_0")) scenario_off_s2_timeout_0();
     else if (!strcmp(argv[1], "off_s2_timeout_1")) scenario_off_s2_timeout_1();
@@ -937,6 +976,9 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
     build('glue_arm', '-DPP_TOUCH_WAKE_ON_BATTERY=1')
     for name in ('noarm', 'lost', 'armhold'):
         subprocess.run([str(folder / 'glue_arm'), name], check=True)
+    # S2_PANEL_SLPIN: the sleep-in / sleep-out calls, their order against the lock, the audio and the stall guard
+    build('glue_panel', '-DS2_PANEL_SLPIN=1')
+    subprocess.run([str(folder / 'glue_panel'), 'panel'], check=True)
     # the bench aid of the RTC watchdog: armed, never fed
     build('glue_selftest', '-DSLEEP_WDT_SELFTEST=1')
     subprocess.run([str(folder / 'glue_selftest'), 'wdt_selftest'], check=True)
@@ -946,4 +988,4 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
         subprocess.run([str(folder / 'glue_off'), name], check=True)
     print('power sleep glue: ' + ', '.join(scenarios) + ' PASS (boot order, unplug, S2 entry and wake order without a touch wake, plug-in, 200 cycles balanced, '
           'no retention RAM, PWR wake during entry, other boards, host, holds, Wi-Fi session and link holds, the D+ bounce after a sleep, the RTC watchdog and the breadcrumb in S2, audio retry, D1 input gate, sleep statistics); '
-          'noarm, lost, armhold PASS with PP_TOUCH_WAKE_ON_BATTERY=1; wdt_selftest PASS with SLEEP_WDT_SELFTEST=1; the S3 triggers PASS with DEVICE_BATTERY_POWEROFF=1')
+          'panel PASS with S2_PANEL_SLPIN=1; noarm, lost, armhold PASS with PP_TOUCH_WAKE_ON_BATTERY=1; wdt_selftest PASS with SLEEP_WDT_SELFTEST=1; the S3 triggers PASS with DEVICE_BATTERY_POWEROFF=1')
