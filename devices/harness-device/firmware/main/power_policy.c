@@ -163,6 +163,7 @@ static void hist_reset(pp_off_t *o)
     o->hist_next = 0;
     o->hist_count = 0;
     o->have_sample = false;
+    o->excursion = false;
 }
 
 int pp_off_drain_per_hour(const pp_off_t *o)
@@ -184,22 +185,29 @@ pp_off_reason_t pp_off_step(pp_off_t *o, const pp_off_in_t *in)
         hist_reset(o);
         return PP_OFF_NONE;
     }
-    // The drain is judged on S2 samples only: anything else resets the history (a screen-on hour is not light-sleep drain).
-    if (in->state != PP_S2) {
+    // S1 with the screen on: the user is at the dial (a screen-on hour is not light-sleep drain). Everything starts again.
+    const bool in_s2 = in->state == PP_S2;
+    if (!in_s2 && !in->screen_asleep) {
         o->s2_armed = false;
         o->low_armed = false;
         hist_reset(o);
         return PP_OFF_NONE;
     }
-    // One gauge sample a minute, in S2. A gap of two sample periods (the gauge unreadable for a while) throws the history away: it would
-    // not be one run of minutes.
-    if (in->pct >= 0 && (!o->have_sample || span_reached(in->now_ms, o->last_sample_ms, PP_OFF_SAMPLE_MS))) {
-        if (o->have_sample && span_reached(in->now_ms, o->last_sample_ms, 2 * PP_OFF_SAMPLE_MS)) hist_reset(o);
+    // "Dark" from here: S2, or S1 with the screen asleep (a hold excursion, or the 3 s before S2). Samples are taken in S2 only.
+    if (!in_s2) {
+        o->excursion = true;
+    } else if (in->pct >= 0 && (!o->have_sample || span_reached(in->now_ms, o->last_sample_ms, PP_OFF_SAMPLE_MS))) {
+        // One gauge sample a minute, in S2. A gap of two sample periods (the gauge unreadable for a while) throws the history away: it would
+        // not be one run of minutes. A gap made only of dark S1 steps, no longer than PP_OFF_EXCURSION_MS, is forgiven.
+        if (o->have_sample && span_reached(in->now_ms, o->last_sample_ms, 2 * PP_OFF_SAMPLE_MS) &&
+            !(o->excursion && !span_reached(in->now_ms, o->last_sample_ms, PP_OFF_EXCURSION_MS)))
+            hist_reset(o);
         o->hist[o->hist_next] = (uint8_t)(in->pct > 100 ? 100 : in->pct);
         o->hist_next = (uint8_t)((o->hist_next + 1) % PP_OFF_SAMPLES);
         if (o->hist_count < PP_OFF_SAMPLES) o->hist_count++;
         o->have_sample = true;
         o->last_sample_ms = in->now_ms;
+        o->excursion = false;
     }
     if (!o->s2_armed) {
         o->s2_armed = true;

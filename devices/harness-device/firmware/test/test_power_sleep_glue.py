@@ -805,6 +805,55 @@ static void scenario_off_low_battery_2(void) {
     cache_pct = 2; unplug(); tick(2 * 3600 * 1000);
     assert(!strcmp(power_sleep_state_name(), "S1") && off_calls == 0);
 }
+static void join_attempt(void) {
+    // one Wi-Fi join with no router in reach (net_link.c holds PP_HOLD_LINK over the join and the handshake): the policy goes S2 -> S1 and, 3 s after the hold ends, back
+    power_sleep_hold(PP_HOLD_LINK); tick(10 * 1000); power_sleep_release(PP_HOLD_LINK);
+}
+static void scenario_off_hold_timeout(void) {
+    // A dial with no reachable Wi-Fi, screen dark: a join attempt every minute. The 30 min idle timer must run through them (it never fired before: every
+    // S1 visit threw it away and the dial ran to the cell's cut-out).
+    reset_world();
+    power_sleep_init();
+    to_s2(80);
+    for (int minute = 0; minute < 28; minute++) { tick(50 * 1000); join_attempt(); }
+    assert(off_calls == 0 && asleep);
+    int minute = 28;
+    for (; minute < 33 && off_calls == 0; minute++) { tick(50 * 1000); join_attempt(); }
+    assert(off_calls > 0 && off_first_reason == PP_OFF_S2_TIMEOUT && !off_last_force && minute >= 30 && minute <= 32);
+    assert(strstr(g_logs, "power-off asked for: s2_30min"));
+}
+static void scenario_off_hold_low(void) {
+    // the flat cell (5 percent for 60 s) through the same join attempts
+    reset_world();
+    power_sleep_init();
+    to_s2(5);
+    for (int minute = 0; minute < 3 && off_calls == 0; minute++) { tick(50 * 1000); join_attempt(); }
+    assert(off_calls > 0 && off_first_reason == PP_OFF_LOW_BATTERY && strstr(g_logs, "power-off asked for: low_battery"));
+}
+static void scenario_off_hold_input(void) {
+    // the user presses PWR after 25 minutes of join attempts: the 30 min start again (the screen goes dark again after 60 s of nothing)
+    reset_world();
+    power_sleep_init();
+    to_s2(80);
+    for (int minute = 0; minute < 25; minute++) { tick(50 * 1000); join_attempt(); }
+    assert(off_calls == 0);
+    screen(true); tick(1000); screen(false); tick(4000);                  // PWR, then the screen goes off again
+    for (int minute = 0; minute < 28; minute++) { tick(50 * 1000); join_attempt(); }
+    assert(off_calls == 0);                                              // 28 min after the wake: not yet (53 min since S2 began)
+    for (int minute = 28; minute < 33 && off_calls == 0; minute++) { tick(50 * 1000); join_attempt(); }
+    assert(off_calls > 0 && off_first_reason == PP_OFF_S2_TIMEOUT);
+}
+static void scenario_off_hold_external(void) {
+    // a USB host (or VBUS) during a join attempt throws every timer away: nothing is asked for, ever
+    reset_world();
+    power_sleep_init();
+    to_s2(80);
+    for (int minute = 0; minute < 28; minute++) { tick(50 * 1000); join_attempt(); }
+    usb_host = true; tick(3000); usb_host = false;
+    tick(15 * 1000);
+    for (int minute = 0; minute < 20; minute++) { tick(50 * 1000); join_attempt(); }
+    assert(off_calls == 0);
+}
 static void scenario_off_drain_0(void) {
     // the gauge falls a point every 2 minutes (30 an hour) while the chip sits in S2: asked for at 20 minutes of S2, not before, and long before the 30
     reset_world();
@@ -936,6 +985,10 @@ int main(int argc, char **argv) {
 #ifdef DEVICE_BATTERY_POWEROFF
     else if (!strcmp(argv[1], "off_s2_timeout_0")) scenario_off_s2_timeout_0();
     else if (!strcmp(argv[1], "off_s2_timeout_1")) scenario_off_s2_timeout_1();
+    else if (!strcmp(argv[1], "off_hold_timeout")) scenario_off_hold_timeout();
+    else if (!strcmp(argv[1], "off_hold_low")) scenario_off_hold_low();
+    else if (!strcmp(argv[1], "off_hold_input")) scenario_off_hold_input();
+    else if (!strcmp(argv[1], "off_hold_external")) scenario_off_hold_external();
     else if (!strcmp(argv[1], "off_low_battery_0")) scenario_off_low_battery_0();
     else if (!strcmp(argv[1], "off_low_battery_1")) scenario_off_low_battery_1();
     else if (!strcmp(argv[1], "off_low_battery_2")) scenario_off_low_battery_2();
@@ -984,8 +1037,8 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
     subprocess.run([str(folder / 'glue_selftest'), 'wdt_selftest'], check=True)
     # the S3 triggers through the real glue (power_off_request is a fake that counts)
     build('glue_off', '-DDEVICE_BATTERY_POWEROFF=1')
-    for name in ('off_s2_timeout_0', 'off_s2_timeout_1', 'off_low_battery_0', 'off_low_battery_1', 'off_low_battery_2', 'off_drain_0', 'off_drain_1', 'off_never_on_external_power_0', 'off_never_on_external_power_1', 'off_never_on_external_power_2', 'off_never_on_external_power_3'):
+    for name in ('off_hold_timeout', 'off_hold_low', 'off_hold_input', 'off_hold_external', 'off_s2_timeout_0', 'off_s2_timeout_1', 'off_low_battery_0', 'off_low_battery_1', 'off_low_battery_2', 'off_drain_0', 'off_drain_1', 'off_never_on_external_power_0', 'off_never_on_external_power_1', 'off_never_on_external_power_2', 'off_never_on_external_power_3'):
         subprocess.run([str(folder / 'glue_off'), name], check=True)
     print('power sleep glue: ' + ', '.join(scenarios) + ' PASS (boot order, unplug, S2 entry and wake order without a touch wake, plug-in, 200 cycles balanced, '
           'no retention RAM, PWR wake during entry, other boards, host, holds, Wi-Fi session and link holds, the D+ bounce after a sleep, the RTC watchdog and the breadcrumb in S2, audio retry, D1 input gate, sleep statistics); '
-          'panel PASS with S2_PANEL_SLPIN=1; noarm, lost, armhold PASS with PP_TOUCH_WAKE_ON_BATTERY=1; wdt_selftest PASS with SLEEP_WDT_SELFTEST=1; the S3 triggers PASS with DEVICE_BATTERY_POWEROFF=1')
+          'the off timers through hold excursions PASS with DEVICE_BATTERY_POWEROFF=1; panel PASS with S2_PANEL_SLPIN=1; noarm, lost, armhold PASS with PP_TOUCH_WAKE_ON_BATTERY=1; wdt_selftest PASS with SLEEP_WDT_SELFTEST=1; the S3 triggers PASS with DEVICE_BATTERY_POWEROFF=1')

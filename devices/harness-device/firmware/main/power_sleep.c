@@ -262,8 +262,9 @@ void power_sleep_poll(void)
     pp_step(&s_pp, &in, &out);
 #ifdef DEVICE_BATTERY_POWEROFF
     {
-        // S3: from S2 only, never on external power. The sequence runs on its own task (power_off.c) and re-reads VBUS before it acts.
-        const pp_off_in_t oin = {.now_ms = in.now_ms, .state = out.state, .on_battery = s_last_on_battery, .sof = in.sof, .pct = battery_pct_raw()};
+        // S3: from S2, or from S1 with the screen still asleep (a Wi-Fi join holds the chip awake without a user: power_policy.h, HOLD EXCURSIONS), never on external power. The sequence runs on its own task (power_off.c) and re-reads VBUS before it acts.
+        const pp_off_in_t oin = {.now_ms = in.now_ms, .state = out.state, .on_battery = s_last_on_battery, .sof = in.sof, .screen_asleep = in.screen_asleep,
+                                 .pct = battery_pct_raw()};
         const pp_off_reason_t why = pp_off_step(&s_off, &oin);
         if (why != PP_OFF_NONE && power_off_request((int)why, false))
             ESP_LOGW(TAG, "power-off asked for: %s (state %s, pct %d)", pp_off_reason_name(why), pp_state_name(out.state), oin.pct);

@@ -224,6 +224,108 @@ static void test_poweroff_triggers(void)
     assert(e == PP_OFF_DRAIN && r.in.now_ms >= PP_OFF_DRAIN_MIN_MS && r.in.now_ms < PP_OFF_S2_MS);
 }
 
+// ---- the timers across hold excursions (2026-11-02 review): a Wi-Fi join takes PP_HOLD_LINK, which sends S2 to S1 for the length of the join ----
+// One minute of a dial with no reachable Wi-Fi: 50 s in S2, then a join attempt (a hold) that puts the policy in S1 for 10 s with the screen still asleep.
+static pp_off_reason_t excursion_step(offrig_t *r)
+{
+    r->in.state = (r->in.now_ms % 60000u) >= 50000u ? PP_S1 : PP_S2;
+    r->in.screen_asleep = true;
+    return offstep(r, 1000);
+}
+// Runs `ms` of those minutes; returns the first reason, and the time it came in *at (ms since the start of the rig's clock).
+static pp_off_reason_t excursion_run(offrig_t *r, uint32_t ms, uint32_t *at)
+{
+    for (uint32_t t = 0; t < ms; t += 1000) {
+        const pp_off_reason_t e = excursion_step(r);
+        if (e != PP_OFF_NONE) { if (at) *at = r->in.now_ms; return e; }
+    }
+    return PP_OFF_NONE;
+}
+
+static void test_poweroff_hold_excursions(void)
+{
+    offrig_t r;
+    uint32_t at = 0;
+    // (1) the 30 min idle timer is not reset by a hold every minute with the screen asleep: it fires at 30 min, not never
+    offrig_init(&r, 0, PP_S2, 80);
+    assert(excursion_run(&r, PP_OFF_S2_MS - 5000, &at) == PP_OFF_NONE);              // 29 min 55 s: not yet
+    assert(excursion_run(&r, 10000, &at) == PP_OFF_S2_TIMEOUT && at >= PP_OFF_S2_MS && at <= PP_OFF_S2_MS + 2000);
+    offrig_init(&r, 0, PP_S2, 80);                                                      // and the same run for 35 min asks for it once, on time
+    assert(excursion_run(&r, 35u * 60u * 1000u, &at) == PP_OFF_S2_TIMEOUT && at <= PP_OFF_S2_MS + 2000);
+    // a dial that never gets back to S2 (a hold on again at once) is still dark on the battery: it is switched off at 30 min too
+    offrig_init(&r, 0, PP_S1, 80); r.in.screen_asleep = true;
+    assert(offrun(&r, PP_OFF_S2_MS - 5000) == PP_OFF_NONE);
+    assert(offrun(&r, 10000) == PP_OFF_S2_TIMEOUT);
+
+    // (2) the flat cell: 5 percent for 60 s fires through the excursions, and in S1 with the screen asleep
+    offrig_init(&r, 0, PP_S2, 5);
+    assert(excursion_run(&r, 75000, &at) == PP_OFF_LOW_BATTERY && at >= PP_OFF_LOW_HOLD_MS && at <= PP_OFF_LOW_HOLD_MS + 2000);
+    offrig_init(&r, 0, PP_S1, 5); r.in.screen_asleep = true;
+    assert(offrun(&r, PP_OFF_LOW_HOLD_MS - 1000) == PP_OFF_NONE && offrun(&r, 2000) == PP_OFF_LOW_BATTERY);
+    // a reading above 5 percent still breaks the minute, excursion or not
+    offrig_init(&r, 0, PP_S2, 5);
+    excursion_run(&r, 40000, &at); r.in.pct = 6; excursion_step(&r); r.in.pct = 5;
+    assert(excursion_run(&r, PP_OFF_LOW_HOLD_MS - 2000, &at) == PP_OFF_NONE);
+    // S1 with the screen ON stays quiet at 3 percent, as before: the user sees the rim
+    offrig_init(&r, 0, PP_S1, 3);
+    assert(offrun(&r, 10u * 60u * 1000u) == PP_OFF_NONE);
+
+    // (3) user input still restarts both timers: the screen woke (PWR), so it is S1 with the screen on for a step
+    offrig_init(&r, 0, PP_S2, 80);
+    assert(excursion_run(&r, 20u * 60u * 1000u, &at) == PP_OFF_NONE);
+    r.in.state = PP_S1; r.in.screen_asleep = false; assert(offstep(&r, 1000) == PP_OFF_NONE);   // the user woke it
+    const uint32_t woke = r.in.now_ms;
+    assert(excursion_run(&r, PP_OFF_S2_MS - 5000, &at) == PP_OFF_NONE);                // 29 min 55 s after the wake: not yet
+    assert(excursion_run(&r, 10000, &at) == PP_OFF_S2_TIMEOUT && at - woke >= PP_OFF_S2_MS && at - woke <= PP_OFF_S2_MS + 3000);
+    offrig_init(&r, 0, PP_S2, 5);                                                       // the same wake in the flat-cell minute
+    excursion_run(&r, 50000, &at);
+    r.in.state = PP_S1; r.in.screen_asleep = false; assert(offstep(&r, 1000) == PP_OFF_NONE);
+    assert(excursion_run(&r, PP_OFF_LOW_HOLD_MS - 2000, &at) == PP_OFF_NONE);
+
+    // (4) external power cancels everything, from S1 with the screen asleep as from S2
+    for (int how = 0; how < 3; how++) {
+        offrig_init(&r, 0, PP_S2, 80);
+        assert(excursion_run(&r, 29u * 60u * 1000u, &at) == PP_OFF_NONE);
+        r.in.state = PP_S1; r.in.screen_asleep = true;
+        if (how == 0) r.in.on_battery = false;
+        if (how == 1) r.in.sof = true;
+        if (how == 2) r.in.state = PP_S0;
+        assert(offstep(&r, 1000) == PP_OFF_NONE);
+        r.in.on_battery = true; r.in.sof = false;
+        const uint32_t back = r.in.now_ms;
+        assert(excursion_run(&r, 5u * 60u * 1000u, &at) == PP_OFF_NONE);                // 5 minutes after the return, not 1
+        assert(excursion_run(&r, PP_OFF_S2_MS, &at) == PP_OFF_S2_TIMEOUT && at - back >= PP_OFF_S2_MS);
+    }
+    offrig_init(&r, 0, PP_S1, 1); r.in.screen_asleep = true; r.in.on_battery = false;    // never low on external power, dark S1 or not
+    assert(offrun(&r, 3u * 3600u * 1000u) == PP_OFF_NONE);
+
+    // (5) the drain history skips the excursions and is not thrown away: 30 percent an hour is still asked for at 20 minutes of S2 samples
+    offrig_init(&r, 0, PP_S2, 90);
+    pp_off_reason_t e = PP_OFF_NONE;
+    for (int m = 0; m < 28 && e == PP_OFF_NONE; m++) { if (m && m % 2 == 0) r.in.pct--; e = excursion_run(&r, 60000, &at); }
+    assert(e == PP_OFF_DRAIN && at >= PP_OFF_DRAIN_MIN_MS && at < PP_OFF_S2_MS);
+    // a long excursion (3 minutes of join attempts) in the middle keeps the history: 15 minutes, 3 away, 6 more is 21 samples
+    offrig_init(&r, 0, PP_S2, 90);
+    for (int m = 0; m < 15; m++) { r.in.pct -= (m % 4 == 0); r.in.state = PP_S2; r.in.screen_asleep = true; offrun(&r, 60000); }
+    const int before = pp_off_drain_per_hour(&r.o);
+    r.in.state = PP_S1; r.in.screen_asleep = true; assert(offrun(&r, 180000) == PP_OFF_NONE);
+    assert(r.o.hist_count >= 15);                                                      // not thrown away
+    r.in.state = PP_S2;
+    for (int m = 0; m < 6; m++) { offrun(&r, 60000); }
+    assert(pp_off_drain_per_hour(&r.o) >= 0 && before < 0);                            // 20 minutes of S2 samples are there now
+    // a visit to S1 with the screen ON still throws it away (the user was there)
+    r.in.state = PP_S1; r.in.screen_asleep = false; offstep(&r, 1000);
+    assert(pp_off_drain_per_hour(&r.o) < 0 && r.o.hist_count == 0);
+    // an excursion longer than PP_OFF_EXCURSION_MS (5 min) is not forgiven: the samples before and after it are not one run of minutes
+    assert(PP_OFF_EXCURSION_MS == 5u * 60u * 1000u);
+    offrig_init(&r, 0, PP_S2, 90);
+    for (int m = 0; m < 15; m++) { r.in.pct -= (m % 4 == 0); offrun(&r, 60000); }
+    assert(r.o.hist_count >= 14);
+    r.in.state = PP_S1; r.in.screen_asleep = true; assert(offrun(&r, 6u * 60u * 1000u) == PP_OFF_NONE);
+    r.in.state = PP_S2; offrun(&r, 2000);
+    assert(r.o.hist_count == 1);                                                       // started again from the sample after the gap
+}
+
 int main(void)
 {
     rig_t r;
@@ -525,6 +627,7 @@ int main(void)
 
     // --- The PMIC power-off triggers (S3, plan section 3.6 / 16): 30 min in S2, a flat cell, a fast drain; never on external power ---
     test_poweroff_triggers();
+    test_poweroff_hold_excursions();
 
     puts("power policy: S0/S1/S2 transitions, PMIC read schedule, hold bits, anti-flap, 32-bit clock wrap, poller table, battery screen levels, D1 input gate, power-off triggers PASS");
     return 0;

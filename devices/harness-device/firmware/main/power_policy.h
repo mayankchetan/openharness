@@ -159,6 +159,14 @@ uint32_t pp_dimmed_percent(uint32_t user_percent);
 //       drain (T0/G6), which is not in yet. The 30 min of (a) ends an S2 that is not draining.
 // NEVER on external power: a read that is not "on the battery" (VBUS good, no cell), a USB host (SOF), or S0 gives PP_OFF_NONE, throws the
 // timers away and, for external power, the drain history too. power_off.c checks VBUS once more, fresh, before it acts.
+// HOLD EXCURSIONS (2026-11-02 review). A Wi-Fi join takes PP_HOLD_LINK for up to ~20 s, with a backoff of up to ~60 s between attempts, and a hold sends
+// S2 to S1 while the screen stays asleep. A dial with no reachable router therefore never stayed in S2 for 30 min, and every S1 step threw the timers away.
+// Now "dark" means state S2, or state S1 with the screen asleep (pp_off_in_t.screen_asleep). In that case:
+//   * the 30 min timer and the flat-cell minute keep running (they are wall-clock spans; an S1 step neither starts nor resets them), and both can fire from S1;
+//   * the drain history takes no sample in S1, and a gap of up to PP_OFF_EXCURSION_MS made only of such steps does not throw it away (the rate is then the
+//     fall over the S2 samples, so a join's extra draw is counted into it; a longer gap still starts the history again);
+//   * the screen awake in S1 (a user at the dial: PWR is the only input a dark battery screen takes, D1) throws everything away as before, and so do S0,
+//     VBUS, a USB host, or no cell. A flat cell is therefore also not acted on while the screen is on (the user sees the rim).
 #define PP_OFF_S2_MS            (30u * 60u * 1000u)
 #define PP_OFF_LOW_PCT          5
 #define PP_OFF_LOW_HOLD_MS      60000u
@@ -166,6 +174,7 @@ uint32_t pp_dimmed_percent(uint32_t user_percent);
 #define PP_OFF_DRAIN_MIN_MS     (20u * 60u * 1000u)   // unbroken S2 history needed before the drain is judged
 #define PP_OFF_SAMPLE_MS        60000u      // one gauge sample a minute, in S2
 #define PP_OFF_SAMPLES          61          // the ring: up to an hour of S2 samples
+#define PP_OFF_EXCURSION_MS     (5u * 60u * 1000u)    // a gap in the S2 samples this long or shorter, with only S1-and-dark steps in it, keeps the history
 
 typedef enum {
     PP_OFF_NONE = 0,
@@ -185,6 +194,7 @@ typedef struct {
     uint8_t  hist_count;
     bool     have_sample;
     uint32_t last_sample_ms;
+    bool     excursion;       // a dark S1 step came since the last sample: a gap in the samples is not a gauge that went missing
 } pp_off_t;
 
 typedef struct {
@@ -192,6 +202,7 @@ typedef struct {
     pp_state_t state;       // the policy state after this poll's pp_step
     bool       on_battery;  // the last fresh PMIC read said so (pp_on_battery)
     bool       sof;         // a USB host is there
+    bool       screen_asleep;  // display_is_asleep(): with state S1 this is a hold excursion (or the 3 s settle), not a user at the screen
     int        pct;         // the gauge's own percent, 0..100, or -1
 } pp_off_in_t;
 
