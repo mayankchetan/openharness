@@ -177,7 +177,7 @@ static board_t the_board = {"cst9217+axp2101", 39, 40, TOUCH_CST9217, true, true
 static int pmic_state = 0;            // what the PMIC answers: 0 standby, 1 charging, 2 discharging, -1 error
 static int cache_chg = -1, cache_pct = 55, pmic_reads;
 static int pmu0 = 0x08;               // REG 0x00 the PMIC would answer: bit 5 VBUS good, bit 3 battery present; -1 = read error
-static bool usb_host, asleep, voice, session, audio_idle_ok = true, audio_stopped;
+static bool usb_host, asleep, voice, session, audio_idle_ok = true, audio_resume_ok = true, audio_stopped;
 static void (*sleep_cb)(bool);
 static esp_pm_light_sleep_cb_t exit_cb;
 static int wdt_arms, wdt_feeds, wdt_disarms; static uint32_t wdt_armed_ms;   // the RTC watchdog (sleep_wdt.h)
@@ -224,7 +224,8 @@ int power_pmu_read(int *s0, int *s1) {   // one fresh read of REG 0x00 and REG 0
 int battery_chg(void) { return cache_chg; }
 void battery_set(int pct, int chg) { cache_pct = pct; cache_chg = chg; }
 int battery_pct_raw(void) { return cache_pct; }
-bool audio_capture_idle(bool idle) { if (idle) { audio_idles++; if (audio_idle_ok) { audio_stopped = true; ev("AUDIO-"); } return audio_idle_ok; } audio_resumes++; audio_stopped = false; ev("AUDIO+"); return true; }
+// like audio_capture.c: a second stop while stopped does nothing and says "stopped"; a resume can be refused (a beep holds the codec lock for 200 ms or more) and then changes nothing
+bool audio_capture_idle(bool idle) { if (idle) { audio_idles++; if (audio_stopped) return true; if (audio_idle_ok) { audio_stopped = true; ev("AUDIO-"); } return audio_idle_ok; } audio_resumes++; if (!audio_resume_ok) return false; audio_stopped = false; ev("AUDIO+"); return true; }
 bool audio_client_active(void) { return voice; }
 bool cable_client_is_connected(void) { return session; }
 static cable_xport_kind_t transport = CABLE_XPORT_USB;   // which wire the cable link runs over (S1: a Wi-Fi session does not hold the chip awake)
@@ -276,7 +277,7 @@ static void unplug(void)   { pmic_state = 2; cache_chg = 2; pmu0 = 0x08; }   // 
 static void reset_world(void) {
     memset(&the_lock, 0, sizeof the_lock); lock_creates = lock_acquires = lock_releases = 0;
     configure_calls = configure_battery = configure_usb = 0; pads_kept = 0; pmic_reads = 0;
-    cache_chg = -1; usb_host = asleep = voice = session = false; transport = CABLE_XPORT_USB; audio_stopped = false; audio_idle_ok = true; pmu0 = 0x08; g_logs[0] = 0;
+    cache_chg = -1; usb_host = asleep = voice = session = false; transport = CABLE_XPORT_USB; audio_stopped = false; audio_idle_ok = true; audio_resume_ok = true; pmu0 = 0x08; g_logs[0] = 0;
     guard_stops = guard_starts = audio_idles = audio_resumes = touch_arms = touch_disarms = panel_sleeps = panel_wakes = 0; pmic_state = 0; retention_result = ESP_OK;
     wdt_arms = wdt_feeds = wdt_disarms = 0; crumbs = 0; fake_stage = 3; bounces = 0; arm_adds_hold = false; release_wakes_screen = false; release_plugs_usb = false; arm_fails = false; touch_armed = false; touch_pokes = 0;
     off_calls = off_first_reason = off_last_reason = 0; off_last_force = false; off_accept = true;
@@ -946,6 +947,37 @@ static void scenario_panel(void) {
 }
 #endif
 
+static void scenario_audio_resume_retry(void) {
+    // 2026-11-02 review: exit_s2 ignored the answer of audio_capture_idle(false). A beep holding the codec lock refuses it (200 ms timeout); the flag was cleared
+    // anyway, the next S2 entry found the audio still marked stopped and skipped the stop block (the amplifier, the codecs, the clocks).
+    reset_world();
+    power_sleep_init();
+    unplug(); tick(4000); screen(false); tick(3500);
+    assert(!strcmp(power_sleep_state_name(), "S2") && audio_stopped);
+    audio_resume_ok = false;
+    screen(true); tick(1000);
+    assert(!strcmp(power_sleep_state_name(), "S1") && audio_stopped);   // refused: still stopped
+    const int tries = audio_resumes;
+    assert(tries >= 1);
+    tick(1000);
+    assert(audio_resumes > tries && audio_stopped);                    // and asked again on later render passes, not once
+    audio_resume_ok = true; tick(300);
+    assert(!audio_stopped);                                            // it took
+    const int resumes = audio_resumes;
+    tick(1000);
+    assert(audio_resumes == resumes);                                  // and the retries stop
+    clear_events();
+    screen(false); tick(3500);
+    assert(!strcmp(power_sleep_state_name(), "S2") && audio_stopped && strstr(g_events, "AUDIO-"));   // the next S2 stops the audio again
+    // the next S2 comes before the resume took: the entry finishes the resume first, then stops
+    audio_resume_ok = false;
+    screen(true); tick(300);
+    assert(audio_stopped);
+    audio_resume_ok = true; clear_events();
+    screen(false); tick(3500);
+    assert(!strcmp(power_sleep_state_name(), "S2") && audio_stopped && in_order("AUDIO+", "AUDIO-"));
+}
+
 static void scenario_stats(void) {
     reset_world();
     power_sleep_init();
@@ -977,6 +1009,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "usb_bounce")) scenario_usb_bounce();
     else if (!strcmp(argv[1], "watchdog")) scenario_watchdog();
     else if (!strcmp(argv[1], "audio")) scenario_audio_retry();
+    else if (!strcmp(argv[1], "audio_resume")) scenario_audio_resume_retry();
     else if (!strcmp(argv[1], "input")) scenario_input_gate();
     else if (!strcmp(argv[1], "stats")) scenario_stats();
 #if S2_PANEL_SLPIN
@@ -1022,7 +1055,7 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
                         '-I', str(main), str(folder / 'harness.c'), str(folder / 'power_sleep.c'), str(folder / 'power_policy.c'),
                         '-o', str(folder / exe)], check=True)
     build('glue')
-    scenarios = ('boot', 'cycles', 'noret', 'race', 'policy', 'facts', 'boards', 'host', 'holds', 'wifi_holds', 'usb_bounce', 'watchdog', 'audio', 'input', 'stats')
+    scenarios = ('boot', 'cycles', 'noret', 'race', 'policy', 'facts', 'boards', 'host', 'holds', 'wifi_holds', 'usb_bounce', 'watchdog', 'audio', 'audio_resume', 'input', 'stats')
     for name in scenarios:
         subprocess.run([str(folder / 'glue'), name], check=True)
     # the arming code D1 turns off still has to work for a later mode: build it in and run its two scenarios
@@ -1040,5 +1073,5 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
     for name in ('off_hold_timeout', 'off_hold_low', 'off_hold_input', 'off_hold_external', 'off_s2_timeout_0', 'off_s2_timeout_1', 'off_low_battery_0', 'off_low_battery_1', 'off_low_battery_2', 'off_drain_0', 'off_drain_1', 'off_never_on_external_power_0', 'off_never_on_external_power_1', 'off_never_on_external_power_2', 'off_never_on_external_power_3'):
         subprocess.run([str(folder / 'glue_off'), name], check=True)
     print('power sleep glue: ' + ', '.join(scenarios) + ' PASS (boot order, unplug, S2 entry and wake order without a touch wake, plug-in, 200 cycles balanced, '
-          'no retention RAM, PWR wake during entry, other boards, host, holds, Wi-Fi session and link holds, the D+ bounce after a sleep, the RTC watchdog and the breadcrumb in S2, audio retry, D1 input gate, sleep statistics); '
+          'no retention RAM, PWR wake during entry, other boards, host, holds, Wi-Fi session and link holds, the D+ bounce after a sleep, the RTC watchdog and the breadcrumb in S2, audio retry, audio resume retry, D1 input gate, sleep statistics); '
           'the off timers through hold excursions PASS with DEVICE_BATTERY_POWEROFF=1; panel PASS with S2_PANEL_SLPIN=1; noarm, lost, armhold PASS with PP_TOUCH_WAKE_ON_BATTERY=1; wdt_selftest PASS with SLEEP_WDT_SELFTEST=1; the S3 triggers PASS with DEVICE_BATTERY_POWEROFF=1')

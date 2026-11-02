@@ -393,8 +393,9 @@ static void exit_s2(void)
 #if S2_PANEL_SLPIN
     display_panel_sleep(false);                  // sleep-out + 120 ms first: it is the part the user waits for; the loop lights the panel after the first frame
 #endif
-    if (s_audio_idle) audio_capture_idle(false);
-    s_audio_idle = false;
+    // A beep holding the codec lock refuses the resume (audio_capture_idle waits 200 ms for it). Then the audio stays marked stopped, here and in
+    // audio_capture.c (s_idle), until a later pass gets it through (power_sleep_render_service): clearing the flag anyway made the next S2 entry skip the stop.
+    if (s_audio_idle && audio_capture_idle(false)) s_audio_idle = false;
     display_render_guard(true);
     if (atomic_exchange(&s_wdt_armed, false)) sleep_wdt_disarm();   // after the lock is back: the chip is awake again
     atomic_store(&s_in_s2, false);
@@ -404,6 +405,7 @@ void power_sleep_render_service(void)
 {
     const pp_state_t want = (pp_state_t)atomic_load(&s_want);
     pp_state_t have = s_applied;
+    if (s_audio_idle && have != PP_S2 && audio_capture_idle(false)) s_audio_idle = false;   // the resume exit_s2 was refused (a beep held the codec lock): try again
     if (want == have && have != PP_S2) return;
     if (have == PP_S2 && (want != PP_S2 || !display_is_asleep())) {
         exit_s2();
