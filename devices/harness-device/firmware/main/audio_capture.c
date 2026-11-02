@@ -4,7 +4,9 @@
 #include "board_pins.h"
 #include "board/board_i2c.h"
 #include "s2_switches.h"
+#if S2_AMP_OFF
 #include "driver/gpio.h"
+#endif
 #include "driver/i2s_std.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
