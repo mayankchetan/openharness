@@ -23,7 +23,12 @@ class TunnelLink(
 ) : TunnelOpener {
 
     override fun open(events: TunnelEvents): TunnelChannel {
-        val request = Request.Builder().url(url).apply { headers.forEach { (k, v) -> addHeader(k, v) } }.build()
+        // OkHttp names the offending header value in its exception message. Rethrow with no message and no cause.
+        val request = try {
+            Request.Builder().url(url).apply { headers.forEach { (k, v) -> addHeader(k, v) } }.build()
+        } catch (_: IllegalArgumentException) {
+            throw IllegalArgumentException("invalid tunnel URL or header")
+        }
         val ws = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) = events.onOpen()
 
@@ -56,6 +61,13 @@ class TunnelLink(
 
     companion object {
         const val CLOSE_NORMAL = 1000
+
+        /** The link the settings describe. `urlOverride` is for tests that talk to a loopback server. */
+        fun fromSettings(
+            settings: TunnelSettings,
+            client: OkHttpClient = defaultClient(),
+            urlOverride: String? = null,
+        ): TunnelLink = TunnelLink(urlOverride ?: settings.relayUrl, settings.headers(), client)
 
         /**
          * The code to answer a peer close with: the peer's own code when a WebSocket may carry it, else 1000.

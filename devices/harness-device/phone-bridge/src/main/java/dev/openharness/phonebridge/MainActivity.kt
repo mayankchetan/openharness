@@ -39,8 +39,18 @@ class MainActivity : Activity() {
             }
         }
         column.addView(status, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        val settings = Button(this).apply {
+            text = "Settings"
+            setOnClickListener { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
+        }
+        val pairing = Button(this).apply {
+            text = "Pairing"
+            setOnClickListener { startActivity(Intent(this@MainActivity, PairingActivity::class.java)) }
+        }
         column.addView(start)
         column.addView(stop)
+        column.addView(settings)
+        column.addView(pairing)
         setContentView(column)
     }
 
@@ -62,7 +72,7 @@ class MainActivity : Activity() {
             appendLine("dial -> tunnel: ${s.bytesToTunnel} bytes")
             appendLine("tunnel -> dial: ${s.bytesToDial} bytes")
             appendLine()
-            appendLine("tunnel: ${BuildConfig.TUNNEL_URL}")
+            appendLine("tunnel: ${settingsStore(this@MainActivity).load().relayUrl}")
             append("unbonded channel allowed: ${BuildConfig.DEV_ALLOW_UNBONDED}")
         }
     }

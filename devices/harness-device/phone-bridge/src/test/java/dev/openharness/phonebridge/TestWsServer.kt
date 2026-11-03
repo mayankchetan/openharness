@@ -19,6 +19,10 @@ class TestWsServer : AutoCloseable {
     @Volatile var requestHeaders: Map<String, String> = emptyMap()
         private set
 
+    /** The request line, for example `GET /relay HTTP/1.1`. */
+    @Volatile var requestLine: String = ""
+        private set
+
     val port: Int get() = server.localPort
     val url: String get() = "ws://127.0.0.1:$port/relay"
 
@@ -35,6 +39,7 @@ class TestWsServer : AutoCloseable {
                     head.write(b)
                 }
                 val lines = head.toString(Charsets.ISO_8859_1).split("\r\n").filter { it.isNotEmpty() }
+                requestLine = lines.first()
                 requestHeaders = lines.drop(1).associate {
                     val i = it.indexOf(':')
                     it.substring(0, i).trim().lowercase() to it.substring(i + 1).trim()

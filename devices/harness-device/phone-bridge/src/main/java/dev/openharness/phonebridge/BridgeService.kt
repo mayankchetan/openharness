@@ -129,7 +129,7 @@ class BridgeService : Service() {
         }
         bleRetry.connected()
         update(mySession, Phase.CHANNEL_OPEN, "channel open, waiting for the dial")
-        val p = Pump(channel, TunnelLink(BuildConfig.TUNNEL_URL), object : PumpListener {
+        val p = Pump(channel, TunnelLink.fromSettings(settingsStore(this).load()), object : PumpListener {
             override fun onTunnelOpening() = update(mySession, Phase.RELAYING, "tunnel opening")
             override fun onTunnelOpen() {
                 tunnelRetry.connected()
