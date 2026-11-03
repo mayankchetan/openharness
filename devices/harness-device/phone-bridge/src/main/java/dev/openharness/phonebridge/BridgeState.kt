@@ -12,6 +12,8 @@ enum class Phase {
     FAILED,
     NO_PERMISSION,
     BLUETOOTH_OFF,
+    WAITING_RETRY,
+    TOKEN_REJECTED,
 }
 
 /** What the status screen shows. `detail` is a fixed text; it never holds a URL, a header or a token. */

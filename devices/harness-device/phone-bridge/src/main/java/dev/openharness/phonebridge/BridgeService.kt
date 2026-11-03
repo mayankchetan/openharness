@@ -18,14 +18,22 @@ import android.util.Log
 
 /**
  * Foreground service (type connectedDevice) that owns one relay session: find the dial, open the CoC, open the
- * tunnel on the first byte, pump. When the session ends it shows why and stops. There is no retry loop in this
- * version (rule 6: do not loop); reconnect and presence come with B10b.
+ * tunnel on the first byte, pump. When a session ends for a reason that can get better (dial out of range, tunnel
+ * down) it waits on the 1-2-4-8-16-30 s ladder and starts again; one ladder for the BLE link, one for the tunnel,
+ * each reset by its own good connection. It stops for good on a user Stop, a missing permission, Bluetooth off or a
+ * rejected token (rule 6: do not loop). Presence (waking the service when the dial is near) is not in this version.
  */
 class BridgeService : Service() {
 
     private val main = Handler(Looper.getMainLooper())
     private var dialLink: DialLink? = null
     private var pump: Pump? = null
+    private val scheduler = Scheduler { delayMs, task ->
+        main.postDelayed(task, delayMs)
+        Cancelable { main.removeCallbacks(task) }
+    }
+    private val bleRetry = Reconnector(ReconnectLadder(random = java.util.Random()), scheduler) { begin() }
+    private val tunnelRetry = Reconnector(ReconnectLadder(random = java.util.Random()), scheduler) { begin() }
     private var session = 0 // bumped on every start, so a late callback of an old session is ignored
 
     private val ticker = object : Runnable {
@@ -46,17 +54,25 @@ class BridgeService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 session++ // a late callback of the stopped session must not start anything
+                bleRetry.stop()
+                tunnelRetry.stop()
                 teardown()
                 BridgeState.set(Phase.IDLE, "stopped")
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
-            else -> begin()
+            else -> {
+                bleRetry.resume()
+                tunnelRetry.resume()
+                begin()
+            }
         }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        bleRetry.stop()
+        tunnelRetry.stop()
         teardown()
         super.onDestroy()
     }
@@ -98,7 +114,8 @@ class BridgeService : Service() {
                 main.post { startPump(mySession, channel) }
             }
             override fun onFailed(detail: String) {
-                main.post { finish(mySession, Phase.FAILED, detail) } // also ends a running session (link lost)
+                // Also ends a running session (link lost). The dial may be asleep or out of range: try again later.
+                main.post { finish(mySession, Phase.FAILED, detail, bleRetry) }
             }
         })
         dialLink = link
@@ -110,12 +127,17 @@ class BridgeService : Service() {
             channel.close()
             return
         }
+        bleRetry.connected()
         update(mySession, Phase.CHANNEL_OPEN, "channel open, waiting for the dial")
         val p = Pump(channel, TunnelLink(BuildConfig.TUNNEL_URL), object : PumpListener {
             override fun onTunnelOpening() = update(mySession, Phase.RELAYING, "tunnel opening")
-            override fun onTunnelOpen() = update(mySession, Phase.RELAYING, "tunnel up")
+            override fun onTunnelOpen() {
+                tunnelRetry.connected()
+                update(mySession, Phase.RELAYING, "tunnel up")
+            }
             override fun onClosed(reason: CloseReason) {
-                main.post { finish(mySession, Phase.CLOSED, "session ended: ${reason.name.lowercase()}") }
+                val http = pump?.lastHttpCode()
+                main.post { sessionEnded(mySession, reason, http) }
             }
         })
         pump = p
@@ -130,14 +152,34 @@ class BridgeService : Service() {
         main.post { updateNotification(detail) }
     }
 
-    /** End the session and stop the service, keeping the last text on the status screen. */
-    private fun finish(mySession: Int, phase: Phase, detail: String) {
+    private fun sessionEnded(mySession: Int, reason: CloseReason, http: Int?) {
+        when {
+            ReconnectPolicy.isTokenRejected(http) ->
+                finish(mySession, Phase.TOKEN_REJECTED, "the tunnel refused the service token ($http). Check it in Settings.")
+            !ReconnectPolicy.shouldRetry(reason, http) -> finish(mySession, Phase.CLOSED, "stopped")
+            // The dial closed its side: a BLE matter. Anything else is the tunnel.
+            reason == CloseReason.DIAL_CLOSED ->
+                finish(mySession, Phase.CLOSED, "session ended: dial closed", bleRetry)
+            else -> finish(mySession, Phase.CLOSED, "session ended: ${reason.name.lowercase()}", tunnelRetry)
+        }
+    }
+
+    /**
+     * End the session, keeping the last text on the status screen. With a `retry` that accepts, the service stays in
+     * the foreground and starts again after the next ladder step; otherwise it stops.
+     */
+    private fun finish(mySession: Int, phase: Phase, detail: String, retry: Reconnector? = null) {
         if (mySession != session) return
         session++ // callbacks that teardown() triggers (pump closed, link closed) belong to the old session
         val up = pump?.bytesToTunnel() ?: 0
         val down = pump?.bytesToDial() ?: 0
         Log.i(TAG, "finish: $phase")
         teardown()
+        if (retry != null && retry.failed()) {
+            BridgeState.set(Phase.WAITING_RETRY, "$detail; trying again soon", up, down)
+            updateNotification("Waiting to reconnect")
+            return
+        }
         BridgeState.set(phase, detail, up, down)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
