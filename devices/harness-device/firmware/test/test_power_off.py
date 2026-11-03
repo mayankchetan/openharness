@@ -95,6 +95,7 @@ int power_read_reg(uint8_t reg);
 'battery.h': '#pragma once\nint battery_pct_raw(void);\nint battery_mv(void);\n',
 'driver/usb_serial_jtag.h': '#pragma once\n#include <stdbool.h>\nbool usb_serial_jtag_is_connected(void);\n',
 'fw_update.h': '#pragma once\n#include <stdbool.h>\nbool fw_update_active(void);\n',
+'last_words.h': '#pragma once\nvoid last_words_on_report(void (*fn)(void));\n',
 'ui/display.h': '#pragma once\n#include <stdbool.h>\nvoid display_lock_at(const char *who);\n#define display_lock() display_lock_at(__func__)\nvoid display_unlock(void);\nbool display_is_asleep(void);\nvoid display_wake(void);\n',
 'ui/ui_screens.h': '#pragma once\nvoid ui_show_error(const char *title, const char *detail);\nvoid ui_leave_error_screen(void);\n',
 }
@@ -137,6 +138,8 @@ int battery_pct_raw(void) { return pct; }
 int battery_mv(void) { return mv; }
 bool usb_serial_jtag_is_connected(void) { return usb_host; }
 bool fw_update_active(void) { return ota; }
+static void (*report_hooks[4])(void); static int report_hook_count;
+void last_words_on_report(void (*fn)(void)) { assert(report_hook_count < 4); report_hooks[report_hook_count++] = fn; }   // last_words.c runs these at the daemon-visible report
 void display_lock_at(const char *w) { (void)w; ev("LOCK"); }
 void display_unlock(void) { ev("UNLOCK"); }
 bool display_is_asleep(void) { return asleep; }
@@ -438,6 +441,11 @@ static void scenario_boot_report(void) {
     { const char *first = strstr(g_logs, "boot: last power-off:"); assert(first && !strstr(first + 1, "boot: last power-off:")); }
     assert(strstr(g_logs, "REG 0x20=0x4 REG 0x21=0x2"));                   // ... with the two source bytes
     assert(in_order("NVSERASE", "NVSCOMMIT") && !store.present);           // ... and erased
+    // ... and said again at the report: the daemon opens the port about 4.4 s after boot, the boot line is gone by then (DIAG7, 2026-11-02)
+    assert(report_hook_count == 1);
+    g_logs[0] = 0;
+    report_hooks[0]();
+    assert(strstr(g_logs, "boot: last power-off: drain at up=") && strstr(g_logs, "(pct=4 mv=3300)"));
     clear_events();
     power_off_boot_report();
     assert(!strstr(g_logs, "last power-off") && strstr(g_logs, "REG 0x20"));  // the second boot says nothing about it

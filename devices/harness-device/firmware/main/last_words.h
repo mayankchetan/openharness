@@ -21,6 +21,13 @@ void last_words_add(const char *line, size_t len);
 // that reset was a crash. Logs once per boot.
 void last_words_report(void);
 
+// Lines the firmware prints at boot are lost to the dial log when the daemon opens the port later (about 4.4 s after boot; 2026-11-02: the AXP2101 rail line
+// and the last power-off line were missing on DIAG7). A module that prints such a line at boot registers a function here, once, and the function prints it
+// again: last_words_report() runs every registered function once, right after the reset reason (and the sleep breadcrumb), before the replay of the
+// previous boot's log. At most 4 functions; the same function twice counts once; a full table refuses quietly. The functions run on the task that reports
+// (the cable session), so they must only format and log what they saved at boot, and read no bus.
+void last_words_on_report(void (*fn)(void));
+
 // Say WHY the reset about to happen is happening (the automatic mode switch passes "mode switch", task W15), so the next boot's report reads
 // "reset reason: software (esp_restart): mode switch" and is not taken for a fault. Kept in RTC memory with a checksum; believed only after a
 // software reset, and used once.

@@ -3,6 +3,7 @@
 #include "board_pins.h"
 #include "board_i2c.h"
 #include "board.h"
+#include "last_words.h"
 #include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
 #include "esp_log.h"
@@ -90,14 +91,29 @@ static esp_err_t axp_write(uint8_t reg, uint8_t val)
 
 // READ ONLY: axp_read only. No rail, no enable bit and no DC-DC mode bit is written anywhere in this firmware (the one rail-wide write is the PMIC power-off,
 // power_pmic_soft_off).
-void power_log_rails(void)
+// Kept for the report (last_words_on_report): the daemon opens the port about 4.4 s after boot and the boot line is gone by then. 27 bytes and a bit mask.
+static uint8_t s_rails[POWER_RAILS_COUNT];
+static uint32_t s_rails_ok;
+
+static void rails_line(void)
 {
-    if (!board()->has_pmic) return;
     int regs[POWER_RAILS_COUNT];
-    for (int i = 0; i < POWER_RAILS_COUNT; i++) regs[i] = axp_read((uint8_t)(POWER_RAILS_FIRST + i));
+    for (int i = 0; i < POWER_RAILS_COUNT; i++) regs[i] = (s_rails_ok >> i) & 1u ? (int)s_rails[i] : -1;
     char line[200];
     power_rails_format(line, sizeof line, regs);
     ESP_LOGI(TAG, "%s", line);
+}
+
+void power_log_rails(void)
+{
+    if (!board()->has_pmic) return;
+    s_rails_ok = 0;
+    for (int i = 0; i < POWER_RAILS_COUNT; i++) {
+        const int v = axp_read((uint8_t)(POWER_RAILS_FIRST + i));
+        if (v >= 0) { s_rails[i] = (uint8_t)v; s_rails_ok |= 1u << i; }
+    }
+    rails_line();
+    last_words_on_report(rails_line);   // and again once a daemon is listening
 }
 
 bool power_take_pwrkey_tap(void)

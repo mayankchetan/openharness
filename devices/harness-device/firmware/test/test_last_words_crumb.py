@@ -87,6 +87,13 @@ static last_words_crumb_t crumb(uint32_t tick, uint8_t want, uint8_t applied, ui
     return c;
 }
 
+static int hook_calls, hook_order_ok;
+static void hook_a(void) { hook_calls++; if (strstr(g_logs, "reset reason")) hook_order_ok++; ESP_LOGI("t", "hook a"); }
+static void hook_b(void) { hook_calls++; if (strstr(g_logs, "reset reason")) hook_order_ok++; ESP_LOGI("t", "hook b"); }
+#define HN(n) static void hn##n(void) { hook_calls++; }
+HN(0) HN(1) HN(2) HN(3) HN(4) HN(5) HN(6) HN(7) HN(8) HN(9)
+static void (*const hook_n[10])(void) = {hn0, hn1, hn2, hn3, hn4, hn5, hn6, hn7, hn8, hn9};
+
 int main(void)
 {
     // ---- a crash after wakes: the last crumb is reported, once ----
@@ -151,7 +158,26 @@ int main(void)
     reboot(ESP_RST_TASK_WDT);
     last_words_report();
     assert(strstr(g_logs, "wake #") && strstr(g_logs, "starved at the watchdog: "));
-    puts("last words crumb: report once, dropped after a normal reset, torn record refused, starved list recorded and cut PASS");
+    // ---- lines that were printed at boot, before the daemon's port was open, are said again at the report (2026-11-02: the AXP rail line and the last
+    //      power-off line were missing from the dial log on DIAG7) ----
+    hook_calls = 0; hook_order_ok = 0;
+    last_words_on_report(hook_a);
+    last_words_on_report(hook_a);                                  /* the same hook twice is one hook */
+    last_words_on_report(hook_b);
+    reboot(ESP_RST_POWERON);                                       /* an ordinary boot: the hooks run too, once, after the reset reason line */
+    last_words_report();
+    assert(hook_calls == 2 && hook_order_ok == 2);
+    assert(strstr(g_logs, "hook a") && strstr(g_logs, "hook b"));
+    assert(strstr(g_logs, "reset reason") < strstr(g_logs, "hook a") && strstr(g_logs, "hook a") < strstr(g_logs, "hook b"));
+    last_words_report(); assert(hook_calls == 2);                  /* once per boot */
+    reboot(ESP_RST_PANIC);                                         /* an abnormal boot: the hooks run before the replay of the previous log */
+    last_words_report();
+    assert(hook_calls == 4);
+    for (int i = 0; i < 10; i++) last_words_on_report(hook_n[i]);  /* a full table refuses, never overruns */
+    reboot(ESP_RST_POWERON);
+    last_words_report();
+    assert(hook_calls >= 4 + 2 && hook_calls <= 4 + 4);
+    puts("last words crumb: report once, dropped after a normal reset, torn record refused, starved list recorded and cut, deferred lines said at the report PASS");
     return 0;
 }
 '''

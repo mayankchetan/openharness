@@ -14,6 +14,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "fw_update.h"
+#include "last_words.h"
 #include "net_link.h"
 #include "nvs.h"
 #include "power_policy.h"
@@ -37,6 +38,8 @@ static const char *TAG = "poff";
 // What the next boot logs. 12 bytes, written whole.
 typedef struct { uint32_t magic; uint8_t reason; int8_t pct; uint16_t mv; uint32_t up_s; } poff_rec_t;
 
+static poff_rec_t s_last;        // the record the boot found, kept to say it again once a daemon is listening (last_words_on_report)
+static bool s_last_valid;
 static atomic_bool s_busy;
 static int64_t s_next_try_us;
 static int s_reason;
@@ -186,6 +189,12 @@ bool power_off_request(int reason, bool force)
 
 bool power_off_pending(void) { return atomic_load(&s_busy); }
 
+static void report_last(void)
+{
+    if (s_last_valid)
+        ESP_LOGW(TAG, "boot: last power-off: %s at up=%u s (pct=%d mv=%u)", reason_name(s_last.reason), (unsigned)s_last.up_s, s_last.pct, (unsigned)s_last.mv);
+}
+
 void power_off_boot_report(void)
 {
     // Raw bytes, for the bench gates P1-P3: REG 0x20 holds the power-on source bits and REG 0x21 the power-off source bits (datasheet V1.4 p.35-36).
@@ -200,8 +209,12 @@ void power_off_boot_report(void)
     const esp_err_t e = nvs_get_blob(h, KEY, &rec, &n);
     nvs_close(h);
     if (e != ESP_OK) return;   // nothing recorded: an ordinary boot
-    if (n == sizeof rec && rec.magic == REC_MAGIC)
-        ESP_LOGW(TAG, "boot: last power-off: %s at up=%u s (pct=%d mv=%u)", reason_name(rec.reason), (unsigned)rec.up_s, rec.pct, (unsigned)rec.mv);
+    if (n == sizeof rec && rec.magic == REC_MAGIC) {
+        s_last = rec;
+        s_last_valid = true;
+        report_last();
+        last_words_on_report(report_last);   // the boot line is gone by the time the daemon opens the port: say it again at the report
+    }
     erase_record();
 }
 

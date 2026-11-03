@@ -207,6 +207,22 @@ void last_words_add(const char *line, size_t len)
     portEXIT_CRITICAL(&s_mux);
 }
 
+#define LW_HOOKS 4
+static void (*s_hooks[LW_HOOKS])(void);
+
+void last_words_on_report(void (*fn)(void))
+{
+    if (!fn) return;
+    portENTER_CRITICAL(&s_mux);
+    int free_slot = -1;
+    for (int i = 0; i < LW_HOOKS; i++) {
+        if (s_hooks[i] == fn) { free_slot = -2; break; }
+        if (!s_hooks[i] && free_slot == -1) free_slot = i;
+    }
+    if (free_slot >= 0) s_hooks[free_slot] = fn;
+    portEXIT_CRITICAL(&s_mux);
+}
+
 void last_words_report(void)
 {
     if (s_reported) return;
@@ -224,6 +240,8 @@ void last_words_report(void)
     }
     s_crumb_have = s_crumb_torn = false;
 #endif
+    for (int i = 0; i < LW_HOOKS; i++)
+        if (s_hooks[i]) s_hooks[i]();   // the lines that were printed at boot, before a daemon could hear them
     if (!s_previous_len) return;
     ESP_LOGW(TAG, "last %u bytes of log before that reset follow", (unsigned)s_previous_len);
     // The first line is very likely a fragment (the ring wrapped through it); everything after is whole.

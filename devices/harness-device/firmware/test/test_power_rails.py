@@ -22,7 +22,9 @@ assert fn, 'power_log_rails in power.c'
 body = fn.group(0)
 assert 'axp_read(' in body and 'axp_write' not in body and 'power_pmic_soft_off' not in body, 'read only'
 assert 'board()->has_pmic' in body, 'no PMIC, no reads'
-assert 'power_rails_format(' in body
+line_fn = re.search(r'static void rails_line\(void\)\n\{.*?^\}', power_c, re.M | re.S)
+assert line_fn and 'power_rails_format(' in line_fn.group(0) and 'axp_read' not in line_fn.group(0), 'the line is formatted from the saved bytes, no bus read at report time'
+assert 'last_words_on_report(rails_line)' in body, 'said again once a daemon is listening (the boot line is lost: the port opens about 4.4 s after boot)'
 assert re.search(r'void power_log_rails\(void\);', power_h)
 assert re.search(r'power_off_boot_report\(\);[^\n]*\n\s*power_log_rails\(\);', app), 'called once at boot, after power_off_boot_report / config_store_init'
 fmt = re.search(r'static inline int power_rails_format\(.*?\n\}', power_h, re.S)
