@@ -54,10 +54,21 @@ static const char *TAG = "pm";
 static volatile uint32_t s_slept_count;
 static volatile uint32_t s_slept_ms;
 static volatile uint32_t s_slept_rem_us;
+#ifdef DEVICE_S2_DIAG
+#include "s2_diag.h"
+static volatile uint32_t s_diag_counts[S2D_CAUSES];   // wake causes of every light sleep since boot (written by the exit callback, read by the dump)
+#endif
 #if CONFIG_PM_LIGHT_SLEEP_CALLBACKS
 static esp_err_t IRAM_ATTR on_light_sleep_exit(int64_t slept_us, void *arg)
 {
     (void)arg;
+#ifdef DEVICE_S2_DIAG
+    {   // the cause is read for every exit, also the rejected sleeps below (they are wakes that did not sleep)
+        uint32_t tmp[S2D_CAUSES] = {0};
+        s2d_note(tmp, esp_sleep_get_wakeup_causes());
+        for (unsigned i = 0; i < S2D_CAUSES; i++) s_diag_counts[i] += tmp[i];
+    }
+#endif
     if (slept_us >= 1000) {
         s_slept_count++;
         s_slept_rem_us += (uint32_t)slept_us;
@@ -223,6 +234,46 @@ void power_sleep_init(void)
 #endif
     ESP_LOGI(TAG, "battery sleep built in; policy S0 (awake lock held)");
 }
+
+#ifdef DEVICE_S2_DIAG
+#include <stdio.h>
+#include <stdlib.h>
+// Logs what fn(stream) prints, line by line through the log (the console is the cable on USB), at most `max_lines`.
+static void diag_log_stream(const char *label, esp_err_t (*fn)(FILE *), int max_lines)
+{
+    char *buf = NULL;
+    size_t size = 0;
+    FILE *f = open_memstream(&buf, &size);
+    if (!f) { ESP_LOGW(TAG, "diag %s: no memory stream", label); return; }
+    const esp_err_t e = fn(f);
+    fclose(f);
+    if (e != ESP_OK) ESP_LOGW(TAG, "diag %s: %s", label, esp_err_to_name(e));
+    int lines = 0;
+    for (char *p = buf, *next; p && *p && lines < max_lines; p = next, lines++) {
+        next = strchr(p, '\n');
+        if (next) *next++ = 0;
+        if (*p) ESP_LOGI(TAG, "diag %s: %s", label, p);
+    }
+    free(buf);
+}
+
+void power_sleep_diag_dump(void)
+{
+    if (!power_sleep_relaxed()) return;   // only while the chip may sleep
+    static uint32_t before[S2D_CAUSES];
+    static int64_t before_us;
+    uint32_t now[S2D_CAUSES];
+    for (unsigned i = 0; i < S2D_CAUSES; i++) now[i] = s_diag_counts[i];
+    const int64_t now_us = esp_timer_get_time();
+    char line[260];
+    s2d_format(line, sizeof line, now, before, before_us ? (uint32_t)((now_us - before_us) / 1000) : 0);
+    ESP_LOGI(TAG, "diag %s", line);
+    memcpy(before, now, sizeof before);
+    before_us = now_us;
+    diag_log_stream("pm", esp_pm_dump_locks, 24);
+    diag_log_stream("timer", esp_timer_dump, 24);
+}
+#endif
 
 // ── the ptt task ────────────────────────────────────────────────────────────────────────────────────
 

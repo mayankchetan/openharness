@@ -38,6 +38,10 @@ void power_sleep_pm_leave_battery(void);
 uint32_t power_sleep_wait_ms(pp_poller_t who, uint32_t awake_ms);
 uint32_t power_sleep_ptt_poll_ms(uint32_t awake_ms);
 bool power_sleep_relaxed(void);
+#ifdef DEVICE_S2_DIAG
+// Wake diagnosis image only (s2_diag.h): while in S2, log the wake causes since the last call, esp_pm_dump_locks and esp_timer_dump. Render task, once per alive period.
+void power_sleep_diag_dump(void);
+#endif
 
 // For the alive line (display_habitat.c, pm= slp= slp_ms=): the policy state the render task has applied ("S0", "S1", "S2"), the number
 // of light sleeps since boot (entries that really slept 1 ms or more) and the milliseconds the chip spent in them. 0 and 0 when the

@@ -283,6 +283,11 @@ if(DEVICE_BATTERY_SLEEP)
         endif()
         target_compile_definitions(${COMPONENT_LIB} PRIVATE ${s2_switch}=${${s2_switch}})
     endforeach()
+    # S2 wake diagnosis, off by default (s2_diag.h, power_sleep.c power_sleep_diag_dump): counts the wake cause of every light sleep and, once per alive period in S2,
+    # logs the causes, esp_pm_dump_locks and esp_timer_dump. Needs the overlay sdkconfig.defaults.diag (PM and esp_timer profiling). Never for a product image. -DDEVICE_S2_DIAG=1.
+    if(DEVICE_S2_DIAG)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_S2_DIAG=1)
+    endif()
     # Bench aid, off by default: arm the RTC watchdog at S2 entry and never feed it (power_sleep.c WDT_STARVE). -DSLEEP_WDT_SELFTEST=1. Never for a product image.
     if(SLEEP_WDT_SELFTEST)
         target_compile_definitions(${COMPONENT_LIB} PRIVATE SLEEP_WDT_SELFTEST=1)

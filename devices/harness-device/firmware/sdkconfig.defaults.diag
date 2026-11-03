@@ -1,0 +1,8 @@
+# S2 wake diagnosis (DEVICE_S2_DIAG). NOT loaded by default and NOT for a product image: pass it as the fourth file,
+#   idf.py -DDEVICE_BATTERY_SLEEP=1 -DDEVICE_S2_DIAG=1 -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3;sdkconfig.defaults.sleep;sdkconfig.defaults.diag" ...
+# test/test_s2_diag.py checks every name below against the Kconfig files of the ESP-IDF in IDF_PATH.
+
+# esp_pm_dump_locks lists how long each power-management lock was held, and how often (power_sleep.c power_sleep_diag_dump logs it once per alive period in S2).
+CONFIG_PM_PROFILING=y
+# esp_timer_dump lists each esp_timer with its period and how often it fired.
+CONFIG_ESP_TIMER_PROFILING=y

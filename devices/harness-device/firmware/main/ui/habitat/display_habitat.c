@@ -498,6 +498,9 @@ static void heartbeat(void)
     // The other nine tasks' stack high-water marks, on their own line (the alive line sits near the 512 B log limit).
     ram_telemetry_hwm();
     ram_telemetry_alloc_fail_flush();
+#ifdef DEVICE_S2_DIAG
+    power_sleep_diag_dump();   // S2 wake diagnosis image only: what woke the chip, which locks and timers
+#endif
 }
 #ifdef HARNESS_DEBUG_COMMANDS
 // THE SCREENSHOT. The panel is write-only, so there is nothing to read back; the picture is the scene the

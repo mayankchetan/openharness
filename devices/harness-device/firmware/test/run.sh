@@ -377,6 +377,7 @@ python3 "$here/test_touch_sleep.py"
 python3 "$here/test_power_off.py"
 python3 "$here/test_power_off_wiring.py"
 python3 "$here/test_power_rails.py"   # the AXP2101 rail registers in the boot log: read only
+python3 "$here/test_s2_diag.py"   # the S2 wake-diagnosis image: build option and overlay only, pure counter on the host
 # The sleep hang fix (2026-11-01 watchdog hang): the breadcrumb and the starved list in last_words.c on the host, then the wiring of the two IDF-only files.
 python3 "$here/test_last_words_crumb.py"
 python3 "$here/test_sleep_watchdog_source.py"
