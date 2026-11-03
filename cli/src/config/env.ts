@@ -428,6 +428,13 @@ const fields = {
   // The address the listener binds. All IPv4 interfaces by default; set one address to pin it. Only private, link-local and
   // loopback peers are accepted either way, and every peer must still prove the dial's key.
   CABLE_NET_BIND: text('0.0.0.0'),
+  // The relay endpoint of the phone bridge (cable/tunnelDials.ts): a WebSocket at `/relay` on the loopback address only, which
+  // Cloudflare Tunnel forwards a phone's traffic to. Off by default: 'false' never opens it. 'true' opens it only while the
+  // keystore holds a dial, on 127.0.0.1 and never another address (there is no bind setting). The traffic is the dial's
+  // TLS-PSK stream; the phone and Cloudflare cannot read it. The tunnel's own settings live in cloudflared, not here.
+  CABLE_TUNNEL_ENABLE: flag('false'),
+  // The loopback TCP port of that endpoint. 18473 and 18474 are the daemon's and the team's, 18480 the Wi-Fi listener's.
+  CABLE_TUNNEL_PORT: port('18481'),
 } satisfies Record<string, EnvField<unknown>>
 
 export type Env = EnvOf<typeof fields>

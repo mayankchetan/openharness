@@ -8,6 +8,14 @@
 //   mode       {dial?, mode}                      net.mode (0 = USB only at boot, 1 = join Wi-Fi when unplugged)
 //   status     {dial?}                            what the keystore holds, and what the dial on the cable says
 //
+// The phone mode (task B6; docs/specs/cable-ble-link.md). The same dial, key and keystore, with no network:
+//   phone_set     {dial?, mode?}   a fresh key, the key-only net.set, the key into the keystore AFTER ok:true (so the tunnel endpoint
+//                                  accepts the dial's identity), then net.mode 2 (mode 0 leaves the phone mode off)
+//   phone_mode    {dial?, mode}    net.mode 2 (on) or 0 (off); off is refused for a dial that is in Wi-Fi mode
+//   phone_forget  {dial?}          net.clear and the key leaves the keystore; refused while the dial also holds Wi-Fi settings
+// The Wi-Fi settings and the phone settings share ONE key on the dial (wl_key): setting the phone key rotates the Wi-Fi key too, and the
+// keystore, which holds one key per dial, stays right for both. A clear takes both, which is why phone_forget refuses a dial that has Wi-Fi.
+//
 // The one rule: the keystore moves only after the dial said ok:true. A refusal, a timeout or a dial that went away leaves
 // it exactly as it was, so the dial and the daemon never hold different keys because a message was lost. The one place it
 // can still happen is a keystore that will not write AFTER the dial agreed: then the dial is put back as it was (cleared on
@@ -29,7 +37,7 @@ import { randomBytes } from 'node:crypto'
 import { createSocket } from 'node:dgram'
 
 import {
-  NET_FIELD_MESSAGES, isLanIPv4, validDial, validMode, validPass, validPort, validSsid, type NetField,
+  NET_FIELD_MESSAGES, isLanIPv4, validDial, validMode, validPass, validPhoneMode, validPort, validSsid, type NetField,
 } from '../lib/dialNetRules.js'
 import type { NetDialHandle } from './cableSession.js'
 import type { FleetNetResult } from './cableFleet.js'
@@ -56,6 +64,8 @@ const MAC = /^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$/
 
 /** Added to a failure after which the dial and the keystore may disagree. */
 export const STATE_UNKNOWN_NOTE = 'The dial may hold a key this computer lacks. Run `harness dial wifi set` again.'
+/** The same, for the phone mode. */
+export const PHONE_UNKNOWN_NOTE = 'The dial may hold a key this computer lacks. Run `harness dial phone set` again.'
 
 const bad = (field: NetField | undefined, message: string): Answer => ({ ok: false, kind: 'bad_request', ...(field ? { field } : {}), message })
 const badField = (field: NetField): Answer => bad(field, NET_FIELD_MESSAGES[field])
@@ -75,6 +85,9 @@ export class NetProvisioner {
       case 'forget': return this.forget(dial)
       case 'mode': return this.mode(dial, payload.mode)
       case 'status': return this.status(dial)
+      case 'phone_set': return this.phoneSet(dial, payload)
+      case 'phone_mode': return this.phoneMode(dial, payload.mode)
+      case 'phone_forget': return this.phoneForget(dial)
       default: return bad(undefined, 'That is not a Wi-Fi request the devices know.')
     }
   }
@@ -121,6 +134,68 @@ export class NetProvisioner {
     }
     this.deps.log(`cable: net: ${normalizePskIdentity(mac)} was given Wi-Fi settings and a key (mode ${mode})`)
     return { ok: true, dial: normalizePskIdentity(mac), saved: true, ssid, host, port, mode }
+  }
+
+  private async phoneSet(dial: string | undefined, payload: Answer): Promise<Answer> {
+    if (payload.mode !== undefined && !validPhoneMode(payload.mode)) return badField('mode')
+    const mode = payload.mode === 0 ? 0 : 2
+    const key = randomBytes(PSK_LENGTH)
+    const result = await this.deps.net(dial, { op: 'set_ble', key })
+    // A timeout may still have been a save: the dial's state is not known.
+    if (!result.ok) return failure(result, result.kind === 'timeout' ? PHONE_UNKNOWN_NOTE : '')
+    // The marker is the dial's word that it holds the phone settings.
+    if (result.ble !== true) return failure({ ok: false, kind: 'device', message: 'the dial answered but did not save the phone settings' })
+    const mac = result.dial
+    if (!mac || !MAC.test(mac)) {
+      // A clear would take Wi-Fi settings the dial already held with it: it is only a way back for a dial that had none.
+      const cleared = result.saved ? false : await this.putBack(dial)
+      return failure({ ok: false, kind: 'device', message: 'the dial did not say its MAC, so its key cannot be filed.' }, cleared ? '' : PHONE_UNKNOWN_NOTE)
+    }
+    const old = this.deps.keys.get(mac)
+    try {
+      this.deps.keys.set(mac, key, { hostPinned: this.deps.keys.record(mac)?.hostPinned === true })
+    } catch (error) {
+      this.deps.log(`cable: net: the keystore would not take the phone key of ${normalizePskIdentity(mac)}: ${error instanceof Error ? error.message : String(error)}`)
+      const back = old ? (await this.deps.net(mac, { op: 'key', key: old })).ok : result.saved ? false : await this.putBack(mac)
+      return failure({ ok: false, kind: 'keystore', message: back
+        ? 'The dial took its phone settings but this computer could not store the key, so the dial was put back. See the daemon log.'
+        : 'The dial took its phone settings but this computer could not store the key, and the dial could not be put back. See the daemon log.' }, back ? '' : PHONE_UNKNOWN_NOTE)
+    }
+    if (mode === 2) {
+      const on = await this.deps.net(mac, { op: 'mode', mode: 2 })
+      if (!on.ok) {
+        this.deps.log(`cable: net: ${normalizePskIdentity(mac)} holds a phone key but would not turn the phone mode on (${on.kind})`)
+        return failure(on, 'The key is stored. Run `harness dial phone on` to turn the phone mode on.')
+      }
+    }
+    this.deps.log(`cable: net: ${normalizePskIdentity(mac)} was given a phone key (mode ${mode})`)
+    return { ok: true, dial: normalizePskIdentity(mac), ble: true, mode }
+  }
+
+  private async phoneMode(dial: string | undefined, mode: unknown): Promise<Answer> {
+    if (!validPhoneMode(mode)) return badField('mode')
+    if (mode === 0) {
+      // Mode 0 is also Wi-Fi's "off": a dial that is in Wi-Fi mode is not turned off from here.
+      const state = await this.deps.net(dial, { op: 'get' })
+      if (!state.ok) return failure(state)
+      if (state.mode === 1) return bad(undefined, 'This dial is in Wi-Fi mode, not phone mode. To turn Wi-Fi off run `harness dial wifi off`.')
+    }
+    const result = await this.deps.net(dial, { op: 'mode', mode })
+    if (!result.ok) return failure(result)
+    return { ok: true, ...(result.dial ? { dial: normalizePskIdentity(result.dial) } : {}), mode: result.mode ?? mode }
+  }
+
+  private async phoneForget(dial: string | undefined): Promise<Answer> {
+    const state = await this.deps.net(dial, { op: 'get' })
+    if (!state.ok) {
+      // A dial that is away is handled by forget (its key can still leave this computer, when it was named).
+      if (state.kind === 'no_dial' || state.kind === 'transport') return this.forget(dial)
+      return failure(state)
+    }
+    if (state.saved) {
+      return bad(undefined, 'This dial also holds Wi-Fi settings, and they share the phone key: clearing would take both. Run `harness dial wifi forget` to clear both, or `harness dial phone off` to stop using the phone.')
+    }
+    return this.forget(dial)
   }
 
   /** Undo a first set whose key could not be filed: the dial and this computer must agree. True when the dial said it is cleared. */
@@ -203,6 +278,7 @@ export class NetProvisioner {
         ...(result.host !== undefined ? { host: result.host } : {}),
         ...(result.port !== undefined ? { port: result.port } : {}),
         ...(result.mode !== undefined ? { mode: result.mode } : {}),
+        ...(result.ble !== undefined ? { ble: result.ble } : {}),
       }
     } else if (result.kind !== 'no_dial') {
       answer.usbProblem = { kind: result.kind, message: result.message }

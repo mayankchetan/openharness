@@ -163,7 +163,7 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-function start(over: { core?: CoreApi; faults?: string[]; cableDisabled?: boolean; net?: DevicesDeps['net']; lan?: DevicesDeps['lan']; testDialPort?: string; readUsage?: DevicesDeps['readUsage']; now?: () => number; decideTier?: DevicesDeps['decideTier'] | null } = {}) {
+function start(over: { core?: CoreApi; faults?: string[]; cableDisabled?: boolean; net?: DevicesDeps['net']; tunnel?: DevicesDeps['tunnel']; lan?: DevicesDeps['lan']; testDialPort?: string; readUsage?: DevicesDeps['readUsage']; now?: () => number; decideTier?: DevicesDeps['decideTier'] | null } = {}) {
   const core = over.core ?? fakeCore({ dataDir })
   const ports: CorePorts = emptyPorts()
   const onExit = vi.fn()
@@ -175,6 +175,7 @@ function start(over: { core?: CoreApi; faults?: string[]; cableDisabled?: boolea
     testDialPort: over.testDialPort,
     cableDisabled: over.cableDisabled,
     net: over.net,
+    tunnel: over.tunnel,
     lan: over.lan,
     readUsage: over.readUsage,
     now: over.now,
@@ -1296,6 +1297,100 @@ describe('the Wi-Fi dials', () => {
     await vi.waitFor(() => expect(logs.some((l) => /Wi-Fi dials listening/.test(l))).toBe(true))
     expect(calls('start')).toHaveLength(0)
     await port.stop()
+  })
+})
+
+describe('the phone-bridge relay endpoint', () => {
+  const ID = 'B8:1F:3F:CA:E5:58'
+  const freePort = async (): Promise<number> => {
+    const net = await import('node:net')
+    return new Promise((resolve) => {
+      const probe = net.createServer()
+      probe.listen(0, '127.0.0.1', () => {
+        const port = (probe.address() as import('node:net').AddressInfo).port
+        probe.close(() => resolve(port))
+      })
+    })
+  }
+  const setup = async (tunnel: { enabled: boolean } | undefined) => {
+    const { DIAL_KEY_FILE, DialKeys } = await import('../cable/dialKeys.js')
+    const { randomBytes } = await import('node:crypto')
+    const keysFile = join(dataDir, 'devices', DIAL_KEY_FILE)
+    const keys = new DialKeys(keysFile)
+    const tunnelPort = await freePort()
+    return { keys, key: randomBytes(32), tunnelPort, deps: { net: { keysFile, keys, port: await freePort(), bind: '127.0.0.1', enabled: false }, tunnel: tunnel ? { port: tunnelPort, enabled: tunnel.enabled } : undefined } }
+  }
+  /** A dial over a `ws` client and the PSK client, the way the phone's pump does it. */
+  const dialThrough = async (port: number, key: Buffer) => {
+    const { WebSocket, createWebSocketStream } = await import('ws')
+    const { pskConnect } = await import('../cable/__fixtures__/pskClient.js')
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/relay`)
+    ws.on('error', () => {})
+    await new Promise<void>((resolve, reject) => { ws.once('open', () => resolve()); ws.once('error', reject) })
+    const stream = createWebSocketStream(ws)
+    stream.on('error', () => {})
+    const tls = await pskConnect({ port: 0, identity: ID, psk: key, socket: stream })
+    tls.on('error', () => {})
+    return { ws, tls }
+  }
+  const refused = async (port: number): Promise<boolean> => {
+    const net = await import('node:net')
+    return new Promise((resolve) => {
+      const s = net.connect({ port, host: '127.0.0.1' })
+      s.once('connect', () => { s.destroy(); resolve(false) })
+      s.once('error', () => resolve(true))
+    })
+  }
+
+  it('is not there unless asked for: no tunnel setting, no port, no line', async () => {
+    const { keys, key, tunnelPort, deps } = await setup(undefined)
+    keys.set(ID, key)
+    const { port } = start(deps)
+    await vi.waitFor(() => expect(logs.some((l) => /Wi-Fi dials are off/.test(l) || /listening/.test(l))).toBe(false))
+    expect(await refused(tunnelPort)).toBe(true)
+    expect(logs.filter((l) => /phone tunnel/.test(l))).toEqual([])
+    await port.stop()
+  })
+
+  it('stays shut when disabled (the default), whatever the keystore holds', async () => {
+    const { keys, key, tunnelPort, deps } = await setup({ enabled: false })
+    keys.set(ID, key)
+    const { port } = start(deps)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(await refused(tunnelPort)).toBe(true)
+    expect(logs.filter((l) => /phone tunnel/.test(l))).toEqual([])
+    await port.stop()
+  })
+
+  it('opens with the first key, hands a dial that proves its key to the fleet as a tunnel link, and closes with the last key', async () => {
+    const { keys, key, tunnelPort, deps } = await setup({ enabled: true })
+    const { port } = start(deps)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(await refused(tunnelPort)).toBe(true)
+    keys.set(ID, key)
+    await vi.waitFor(() => expect(logs.some((l) => /phone tunnel relay listening on 127\.0\.0\.1/.test(l))).toBe(true))
+    const { ws } = await dialThrough(tunnelPort, key)
+    await vi.waitFor(() => expect(calls('adoptNet')).toHaveLength(1))
+    expect(calls('adoptNet')[0][0]).toMatchObject({ id: ID, transport: 'tunnel', peer: 'tunnel' })
+    const closed = new Promise<void>((resolve) => ws.once('close', () => resolve()))
+    keys.remove(ID)
+    expect(calls('forgetNet')).toEqual([[ID]])
+    await closed
+    await vi.waitFor(async () => expect(await refused(tunnelPort)).toBe(true))
+    await port.stop()
+  })
+
+  it('stop() closes the endpoint and a live link', async () => {
+    const { keys, key, tunnelPort, deps } = await setup({ enabled: true })
+    keys.set(ID, key)
+    const { port } = start(deps)
+    await vi.waitFor(() => expect(logs.some((l) => /phone tunnel relay listening/.test(l))).toBe(true))
+    const { ws } = await dialThrough(tunnelPort, key)
+    await vi.waitFor(() => expect(calls('adoptNet')).toHaveLength(1))
+    const closed = new Promise<void>((resolve) => ws.once('close', () => resolve()))
+    await port.stop()
+    await closed
+    expect(await refused(tunnelPort)).toBe(true)
   })
 })
 

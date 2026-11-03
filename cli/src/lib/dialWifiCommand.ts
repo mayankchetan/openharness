@@ -1,4 +1,7 @@
 /**
+ * `harness dial phone set|show|forget|on|off` (task B6, below): the phone mode's key, over the same cable and the same daemon route, with
+ * no password to ask.
+ *
  * `harness dial wifi set|show|forget|rotate|on|off|firewall`: giving a dial its Wi-Fi network and the key it proves to this
  * computer with, over its USB cable (docs/specs/cable-wifi-link.md section 5; task W9). The daemon does the work
  * (lib/dialNetHttp.ts, cable/netProvision.ts); this file asks, prints, and keeps secrets out of the places they leak from.
@@ -42,6 +45,15 @@ const USAGE = [
   '  firewall                             print the Windows firewall command for the Wi-Fi link (it is not run)',
 ]
 
+const PHONE_USAGE = [
+  'Usage: harness dial phone <command>',
+  '  set [--dial <MAC>]       give a dial a key for the phone mode and turn the mode on. The dial must be plugged in by USB.',
+  '                           No password is asked: this computer makes the key and keeps it',
+  '  show [--dial <MAC>]      what the dial and this computer hold for the phone mode',
+  '  forget [--dial <MAC>]    the dial forgets its phone settings and key, and so does this computer',
+  '  on | off [--dial <MAC>]  whether the dial uses the phone when its USB cable is unplugged',
+]
+
 /** The one command, scoped to private networks and the local subnet. Printed, never run. */
 const firewallCommand = (port: number): string =>
   `netsh advfirewall firewall add rule name="Harness dial" dir=in action=allow protocol=TCP localport=${port} profile=private remoteip=LocalSubnet`
@@ -80,6 +92,11 @@ const HINTS: Record<string, string> = {
   busy: 'Wait a moment and try again.',
 }
 
+/** The dial's own word for why it refused, when a person can act on it. */
+const ERR_HINTS: Record<string, string> = {
+  feature: 'This dial\'s firmware has no phone mode (it needs a build with the Bluetooth link), or the daemon is too old to offer it.',
+}
+
 /**
  * Everything the dial or the daemon reported (a network name, an address, an error) is printed through this. A name is chosen by whoever
  * runs the access point, and the dial's firmware accepts any bytes above 0x1f: C1 controls (U+0080-U+009F) can move the cursor or retitle
@@ -90,7 +107,9 @@ export const printable = (text: string): string => text.replace(/[\u0080-\u009f�
 export async function dialCommand(args: string[], plain: DialWifiDeps): Promise<number> {
   const deps: DialWifiDeps = { ...plain, out: (line) => plain.out(printable(line)), err: (line) => plain.err(printable(line)) }
   const usage = (): number => { for (const line of USAGE) deps.err(line); return 2 }
-  if (args[0] !== 'wifi') return usage()
+  if (args[0] === 'phone') return phoneCommand(args.slice(2), args[1], deps)
+  // Neither family named: both are listed.
+  if (args[0] !== 'wifi') { for (const line of USAGE) deps.err(line); for (const line of PHONE_USAGE) deps.err(line); return 2 }
   const verb = args[1]
   const rest = args.slice(2)
 
@@ -154,6 +173,92 @@ export async function dialCommand(args: string[], plain: DialWifiDeps): Promise<
   }
   print(verb, reply.body, deps)
   return 0
+}
+
+/**
+ * `harness dial phone <verb>`. The same route as the Wi-Fi verbs (`/api/dial/net/...`, lib/dialNetHttp.ts) with the phone's own ops. The
+ * daemon makes the key, sends it to the dial over the cable and files it for the tunnel endpoint; nothing here asks for or prints a secret.
+ */
+async function phoneCommand(rest: string[], verb: string | undefined, deps: DialWifiDeps): Promise<number> {
+  const usage = (): number => { for (const line of PHONE_USAGE) deps.err(line); return 2 }
+  const verbs = ['set', 'show', 'forget', 'on', 'off']
+  if (!verb || !verbs.includes(verb)) return usage()
+  const options = parseOptions(rest, ['--dial'])
+  if (!options) return usage()
+  const body: Record<string, unknown> = {}
+  if (options['--dial'] !== undefined) {
+    if (!validDial(options['--dial'])) { deps.err(`  ✗ ${NET_FIELD_MESSAGES.dial}`); return 2 }
+    body.dial = options['--dial']
+  }
+  if (verb === 'on' || verb === 'off') body.mode = verb === 'on' ? 2 : 0
+  const path = verb === 'show' ? 'status' : verb === 'set' ? 'phone-set' : verb === 'forget' ? 'phone-forget' : 'phone-mode'
+  const reply = await deps.call(`/api/dial/net/${path}`, body)
+  if (!reply) { deps.err('  ✗ The Harness daemon is not running. Start it with: harness start'); return 1 }
+  if (reply.status !== 200 || reply.body.ok !== true) {
+    const kind = typeof reply.body.kind === 'string' ? reply.body.kind : ''
+    const code = typeof reply.body.err === 'string' ? reply.body.err : ''
+    const error = typeof reply.body.error === 'string' ? reply.body.error
+      : reply.status === 404 ? 'This daemon does not support the phone mode (update it).' : 'The daemon sent back something unexpected.'
+    deps.err(`  ✗ ${error}`)
+    if (ERR_HINTS[code]) deps.err(`    ${ERR_HINTS[code]}`)
+    if (HINTS[kind]) deps.err(`    ${HINTS[kind]}`)
+    return 1
+  }
+  printPhone(verb, reply.body, deps)
+  return 0
+}
+
+/** What each phone verb says when it worked. */
+function printPhone(verb: string, answer: Record<string, unknown>, deps: DialWifiDeps): void {
+  const dial = typeof answer.dial === 'string' ? answer.dial : 'the dial'
+  const out = deps.out
+  switch (verb) {
+    case 'set':
+      out('')
+      out(`  ✓ Phone mode saved on the dial ${dial}`)
+      out('')
+      out('  Unplug the USB cable and start the Harness phone app: the dial then reaches this computer through your phone.')
+      out('  This computer accepts the dial\'s link only while its tunnel endpoint is on. It is off by default: set CABLE_TUNNEL_ENABLE=true and restart Harness.')
+      out('')
+      return
+    case 'show': {
+      out('')
+      const usb = answer.usb as Record<string, unknown> | undefined
+      if (usb) {
+        out(`  On the cable          ${String(usb.dial ?? 'a dial')}`)
+        if (usb.ble === true) {
+          out('    Phone settings      held')
+          out(`    Phone mode          ${usb.mode === 2 ? 'on (the dial uses the phone when the cable is unplugged)' : 'off (USB only)'}`)
+          if (usb.mode === 1) out('    The dial is in Wi-Fi mode now. Turn the phone mode on with `harness dial phone on`.')
+          out(`    Key on this computer  ${usb.keyed === true ? 'yes' : 'no'}`)
+          if (usb.keyed === false) out('    This computer holds no key for it. Set it again with `harness dial phone set`.')
+        } else {
+          out('    Phone settings      none. Run `harness dial phone set`.')
+        }
+      } else if (answer.usbProblem && typeof (answer.usbProblem as { message?: unknown }).message === 'string') {
+        out(`  On the cable          ${(answer.usbProblem as { message: string }).message}`)
+      } else out('  On the cable          no dial')
+      const keyed = Array.isArray(answer.keyed) ? answer.keyed as Array<Record<string, unknown>> : []
+      for (const row of keyed) {
+        out(`  Key held        ${String(row.dial)}   set ${stamp(row.createdAt)}${row.lastSeen === undefined ? '' : `   last seen ${stamp(row.lastSeen)} from ${String(row.lastAddr ?? '?')}`}`)
+      }
+      out('')
+      return
+    }
+    case 'forget':
+      out('')
+      if (answer.cleared === true) out(`  ✓ The dial ${dial} forgot its phone settings and key.${answer.removed === true ? ' So did this computer.' : ''}`)
+      else if (answer.removed !== true) out(`  This computer held no key for ${dial}. Nothing was changed.`)
+      else out(`  ✓ This computer forgot the key of ${dial}. The dial was not on the USB cable, so it still holds its own settings: it cannot connect any more. Clear it with the cable plugged in.`)
+      out('')
+      return
+    default:
+      out('')
+      out(answer.mode === 2
+        ? `  ✓ The phone mode is on for ${dial}: it uses the phone when the USB cable is unplugged.`
+        : `  ✓ The phone mode is off for ${dial}: it starts on USB only.`)
+      out('')
+  }
 }
 
 /** What each verb says when it worked. */

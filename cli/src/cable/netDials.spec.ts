@@ -8,11 +8,13 @@ import { mkdtempSync, rmSync, utimesSync } from 'node:fs'
 import * as net from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { Duplex } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { duplexPair } from './__fixtures__/duplexPair.js'
 import { FakeNetDial } from './__fixtures__/fakeNetDial.js'
 import { pskConnect } from './__fixtures__/pskClient.js'
-import { CableType, encodeCableFrame } from './cableFrame.js'
+import { CableDecoder, CableType, encodeCableFrame } from './cableFrame.js'
 import { DIAL_KEY_FILE, DialKeys } from './dialKeys.js'
 import {
   AddressThrottle,
@@ -23,6 +25,7 @@ import {
   NET_PENDING_MAX,
   NET_PENDING_PER_ADDR,
   NET_PENDING_PER_KNOWN_ADDR,
+  NET_TUNNEL_PENDING_MAX,
   NetDials,
   NetSlot,
   isPrivatePeer,
@@ -957,5 +960,259 @@ describe('NetDials: a keystore that could not be read', () => {
     expect(keys.reload()).toBe(true)
     await dials.settled()
     expect(dials.listening).toBe(true)
+  })
+})
+
+// ── the stream entry (tunnel): the same TLS-PSK server over a duplex that is not a TCP socket ───────────────────────
+
+/** A stream handed to the listener the way the relay endpoint will; returns the far end for a client. */
+function tunnelStream(r: Rig): { far: Duplex; near: Duplex; closed: () => boolean } {
+  const [near, far] = duplexPair()
+  let closed = false
+  near.once('close', () => {
+    closed = true
+  })
+  cleanup.push(() => {
+    near.destroy()
+    far.destroy()
+  })
+  r.dials.acceptStream(near, { peer: 'tunnel', transport: 'tunnel' })
+  return { far, near, closed: () => closed }
+}
+
+const tunnelConnect = (r: Rig, id: string, psk: Buffer) => pskConnect({ port: 0, identity: id, psk, socket: tunnelStream(r).far })
+
+describe('NetDials.acceptStream: a dial over a tunnel', () => {
+  it('delivers 1,000 frames intact in order through the PSK handshake, and labels the link tunnel', async () => {
+    const key = randomBytes(32)
+    const r = rig({}, [[A, key]])
+    const client = await tunnelConnect(r, A.toLowerCase(), key)
+    client.on('error', () => {})
+    await until(() => r.conns.length === 1, 'onDial')
+    const conn = r.conns[0]
+    expect(conn.id).toBe(A)
+    expect(conn.transport).toBe('tunnel')
+    const decoder = new CableDecoder()
+    const seen: number[] = []
+    conn.socket.on('data', (chunk: Buffer) => {
+      decoder.feed(chunk, (frame) => {
+        if (frame.type === CableType.Json) seen.push((JSON.parse(Buffer.from(frame.payload).toString()) as { n: number }).n)
+      })
+    })
+    for (let n = 0; n < 1000; n++) client.write(encodeCableFrame(CableType.Json, Buffer.from(JSON.stringify({ n, pad: 'x'.repeat(n % 97) }))))
+    await until(() => seen.length === 1000, 'all frames', 200_000)
+    expect(seen).toEqual(Array.from({ length: 1000 }, (_, n) => n))
+    // and the other way
+    const echoed = new Promise<string>((resolve) => client.once('data', (b) => resolve(b.toString())))
+    conn.socket.write('welcome')
+    expect(await echoed).toBe('welcome')
+  })
+
+  it('destroys a wrong key, an unknown identity and garbage, and counts them', async () => {
+    const key = randomBytes(32)
+    const r = rig({}, [[A, key]])
+    await expect(tunnelConnect(r, A, randomBytes(32))).rejects.toBeTruthy()
+    await expect(tunnelConnect(r, B, key)).rejects.toBeTruthy()
+    const g = tunnelStream(r)
+    g.far.write('GET / HTTP/1.1\r\nHost: x\r\n\r\n')
+    await until(g.closed, 'garbage stream closed')
+    await until(() => r.dials.stats.failed >= 3, 'three failures counted')
+    expect(r.conns).toHaveLength(0)
+    expect(r.dials.stats.authenticated).toBe(0)
+    expect(r.dials.pending).toBe(0)
+  })
+
+  it('drops a stream that has not finished the handshake after 3 s, not before', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const r = rig({}, [[A, randomBytes(32)]])
+    const s = tunnelStream(r)
+    expect(r.dials.pending).toBe(1)
+    await vi.advanceTimersByTimeAsync(NET_HANDSHAKE_DEADLINE_MS - 1)
+    expect(s.closed()).toBe(false)
+    expect(r.dials.pending).toBe(1)
+    await vi.advanceTimersByTimeAsync(1)
+    await until(s.closed, 'closed by the listener')
+    expect(r.dials.pending).toBe(0)
+    expect(r.dials.stats.failed).toBe(1)
+  })
+
+  it('100 idle streams never keep a real dial out: the tunnel pool holds 8 and the oldest give way', async () => {
+    const key = randomBytes(32)
+    const r = rig({}, [[A, key]])
+    const idle = Array.from({ length: 100 }, () => tunnelStream(r))
+    expect(r.dials.pending).toBeLessThanOrEqual(NET_TUNNEL_PENDING_MAX)
+    await until(() => idle.slice(0, 80).every((s) => s.closed()), 'the oldest were evicted')
+    const client = await tunnelConnect(r, A, key)
+    client.on('error', () => {})
+    await until(() => r.conns.length === 1, 'the real dial got in')
+    expect(r.dials.stats.evicted).toBeGreaterThanOrEqual(84)
+  })
+
+  it('failures over the tunnel never ban anything: a tunnel dial and a Wi-Fi dial on loopback both get in after 60 of them', async () => {
+    const key = randomBytes(32)
+    const r = await listening(rig({}, [[A, key]]))
+    for (let i = 0; i < NET_FAIL_LIMIT * 3; i++) {
+      const g = tunnelStream(r)
+      g.far.write('not tls')
+      await until(g.closed, 'garbage closed')
+    }
+    expect(r.dials.stats.throttled).toBe(0)
+    const viaTunnel = await tunnelConnect(r, A, key)
+    viaTunnel.on('error', () => {})
+    await until(() => r.conns.length === 1, 'tunnel dial in')
+    const viaLan = await connect(r, A, key)
+    viaLan.on('error', () => {})
+    await until(() => r.conns.length === 2, 'Wi-Fi dial in (the shared loopback address was not charged)')
+    expect(r.dials.stats.throttled).toBe(0)
+    expect(r.conns[1].transport).toBe('wifi')
+  })
+
+  it("does not record the tunnel as the dial's address, and does not make it a known address", async () => {
+    const key = randomBytes(32)
+    const r = rig({}, [[A, key]])
+    const client = await tunnelConnect(r, A, key)
+    client.on('error', () => {})
+    await until(() => r.conns.length === 1)
+    expect(r.keys.record(A)?.lastAddr).toBeUndefined()
+    expect(r.keys.isKnownAddr('tunnel')).toBe(false)
+    expect(r.keys.isKnownAddr('127.0.0.1')).toBe(false)
+  })
+
+  it('refuses a stream while the keystore is empty, and while stopped', async () => {
+    const r = rig({}, [])
+    const empty = tunnelStream(r)
+    await until(empty.closed, 'no key, no stream')
+    r.keys.set(A, randomBytes(32))
+    await r.dials.stop()
+    const stopped = tunnelStream(r)
+    await until(stopped.closed, 'stopped, no stream')
+    expect(r.dials.pending).toBe(0)
+  })
+
+  it('works with the Wi-Fi socket switched off, and stop() ends a live tunnel dial', async () => {
+    const key = randomBytes(32)
+    const r = rig({ enabled: false }, [[A, key]])
+    await r.dials.settled()
+    expect(r.dials.listening).toBe(false)
+    const client = await tunnelConnect(r, A, key)
+    client.on('error', () => {})
+    await until(() => r.conns.length === 1, 'in with no Wi-Fi socket')
+    const gone = new Promise<void>((resolve) => r.conns[0].socket.once('close', () => resolve()))
+    await r.dials.stop()
+    await gone
+    expect(r.dials.authenticated).toBe(0)
+  })
+
+  it('a key removed ends the live tunnel dial', async () => {
+    const key = randomBytes(32)
+    const r = rig({}, [[A, key]])
+    const client = await tunnelConnect(r, A, key)
+    client.on('error', () => {})
+    await until(() => r.conns.length === 1)
+    const gone = new Promise<void>((resolve) => r.conns[0].socket.once('close', () => resolve()))
+    r.keys.remove(A)
+    await gone
+  })
+
+  it('one authenticated link per identity across both transports: the newer replaces the older', async () => {
+    const key = randomBytes(32)
+    const r = await listening(rig({}, [[A, key]]))
+    const lan = await connect(r, A, key)
+    lan.on('error', () => {})
+    await until(() => r.conns.length === 1)
+    const viaTunnel = await tunnelConnect(r, A, key)
+    viaTunnel.on('error', () => {})
+    await until(() => r.conns.length === 2)
+    await until(() => r.conns[0].socket.destroyed, 'the older link was replaced')
+    expect(r.dials.authenticated).toBe(1)
+  })
+
+  it('no log line contains the key, through a success, a wrong key and garbage', async () => {
+    const key = randomBytes(32)
+    const other = randomBytes(32)
+    const r = rig({}, [[A, key]])
+    const ok = await tunnelConnect(r, A, key)
+    ok.on('error', () => {})
+    await until(() => r.conns.length === 1)
+    await expect(tunnelConnect(r, A, other)).rejects.toBeTruthy()
+    const g = tunnelStream(r)
+    g.far.write('GET / HTTP/1.1\r\nHost: x\r\n\r\n')
+    await until(g.closed, 'garbage stream closed')
+    expect(r.logs.some((line) => line.includes('tunnel'))).toBe(true)
+    for (const line of r.logs) {
+      for (const secret of [key, other]) {
+        expect(line).not.toContain(secret.toString('hex'))
+        expect(line).not.toContain(secret.toString('base64'))
+      }
+    }
+  })
+
+  it('a slot gives the session a port that says tunnel, has no LAN address and a tunnel path', async () => {
+    const key = randomBytes(32)
+    const r = rig({}, [[A, key]])
+    const client = await tunnelConnect(r, A, key)
+    client.on('error', () => {})
+    await until(() => r.conns.length === 1)
+    const slot = new NetSlot(A)
+    slot.offer(r.conns[0])
+    const chunks: Buffer[] = []
+    const port = await slot.opener((c) => chunks.push(c), () => {})
+    expect(port).not.toBeNull()
+    expect(port!.transport).toBe('tunnel')
+    expect(port!.peer).toBeUndefined()
+    expect(port!.path).toMatch(/^tunnel:/)
+    client.write(encodeCableFrame(CableType.Json, Buffer.from('{"t":"hello"}')))
+    await until(() => chunks.length > 0, 'the hello reaches the session')
+    await port!.write(encodeCableFrame(CableType.Json, Buffer.from('{"t":"welcome"}')))
+    await port!.close('done')
+  })
+})
+
+describe('NetDials.acceptStream: the tunnel has a pending pool of its own (review B3 medium 1)', () => {
+  it('holds at most NET_TUNNEL_PENDING_MAX not-yet-authenticated tunnel streams; the oldest tunnel stream gives way', async () => {
+    const r = rig({}, [[A, randomBytes(32)]])
+    const streams = Array.from({ length: 40 }, () => tunnelStream(r))
+    expect(r.dials.pending).toBe(NET_TUNNEL_PENDING_MAX)
+    await until(() => streams.slice(0, 40 - NET_TUNNEL_PENDING_MAX).every((s) => s.closed()), 'the oldest 32 were evicted')
+    expect(streams.slice(40 - NET_TUNNEL_PENDING_MAX).some((s) => s.closed())).toBe(false)
+    expect(NET_TUNNEL_PENDING_MAX).toBe(8)
+  })
+
+  it('a tunnel flood takes no Wi-Fi slot: 16 pending Wi-Fi sockets all survive 100 tunnel streams', async () => {
+    const r = await listening(rig({}, [[A, randomBytes(32)]]))
+    const wifi: Array<ReturnType<typeof rawClient>> = []
+    for (const host of ['127.0.0.2', '127.0.0.3', '127.0.0.4', '127.0.0.5']) {
+      for (let i = 0; i < NET_PENDING_PER_ADDR; i++) wifi.push(rawClient(r, host))
+    }
+    await until(() => r.dials.pending === NET_PENDING_MAX, 'the Wi-Fi pool is full')
+    for (let i = 0; i < 100; i++) tunnelStream(r)
+    expect(r.dials.pending).toBe(NET_PENDING_MAX + NET_TUNNEL_PENDING_MAX)
+    expect(wifi.some((c) => c.closed())).toBe(false)
+    expect(r.dials.stats.evicted).toBe(100 - NET_TUNNEL_PENDING_MAX)
+  })
+
+  it('a full Wi-Fi pool takes no tunnel slot: a tunnel dial still finishes its handshake', async () => {
+    const key = randomBytes(32)
+    const r = await listening(rig({}, [[A, key]]))
+    for (const host of ['127.0.0.2', '127.0.0.3', '127.0.0.4', '127.0.0.5']) {
+      for (let i = 0; i < NET_PENDING_PER_ADDR; i++) rawClient(r, host)
+    }
+    await until(() => r.dials.pending === NET_PENDING_MAX, 'the Wi-Fi pool is full')
+    const client = await tunnelConnect(r, A, key)
+    client.on('error', () => {})
+    await until(() => r.conns.length === 1, 'the tunnel dial got in')
+    expect(r.dials.stats.evicted).toBe(0)
+  })
+
+  it('a Wi-Fi newcomer on a full Wi-Fi pool never evicts a tunnel stream', async () => {
+    const r = await listening(rig({}, [[A, randomBytes(32)]]))
+    const tunnels = Array.from({ length: NET_TUNNEL_PENDING_MAX }, () => tunnelStream(r))
+    for (const host of ['127.0.0.2', '127.0.0.3', '127.0.0.4', '127.0.0.5']) {
+      for (let i = 0; i < NET_PENDING_PER_ADDR; i++) rawClient(r, host)
+    }
+    await until(() => r.dials.pending === NET_PENDING_MAX + NET_TUNNEL_PENDING_MAX, 'both pools are full')
+    for (let i = 0; i < 10; i++) rawClient(r, '127.0.0.6')
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(tunnels.some((s) => s.closed())).toBe(false)
   })
 })

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { duplexPair } from './__fixtures__/duplexPair.js'
 import { FakeNetDial } from './__fixtures__/fakeNetDial.js'
 import { CableDecoder, CableType, encodeCableFrame } from './cableFrame.js'
 import { CableFleet, type CableFleetOptions } from './cableFleet.js'
@@ -499,5 +500,63 @@ describe('one dial on both links', () => {
       usbHost.onForeignPort?.(port.path, 'silent')
       await vi.waitFor(() => expect(reset).toHaveBeenCalledWith(port.path))
     })
+  })
+})
+
+describe('a dial over the tunnel in the fleet', () => {
+  const usbDevice = (serial: string): DialPort => ({ path: `/dev/${serial}`, serialNumber: serial, vendorId: 0x303a, productId: 0x1001 })
+  /** A dial whose TLS-PSK runs over a stream handed to NetDials.acceptStream, as the relay endpoint will do. */
+  async function tunnelDial(s: Awaited<ReturnType<typeof provisioned>>, id: string, key: Buffer): Promise<FakeNetDial> {
+    const [near, far] = duplexPair()
+    s.net.acceptStream(near, { peer: 'tunnel', transport: 'tunnel' })
+    const d = await FakeNetDial.connect({ port: 0, id, psk: key, socket: far })
+    cleanup.push(() => d.close())
+    return d
+  }
+
+  it('is greeted, attached and shown as a tunnel device with no LAN address; no firmware, no pet pack', async () => {
+    const firmwareFor = vi.fn(async () => ({ version: '9.9.9', image: Buffer.alloc(2048, 9), sha256: 'x'.repeat(64) }))
+    const s = await provisioned({}, { firmwareFor })
+    const dial = await tunnelDial(s, A, s.keyA)
+    dial.say({ t: 'hello', product: 'harness', mac: A, fw: '0.0.1', proto: 3, hw: 'harness-pro', board: 'pro', ota: 'v1' })
+    await dial.next('agents.end')
+    await vi.waitFor(() => expect(s.fleet.devices()[0]).toMatchObject({ attached: true, transport: 'tunnel' }))
+    expect(s.fleet.devices()[0].lan).toBeUndefined()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(firmwareFor).not.toHaveBeenCalled()
+    expect(dial.received.some((m) => m.t === 'fw.offer' || m.t === 'pet.offer')).toBe(false)
+  })
+
+  it('a USB attach of the same MAC closes the tunnel session (superseded by USB)', async () => {
+    const s = await provisioned()
+    const dial = await tunnelDial(s, A, s.keyA)
+    dial.hello()
+    await dial.next('agents.end')
+    await vi.waitFor(() => expect(s.fleet.devices()[0]?.transport).toBe('tunnel'))
+    s.setUsb([usbDevice(A)])
+    s.fleet.start()
+    await vi.waitFor(() => expect(s.usb).toHaveLength(1))
+    s.usb[0].say({ t: 'hello', product: 'harness', mac: A.toLowerCase(), fw: 'fixture', proto: 3 })
+    await vi.waitFor(() => expect(dial.closed).toBe(true))
+    expect(s.host.log).toHaveBeenCalledWith(expect.stringMatching(/superseded by USB/))
+    await vi.waitFor(() => {
+      const rows = s.fleet.devices()
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({ attached: true, transport: 'usb' })
+    })
+  })
+
+  it('a tunnel dial is turned away while the same dial is on USB, and the USB session stays', async () => {
+    const s = await provisioned()
+    s.setUsb([usbDevice(A)])
+    s.fleet.start()
+    await vi.waitFor(() => expect(s.usb).toHaveLength(1))
+    s.usb[0].say({ t: 'hello', product: 'harness', mac: A, fw: 'fixture', proto: 3 })
+    await vi.waitFor(() => expect(s.fleet.devices()[0]?.attached).toBe(true))
+    // The link is destroyed as soon as the handshake is done: the dial sees either a closed link or a handshake cut short.
+    const dial = await tunnelDial(s, A, s.keyA).then((d) => d, () => null)
+    if (dial) await vi.waitFor(() => expect(dial.closed).toBe(true))
+    expect(s.usb[0].isOpen).toBe(true)
+    expect(s.fleet.devices()[0]).toMatchObject({ attached: true, transport: 'usb' })
   })
 })

@@ -260,3 +260,72 @@ describe('telling the host that a dial can take net settings', () => {
     await rejected.session.stop()
   })
 })
+
+describe('the "ble" feature and the phone-mode requests (B6)', () => {
+  const BLE_HELLO = { ...HELLO, ble: 'v1' }
+  async function ready(transport: CablePort['transport'] | undefined, hello: Record<string, unknown> = BLE_HELLO) {
+    const rig = await connect(host(), transport, transport && transport !== 'usb' ? '192.168.1.40' : undefined)
+    rig.port.say(hello)
+    await vi.waitFor(() => expect(rig.session.isConnected).toBe(true))
+    return rig
+  }
+  const wireNet = (port: Port) => port.sent.filter((m) => String(m.t).startsWith('net.'))
+  const KEYONLY = { op: 'set_ble', key: KEY } as const
+
+  it('is offered, with net, to a dial that said hello.ble = "v1" on the cable', async () => {
+    const { session, port } = await ready('usb')
+    expect(featuresOf(port)).toContain('ble')
+    expect(featuresOf(port)).toContain('net')
+    await session.stop()
+  })
+
+  it('is not offered to a dial that did not say it, nor on any other link', async () => {
+    const plain = await ready('usb', HELLO)
+    expect(featuresOf(plain.port)).not.toContain('ble')
+    await plain.session.stop()
+    for (const transport of ['wifi', 'ble', 'tunnel'] as const) {
+      const { session, port } = await ready(transport)
+      expect(featuresOf(port)).not.toContain('ble')
+      await session.stop()
+    }
+    const unsaid = await ready(undefined)
+    expect(featuresOf(unsaid.port)).not.toContain('ble')
+    await unsaid.session.stop()
+  })
+
+  it('sends the key-only set and mode 2 to a dial that said ble', async () => {
+    const { session, port } = await ready('usb')
+    const first = session.net(KEYONLY)
+    await vi.waitFor(() => expect(wireNet(port)).toHaveLength(1))
+    expect(Object.keys(wireNet(port)[0]).sort()).toEqual(['id', 'key', 't'])
+    port.say({ t: 'net.state', id: wireNet(port)[0].id, ok: true, saved: false, ble: true, mode: 0 })
+    expect(await first).toEqual({ ok: true, saved: false, ble: true, mode: 0 })
+    const second = session.net({ op: 'mode', mode: 2 })
+    await vi.waitFor(() => expect(wireNet(port)).toHaveLength(2))
+    expect(wireNet(port)[1]).toMatchObject({ t: 'net.mode', mode: 2 })
+    port.say({ t: 'net.state', id: wireNet(port)[1].id, ok: true, saved: false, ble: true, mode: 2 })
+    expect(await second).toMatchObject({ ok: true, ble: true, mode: 2 })
+    await session.stop()
+  })
+
+  it('never sends them to a dial that did not say ble (a Wi-Fi-only firmware), and says so', async () => {
+    const { session, port } = await ready('usb', HELLO)
+    expect(await session.net(KEYONLY)).toMatchObject({ ok: false, kind: 'unsupported' })
+    expect(await session.net({ op: 'mode', mode: 2 })).toMatchObject({ ok: false, kind: 'unsupported' })
+    expect(wireNet(port)).toEqual([])
+    // Wi-Fi requests still go.
+    const pending = session.net({ op: 'get' })
+    await vi.waitFor(() => expect(wireNet(port)).toHaveLength(1))
+    port.say({ t: 'net.state', id: wireNet(port)[0].id, ok: true, saved: false })
+    await pending
+    await session.stop()
+  })
+
+  it.each(['wifi', 'ble', 'tunnel'] as const)('are never sent on a %s link', async (transport) => {
+    const { session, port } = await ready(transport)
+    expect(await session.net(KEYONLY)).toMatchObject({ ok: false, kind: 'transport' })
+    expect(await session.net({ op: 'mode', mode: 2 })).toMatchObject({ ok: false, kind: 'transport' })
+    expect(wireNet(port)).toEqual([])
+    await session.stop()
+  })
+})

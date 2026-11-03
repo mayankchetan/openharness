@@ -793,7 +793,7 @@ describe('cable session', () => {
     await session.stop()
   })
 
-  it('W16: readSettings carries an optional linkMode of usb or wifi, drops any other, and never writes it', async () => {
+  it('W16 and B6d: readSettings carries an optional linkMode of usb, wifi or ble, drops any other, and never writes it', async () => {
     const seen: any[] = []
     const { session, port } = await connect(makeHost({ onDialStatus: (s) => seen.push(s) }))
     const base = {
@@ -804,15 +804,19 @@ describe('cable session', () => {
     port.say({ t: 'hello', product: 'harness', mac: 'aa:bb', board: 'round', proto: 3, settings: { ...base, linkMode: 'wifi' } })
     await vi.waitFor(() => expect(seen.at(-1)?.settings?.linkMode).toBe('wifi'))
     // An unknown value (a later build's mode) is dropped; it never refuses the whole report.
-    port.say({ t: 'settings.state', ok: true, settings: { ...base, brightness: 10, linkMode: 'ble' } })
+    port.say({ t: 'settings.state', ok: true, settings: { ...base, brightness: 10, linkMode: 'tunnel' } })
     await vi.waitFor(() => expect(seen.at(-1).settings.brightness).toBe(10))
     expect(seen.at(-1).settings).not.toHaveProperty('linkMode')
+    // The phone mode (B6: wl_mode 2) is the dial's own choice, reported as 'ble'.
+    port.say({ t: 'settings.state', ok: true, settings: { ...base, brightness: 12, linkMode: 'ble' } })
+    await vi.waitFor(() => expect(seen.at(-1).settings.brightness).toBe(12))
+    expect(seen.at(-1).settings.linkMode).toBe('ble')
     // A firmware that never reports it (every firmware before W16): parses, no key.
     port.say({ t: 'settings.state', ok: true, settings: { ...base, brightness: 20 } })
     await vi.waitFor(() => expect(seen.at(-1).settings.brightness).toBe(20))
     expect(seen.at(-1).settings).not.toHaveProperty('linkMode')
     // Read-only here: no wire path of the daemon writes the link mode, even if a caller names it.
-    await session.setSettings({ brightness: 11, linkMode: 'wifi' } as any)
+    await session.setSettings({ brightness: 11, linkMode: 'ble' } as any)
     expect(port.sent.at(-1)).toEqual({ t: 'settings.set', brightness: 11 })
     const before = port.sent.length
     expect(await session.setSettings({ linkMode: 'usb' } as any)).toBe(true)

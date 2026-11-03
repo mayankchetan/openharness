@@ -1,5 +1,6 @@
 // A dial on the Wi-Fi link, for tests: a TLS-PSK client (pskClient.ts) that speaks cable frames the way the firmware does.
 // It sends `hello` and reads what the daemon says back. Test code only; nothing here listens.
+import type { Duplex } from 'node:stream'
 import type * as tls from 'node:tls'
 
 import { CableDecoder, CableType, encodeCableFrame } from '../cableFrame.js'
@@ -12,6 +13,8 @@ export interface FakeNetDialOptions {
   psk: Buffer
   host?: string
   localAddress?: string
+  /** Run the handshake over this stream instead of a TCP connection (a tunnel). */
+  socket?: Duplex
   fw?: string
 }
 
@@ -35,7 +38,7 @@ export class FakeNetDial {
 
   /** Connect and finish the TLS handshake; rejects with the TLS error when the daemon refuses it. */
   static async connect(options: FakeNetDialOptions): Promise<FakeNetDial> {
-    const socket = await pskConnect({ port: options.port, identity: options.id, psk: options.psk, host: options.host, localAddress: options.localAddress })
+    const socket = await pskConnect({ port: options.port, identity: options.id, psk: options.psk, host: options.host, localAddress: options.localAddress, socket: options.socket })
     return new FakeNetDial(socket, options)
   }
 
