@@ -161,7 +161,8 @@ assert 'static const char *TAG = "nwifi";' in text('wifi_sta.c'), 'our own lines
 for phrase in ('LOG LEVELS', 'WARN and ERROR lines still pass', 'Invalid AP(<bssid>) SSID=<name>', 'PWD:%s'):
     assert phrase in text('wifi_sta.h'), phrase
 assert 'net_power_profile(NET_POWER_ACTIVE)' in start_sta and 'esp_wifi_set_ps(' in body(sta, 'net_power_profile'), 'min-modem, set through hook 1 (W13; test_wifi_power_source.py)'
-assert 'WIFI_PS_NONE' not in sta and 'WIFI_PS_MAX_MODEM' not in sta, 'min-modem always for now'
+assert 'WIFI_PS_NONE' not in sta, 'power save is never switched off'
+assert len(re.findall(r'WIFI_PS_MAX_MODEM', sta)) == 2, 'max-modem: the IDLE macro and the name table (2026-11-02), nowhere else'
 assert re.search(r'snprintf\(hostname, sizeof hostname, "dial-%02x", mac\[5\]\)', text('wifi_sta.c')), 'hostname dial-<last MAC byte, hex>'
 assert 'esp_netif_set_hostname(s_netif, hostname)' in start_sta
 assert len(re.findall(r'listen_interval\s*=', sta)) == 1 and 'wc.sta.listen_interval = 3;' in start_sta, 'listen interval set once, in the association config'

@@ -87,19 +87,28 @@ static bool fail(const char *what, esp_err_t e, bool driver_inited)
 }
 
 // HOOK 1 (wifi_sta.h). The two profiles are separate names on purpose: the battery plan changes NET_PS_IDLE and nothing else. Default IDLE = ACTIVE.
-// net_link.c power_profile_sync() calls the hook with IDLE while the chip may sleep (S2). IDLE stays MIN_MODEM on purpose: WIFI_PS_MAX_MODEM with
-// the listen interval of 3 (set at association, below) is the spec's candidate, but no measurement of its downlink delay or of the link's survival
-// over it exists, and a wrong guess shows up as a dial that drops its session while asleep. Flip this one line only after the bench A/B (gap report
-// 2026-11-01-sleep-wifi-gaps.md, S2); test_wifi_power_source.py pins the current value so the flip is a deliberate edit of both.
+// net_link.c power_profile_sync() calls the hook with IDLE while the chip may sleep (S2). IDLE is WIFI_PS_MAX_MODEM since 2026-11-02 (user approved, after the
+// FINAL5 S2 bench): the station wakes for every third beacon (the listen interval of 3 set at association, below) instead of every DTIM beacon, and it still
+// keeps the association. Its cost is downlink latency of up to about 300 ms and, on an access point that does not buffer for it, a dropped session while
+// asleep: the bench decides, and this one line goes back to MIN_MODEM if it drops. ACTIVE (S0, S1, the join and the handshake)
+// stays MIN_MODEM, the mode every number in the spec was measured with. test_wifi_power_source.py pins both values.
 #define NET_PS_ACTIVE WIFI_PS_MIN_MODEM
-#define NET_PS_IDLE WIFI_PS_MIN_MODEM
+#define NET_PS_IDLE WIFI_PS_MAX_MODEM
+
+static const char *ps_name(wifi_ps_type_t m) { return m == WIFI_PS_MAX_MODEM ? "max_modem" : m == WIFI_PS_MIN_MODEM ? "min_modem" : "other"; }
 
 bool net_power_profile(net_power_t profile)
 {
     if (profile != NET_POWER_ACTIVE && profile != NET_POWER_IDLE) return false;
     const esp_err_t e = esp_wifi_set_ps(profile == NET_POWER_IDLE ? NET_PS_IDLE : NET_PS_ACTIVE);
-    if (e != ESP_OK) ESP_LOGW(TAG, "set_ps profile=%d: %s", (int)profile, esp_err_to_name(e));
-    return e == ESP_OK;
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "set_ps profile=%d: %s", (int)profile, esp_err_to_name(e));
+        return false;
+    }
+    // One line per change of profile, so the log of an S2 run states the mode that is really in force (read back from the driver).
+    wifi_ps_type_t now = NET_PS_ACTIVE;
+    if (esp_wifi_get_ps(&now) == ESP_OK) ESP_LOGI(TAG, "power save now %s (profile %s)", ps_name(now), profile == NET_POWER_IDLE ? "idle" : "active");
+    return true;
 }
 
 bool nwifi_start(const char *ssid, const char *pass, nwifi_event_cb on_event_cb)
@@ -140,8 +149,8 @@ bool nwifi_start(const char *ssid, const char *pass, nwifi_event_cb on_event_cb)
     memcpy(wc.sta.password, pass, pass_len);
     wc.sta.threshold.authmode = pass_len ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;   // a minimum: WPA3 networks pass too
     wc.sta.pmf_cfg.capable = true;
-    // The association request carries the listen interval (cable-wifi-link.md section 9, hook 1). It matters only to WIFI_PS_MAX_MODEM, which
-    // nothing selects yet; 3 beacon intervals is the IDF default, written down so a later power hook finds it set once, here.
+    // The association request carries the listen interval (cable-wifi-link.md section 9, hook 1). It matters only to WIFI_PS_MAX_MODEM, which the
+    // IDLE profile (S2) selects; 3 beacon intervals is the IDF default, written down here and set once.
     wc.sta.listen_interval = 3;
     e = esp_wifi_set_config(WIFI_IF_STA, &wc);
     zero(&wc, sizeof wc);

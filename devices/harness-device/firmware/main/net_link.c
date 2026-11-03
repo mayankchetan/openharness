@@ -72,7 +72,7 @@ static void ui_flush(void)
 // POWER (S3). The Wi-Fi power-save profile follows the power policy: IDLE while the chip may sleep (the policy's "relaxed" flag, S2), ACTIVE
 // otherwise. Run from this task's own ticks, so the power code never touches the radio and USB mode (no driver) never gets here. A wake takes
 // effect at the next tick of the task, at most one relaxed wait (1 to 2 s) after the screen woke. The profile is remembered only when the driver
-// took it, so a refused call is tried again at the next tick. Today IDLE is the same mode as ACTIVE (wifi_sta.c NET_PS_IDLE): see there.
+// took it, so a refused call is tried again at the next tick. IDLE is max-modem, ACTIVE min-modem (wifi_sta.c NET_PS_IDLE): see there.
 static bool s_idle_profile;   // net_link task only
 
 static void power_profile_sync(void)

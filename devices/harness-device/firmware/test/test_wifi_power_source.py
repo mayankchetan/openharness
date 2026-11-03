@@ -65,7 +65,7 @@ hdr = re.sub(r'//[^\n]*', '', text('wifi_sta.h'))
 hook = body(sta, 'net_power_profile')
 assert re.search(r'\besp_wifi_set_ps\(', hook), 'the hook calls esp_wifi_set_ps'
 calls = set(re.findall(r'\b(esp_wifi_\w+|esp_netif_\w+|esp_event_\w+|nwifi_\w+)\s*\(', hook))
-assert calls == {'esp_wifi_set_ps'}, f'the hook calls only esp_wifi_set_ps, not {calls}'
+assert calls == {'esp_wifi_set_ps', 'esp_wifi_get_ps'}, f'the hook calls esp_wifi_set_ps and the read-only esp_wifi_get_ps (for its log line), not {calls}'
 for banned in ('listen_interval', 'wifi_config_t', 'wc.sta', 'esp_wifi_set_config', 'esp_wifi_connect', 'esp_wifi_disconnect', 'esp_wifi_start',
                'esp_wifi_stop', 'WIFI_PS_NONE'):
     assert banned not in hook, f'net_power_profile names {banned}'
@@ -78,7 +78,12 @@ assert 'WIFI_PS_NONE' not in sta and 'WIFI_PS_NONE' not in hdr, 'power save is n
 active = re.search(r'#define\s+NET_PS_ACTIVE\s+(\w+)', sta)
 idle = re.search(r'#define\s+NET_PS_IDLE\s+(\w+)', sta)
 assert active and active.group(1) == 'WIFI_PS_MIN_MODEM', 'ACTIVE is min-modem'
-assert idle and idle.group(1) == 'WIFI_PS_MIN_MODEM',     'IDLE stays min-modem until a bench A/B of max-modem (listen interval 3) is in: S3 of the sleep + Wi-Fi work wires the hook, and flips nothing'
+# 2026-11-02 (user approved): IDLE, the profile used while the chip may sleep (S2), is max-modem. The association request carries listen_interval 3 (section 2
+# below), so the station wakes for every third beacon; ACTIVE (S0, S1, the link join and handshake) stays min-modem, which every spec number was measured with.
+assert idle and idle.group(1) == 'WIFI_PS_MAX_MODEM',     'IDLE is max-modem (2026-11-02), ACTIVE stays min-modem'
+hook_text = text('wifi_sta.c')
+log_at = hook_text.index('power save now')
+assert hook_text.index('esp_wifi_set_ps(') < hook_text.index('esp_wifi_get_ps(') < log_at, 'the mode is read back from the driver after it was set, then logged'
 assert 'NET_PS_ACTIVE' in hook and 'NET_PS_IDLE' in hook, 'each profile maps to its mode through the two macros'
 assert re.search(r'typedef enum\s*\{\s*NET_POWER_ACTIVE\s*,\s*NET_POWER_IDLE\s*\}\s*net_power_t;', hdr), 'two profiles in the header'
 assert re.search(r'\bbool\s+net_power_profile\(net_power_t\s+\w+\);', hdr), 'declared in wifi_sta.h'
