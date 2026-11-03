@@ -122,11 +122,11 @@ uint32_t pp_relaxed_ms(pp_poller_t who)
     switch (who) {
     case PP_POLLER_TOUCH:         return PP_TOUCH_POLL_MS;
     case PP_POLLER_RENDER:        return 5000;
-    case PP_POLLER_CABLE_READER:  return 2000;
-    case PP_POLLER_CABLE_SESSION: return 2000;
+    case PP_POLLER_CABLE_READER:  return 5000;   // 2 s before the 2026-11-02 wake diet; the TLS reader's socket waits follow it (cable_xport_tls.c)
+    case PP_POLLER_CABLE_SESSION: return 5000;   // 2 s before the wake diet; nothing in this task works in S2 (no hello while relaxed)
     case PP_POLLER_REFRESH:       return 5000;
     case PP_POLLER_BATLOG:        return 10000;
-    case PP_POLLER_NET_SERVE:     return 1000;
+    case PP_POLLER_NET_SERVE:     return 2000;   // 1 s before the wake diet; the serve loop's stale-session limit is 30 s, a Wi-Fi loss still ends the wait at once
     case PP_POLLER_NET_BACKOFF:   return 2000;
     case PP_POLLER_MODE_SW:       return 2000;
     case PP_POLLER_COUNT:         break;

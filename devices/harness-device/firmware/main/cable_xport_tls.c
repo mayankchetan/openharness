@@ -27,6 +27,8 @@ static const char *TAG = "tls";
 #define TLS_WRITE_CAP_MS 2000   // once a record is composed: finish it or close (finding F3)
 #define TLS_SLICE_MS     10     // longest a reader holds the mutex while it waits for data (inner transport without wait_readable, and the handshake)
 #define TLS_WAIT_SLICE_MS 500   // longest one reader wait on the socket (no mutex held): bounds how late a reader notices a close
+#define TLS_WAIT_SLICE_LONG_MS 2000   // ... for a reader that asked for at least this long (the relaxed read of S2, power_policy.h): each socket wait is a wake of the chip.
+                                      // close() calls shutdown() first (cable_xport_tcp.c drop), which ends a select at once; this bound only matters where it does not
 #define TLS_CLOSE_MS     100    // best effort close_notify
 
 // Only TLS-ECDHE-PSK-AES-CBC suites. mbedtls_ssl_conf_ciphersuites keeps the pointer, so the list is static.
@@ -259,7 +261,8 @@ static int tls_read(const cable_xport_t *x, uint8_t *buf, size_t cap, int wait_m
         if (!atomic_load(&t->up) || atomic_load(&t->closing)) return read_dead(end);
         int64_t left_ms = left_ms_up(end);   // rounded up: a last fraction of a millisecond is one more wait, not a spin of zero waits
         if (can_wait && socket_next) {
-            int w = left_ms > TLS_WAIT_SLICE_MS ? TLS_WAIT_SLICE_MS : (int)left_ms;
+            const int cap = wait_ms >= TLS_WAIT_SLICE_LONG_MS ? TLS_WAIT_SLICE_LONG_MS : TLS_WAIT_SLICE_MS;
+            int w = left_ms > cap ? cap : (int)left_ms;
             // No mutex here. > 0: readable, or the end of the stream, which the read below reports. < 0: the inner transport
             // failed; the read below finds the same error and ends the link under the mutex. 0: timeout, look at the state again.
             const int ready = t->inner->wait_readable(t->inner, w);

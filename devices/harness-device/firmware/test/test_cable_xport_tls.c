@@ -941,6 +941,39 @@ static void test_writer_not_starved(void)
 }
 
 // An idle 2 s read (the S2 reader wait) must cost a handful of wakes, not one per 10 ms slice (about 200).
+// WAKE DIET (2026-11-02): a reader that asks for a long wait (>= TLS_WAIT_SLICE_LONG_MS, the relaxed read of S2) waits on the socket in slices of that length, not of
+// 500 ms: a 5 s read with no data is 3 socket waits, not 10. A shorter read keeps the 500 ms bound (an awake dial reads for 100 ms at a time).
+static void test_long_read_few_wakes(void)
+{
+    link_t *l = calloc(1, sizeof(*l));
+    link_init(l, CABLE_XPORT_WIFI);
+    server_t s;
+    server_start(&s, l, SRV_SINK);
+    server_run(&s);
+    const cable_xport_t *t = wrap(l, KEY_A);
+    CHECK(t->open(t));
+    usleep(50000);
+    int waits0 = atomic_load(&l->client.wait_calls);
+    uint8_t b[64];
+    int64_t t0 = ms_now();
+    CHECK(t->read(t, b, sizeof(b), 5000) == 0);
+    int64_t ms = ms_now() - t0;
+    int waits = atomic_load(&l->client.wait_calls) - waits0;
+    CHECK(ms >= 4900 && ms < 5400);
+    CHECK(waits >= 2 && waits <= 3);   // 2000 + 2000 + 1000 ms
+    waits0 = atomic_load(&l->client.wait_calls);
+    t0 = ms_now();
+    CHECK(t->read(t, b, sizeof(b), 1900) == 0);   // under the long-wait threshold: the 500 ms bound stays
+    ms = ms_now() - t0;
+    waits = atomic_load(&l->client.wait_calls) - waits0;
+    CHECK(ms >= 1800 && ms < 2200);
+    CHECK(waits >= 4 && waits <= 6);
+    t->close(t);
+    server_join(&s);
+    cable_xport_tls_free(t);
+    free(l);
+}
+
 static void test_idle_read_few_wakes(void)
 {
     link_t *l = calloc(1, sizeof(*l));
@@ -1663,6 +1696,7 @@ int main(int argc, char **argv)
     test_concurrent_echo();
     test_writer_not_starved();
     test_idle_read_few_wakes();
+    test_long_read_few_wakes();
     test_data_ends_wait();
     test_buffered_bytes_without_wait();
     test_close_during_wait();
