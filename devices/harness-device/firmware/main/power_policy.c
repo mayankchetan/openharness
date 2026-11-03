@@ -129,6 +129,7 @@ uint32_t pp_relaxed_ms(pp_poller_t who)
     case PP_POLLER_NET_SERVE:     return 2000;   // 1 s before the wake diet; the serve loop's stale-session limit is 30 s, a Wi-Fi loss still ends the wait at once
     case PP_POLLER_NET_BACKOFF:   return 2000;
     case PP_POLLER_MODE_SW:       return 2000;
+    case PP_POLLER_NET_PARK:      return 5000;   // the radio is off: nothing happens here but a poke; the 5 s only catches a wish that ended without one
     case PP_POLLER_COUNT:         break;
     }
     return 0;

@@ -195,7 +195,7 @@ static void radio_off_park(void)
     nwifi_radio_off();
     for (;;) {
         if (!atomic_load(&s_halt) && !power_sleep_wifi_off_wanted()) break;
-        xSemaphoreTake(s_poke, pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_NET_BACKOFF, 100)));   // net_link_poke() ends the wait at once
+        xSemaphoreTake(s_poke, pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_NET_PARK, 100)));   // net_link_poke() ends the wait at once
     }
     const int64_t t0_us = esp_timer_get_time();
     atomic_store(&s_wake_us, t0_us);
