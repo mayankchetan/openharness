@@ -24,7 +24,21 @@ enum {
     // The daemon keeps this dial's Wi-Fi settings and speaks net.set / get / clear / mode / key / host (docs/specs/cable-wifi-link.md section 3).
     // Offered only over the USB cable, to a dial whose hello said net "v1". The dial answers none of them without it.
     CABLE_FEATURE_NET = 1u << 9,
+    // The daemon keeps this dial's phone-mode key and takes the key-only net.set and net.mode 2 (docs/specs/cable-ble-link.md). Offered only over the
+    // USB cable, to a dial whose hello said ble "v1" (an image built with the BLE link). The dial refuses both forms without it.
+    CABLE_FEATURE_BLE = 1u << 10,
 };
+
+// Does this image carry the BLE link? DEVICE_BLE_LINK is defined by main/CMakeLists.txt exactly when NimBLE is in the build (CONFIG_BT_NIMBLE_ENABLED).
+// The default image has none: its hello does not say "ble", and it refuses the phone-mode forms of net.set and net.mode whatever the daemon offers.
+static inline bool cable_ble_link_built(void)
+{
+#ifdef DEVICE_BLE_LINK
+    return true;
+#else
+    return false;
+#endif
+}
 
 // Which voice codec a turn uses (task W4; docs/specs/cable-wifi-link.md section 2.5). Pure and IDF-free so the host test pins the
 // rule. `transport_is_usb`: the cable is the USB link (the only link today; Wi-Fi comes later). `usb_flag`: the build flag

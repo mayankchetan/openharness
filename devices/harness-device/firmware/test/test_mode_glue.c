@@ -14,7 +14,8 @@
 //   S1  a Wi-Fi dial, a daemon on the cable                    -> USB (the point of the task), and it stays there
 //   S2  the SOF flag late after the switch's reboot            -> a detour, at most MS_FLAP_CAP reboots, never a loop
 //   S3  NVS refuses the boot_usb write                         -> the same bound
-//   S4  wl_mode corrupt, wl_mode 2 (Bluetooth), no credentials -> USB, and the dial never leaves it
+//   S4  wl_mode corrupt, no credentials                         -> USB, and the dial never leaves it (wl_mode 2 is a BLE target since B8a: its tests
+//       force the value, because the NVS accessors cannot store it until B6)
 //   S5  stay_wl corrupt or set with no credentials              -> USB
 //   S6  factory reset / net.clear                              -> USB
 //   S7  the radio does not come up                             -> USB in the same boot, bounded retries
@@ -45,7 +46,8 @@ typedef struct {
     bool daemon;                // a daemon answers on that port (welcome to every probe hello; pings in USB mode)
     bool sof_late;              // after a reboot the SOF flag takes `sof_late_ms` to appear
     uint32_t sof_late_ms;
-    bool radio_fails;           // the Wi-Fi stack does not start (net_link_start returns false)
+    bool radio_fails;           // the wireless stack (Wi-Fi, BLE) does not start (net_link_start returns false)
+    uint8_t wl_force;           // B8a: nonzero = the wireless target the NVS read returns (config_store cannot store wl_mode 2 before B6); 0 = ask NVS
     uint32_t busy;
     bool asleep;
     uint64_t last_touch;        // uptime of the last touch (display_idle_ms is the difference); 0 = at boot
@@ -83,6 +85,9 @@ typedef struct {
 } dial_t;
 
 static dial_t D;
+
+// config_load_wl_effective(), or the forced value of a BLE test.
+static uint8_t wl_eff(void) { return D.wl_force ? D.wl_force : config_load_wl_effective(); }
 
 static void op_probe(void *c, bool on) { dial_t *d = c; d->probe_calls++; d->probe_installed = on; if (on) { d->have_welcome = false; d->last_hello = 0; d->probe_since = d->t; } }
 static void op_notice(void *c, bool on) { dial_t *d = c; d->notice_calls++; d->notice_shown = on; }
@@ -150,7 +155,7 @@ static ms_mode_t boot(void)
     in.record_ok = mode_record_boot(D.reset_sw, &view);
     in.record = view;
     in.crash_trip = mode_record_crash_boot(D.reset_cls, &in.crashes);   // reads the crash record; it is sealed again once the mode is known
-    in.wl_effective = config_load_wl_effective();
+    in.wl_effective = wl_eff();
     in.stay_wl = config_load_stay_wl();
     in.boot_usb = config_load_boot_usb();
     // The glue waits until MS_SOF_SETTLE_MS of uptime, then reads the flag once.
@@ -166,10 +171,10 @@ static ms_mode_t boot(void)
     D.crash_usb = out.crash_usb;
     D.crashes = out.crashes;
 
-    // Wi-Fi mode needs the radio; if it does not start the dial runs on USB in the same boot (net_link_start returns false)
-    D.running = (out.mode == MS_MODE_WIFI && !D.radio_fails) ? MS_MODE_WIFI : MS_MODE_USB;
+    // A wireless mode needs its radio; if it does not start the dial runs on USB in the same boot (net_link_start returns false)
+    D.running = (out.mode != MS_MODE_USB && !D.radio_fails) ? out.mode : MS_MODE_USB;
     mode_record_crash_seal(out.crashes, D.running);
-    mg_init(&D.mg, D.running, out.flaps, config_load_wl_effective(), config_load_stay_wl());
+    mg_init(&D.mg, D.running, out.flaps, wl_eff(), config_load_stay_wl());
     mg_note_crashes(&D.mg, out.crashes);
     D.reset_sw = false;
     D.reset_cls = MS_RESET_POWERON;
@@ -219,7 +224,7 @@ static bool run(uint64_t ms)
                 wl = config_load_wl_effective();
                 put_u8("wl_ver", 1);                                                                           // marker_on
             } else {
-                wl = config_load_wl_effective();
+                wl = wl_eff();
             }
             mg_apply_settings(&D.mg, wl, config_load_stay_wl(), D.t);
         }
@@ -291,10 +296,22 @@ static void test_boot_plan(void)
     o = plan(1, false, true, false, 50);   assert(o.mode == MS_MODE_WIFI && o.write_boot_usb && !o.boot_usb_new);   // cold start on a charger
     o = plan(1, true, true, true, 50);     assert(o.mode == MS_MODE_WIFI && o.write_boot_usb);  // stay_wl wins
     o = plan(1, false, true, true, 5);     assert(o.mode == MS_MODE_WIFI && o.sof_ignored);     // too early to believe the flag
-    // a target that is neither: Bluetooth has no transport yet. Never a mode the dial cannot start.
-    o = plan(2, false, false, false, 50);  assert(o.mode == MS_MODE_USB && o.unsupported);
-    o = plan(2, true, false, true, 50);    assert(o.mode == MS_MODE_USB && o.unsupported);
-    o = plan(255, false, true, true, 50);  assert(o.mode == MS_MODE_USB && o.unsupported);
+    // B8a: Bluetooth (2) is a target like Wi-Fi: the same table, the same boot_usb bookkeeping, and nothing "unsupported" about it
+    o = plan(2, false, false, false, 50);  assert(o.mode == MS_MODE_BLE && !o.unsupported && !o.write_boot_usb);   // the ordinary Bluetooth boot
+    o = plan(2, false, false, true, 50);   assert(o.mode == MS_MODE_BLE && !o.unsupported && !o.write_boot_usb);   // cable in, boot_usb says Bluetooth: row 4
+    o = plan(2, false, true, true, 50);    assert(o.mode == MS_MODE_USB && !o.unsupported && !o.write_boot_usb);   // the switch's own reboot, cable still in
+    o = plan(2, false, true, false, 50);   assert(o.mode == MS_MODE_BLE && o.write_boot_usb && !o.boot_usb_new);   // cold start on a charger
+    o = plan(2, true, false, false, 50);   assert(o.mode == MS_MODE_BLE && !o.unsupported);
+    o = plan(2, true, true, true, 50);     assert(o.mode == MS_MODE_BLE && o.write_boot_usb);                     // stay_wl wins
+    o = plan(2, false, true, true, 5);     assert(o.mode == MS_MODE_BLE && o.sof_ignored);                        // too early to believe the flag
+    // a number that is neither 0, 1 nor 2 (a corrupt byte, a later build) has no transport: USB, and "unsupported" says so. 0 is no target, not unsupported.
+    o = plan(0, false, false, false, 50);  assert(o.mode == MS_MODE_USB && !o.unsupported);
+    for (unsigned v = 3; v <= 255; v++) {
+        for (unsigned bits = 0; bits < 8; bits++) {
+            o = plan((uint8_t)v, bits & 1, bits & 2, bits & 4, 50);
+            assert(o.mode == MS_MODE_USB && o.unsupported && o.boot_usb_new);
+        }
+    }
     // the record rides along
     mg_boot_in_t in;
     memset(&in, 0, sizeof in);
@@ -1178,9 +1195,24 @@ static void test_panic_loop_plan(void)
     in.sof = false;
     mg_boot(&in, &o);
     assert(o.mode == MS_MODE_USB && !o.crash_usb);
-    in.wl_effective = 2;                                  // a mode with no transport: USB, and not blamed on a crash
+    in.wl_effective = 3;                                  // a mode with no transport: USB, and not blamed on a crash
     mg_boot(&in, &o);
     assert(o.mode == MS_MODE_USB && o.unsupported && !o.crash_usb);
+    in.wl_effective = 2;                                  // B8a: Bluetooth would have been the choice, so the trip takes USB once and says so
+    in.boot_usb = false;
+    mg_boot(&in, &o);
+    assert(o.mode == MS_MODE_USB && !o.unsupported && o.crash_usb && o.write_boot_usb && o.boot_usb_new);
+    in.stay_wl = true;                                    // it beats stay_wl for a Bluetooth dial too
+    mg_boot(&in, &o);
+    assert(o.mode == MS_MODE_USB && o.crash_usb);
+    in.stay_wl = false;
+    in.boot_usb = true;                                   // already USB, no cable: row 4 says Bluetooth, the trip says USB, nothing to write
+    mg_boot(&in, &o);
+    assert(o.mode == MS_MODE_USB && o.crash_usb && !o.write_boot_usb);
+    in.sof = true;                                        // a cable: USB anyway, the trip changed nothing and says nothing
+    in.sof_read_ms = 50;
+    mg_boot(&in, &o);
+    assert(o.mode == MS_MODE_USB && !o.crash_usb);
     // no trip: the table decides, and the count passes through
     memset(&in, 0, sizeof in);
     in.wl_effective = 1;
@@ -1310,8 +1342,233 @@ static void test_a_crash_loop_in_wifi_is_slowed_to_one_attempt_per_dwell(void)
     for (int i = 0; i < D.reboots && i < 64; i++) assert(D.reboot_uptime[i] >= MS_T_DWELL_MS);   // every USB stint lasted the dwell
 }
 
+#define SSID_FOR_TEST "home-net"
+// ── B8a: Bluetooth is a wireless target like Wi-Fi (the glue only; the link itself is B4b) ─────────────────────────
+// The sim forces the target (D.wl_force = 2) because config_store cannot store wl_mode 2 until B6. Every rule below is the Wi-Fi rule with the other number.
+
+static void test_ble_target_is_kept_by_the_glue_state(void)
+{
+    mg_t g;
+    mg_init(&g, MS_MODE_BLE, 0, 2, false);
+    assert(g.wl_effective == MS_WL_BLE && g.ms.mode == MS_MODE_BLE);
+    mg_init(&g, MS_MODE_USB, 0, 2, false);                 // USB running with a Bluetooth target: it is the target to leave to
+    assert(g.wl_effective == MS_WL_BLE);
+    mg_init(&g, MS_MODE_USB, 0, 3, false);                 // a number with no transport still reads as "no target"
+    assert(g.wl_effective == MS_WL_UNSET);
+    mg_init(&g, MS_MODE_USB, 0, 255, false);
+    assert(g.wl_effective == MS_WL_UNSET);
+    mg_set_settings(&g, 2, true);
+    assert(g.wl_effective == MS_WL_BLE && g.stay_wl);
+    mg_set_settings(&g, 7, true);
+    assert(g.wl_effective == MS_WL_UNSET);
+    // the Wi-Fi rows of mg_apply_settings are unchanged: Wi-Fi to "no target" waits for a second read
+    mg_init(&g, MS_MODE_WIFI, 0, 1, false);
+    mg_apply_settings(&g, 0, false, 1000);
+    assert(g.wl_effective == MS_WL_WIFI && g.wl_pending);
+    mg_apply_settings(&g, 0, false, 1000 + MG_CONFIRM_MS);
+    assert(g.wl_effective == MS_WL_UNSET && !g.wl_pending);
+}
+
+static void test_a_drop_from_ble_to_no_target_waits_for_its_confirmation_too(void)
+{
+    mg_t g;
+    mg_init(&g, MS_MODE_BLE, 0, 2, false);
+    mg_apply_settings(&g, 0, false, 5000);                 // seen once: the read may have landed inside a write window
+    assert(g.wl_effective == MS_WL_BLE && g.wl_pending);
+    mg_apply_settings(&g, 0, false, 5000 + MG_CONFIRM_MS - 1);   // too soon
+    assert(g.wl_effective == MS_WL_BLE && g.wl_pending);
+    mg_apply_settings(&g, 0, false, 5000 + MG_CONFIRM_MS);       // a second opinion, 600 ms later
+    assert(g.wl_effective == MS_WL_UNSET && !g.wl_pending);
+    // a read that says Bluetooth again cancels the wait
+    mg_init(&g, MS_MODE_BLE, 0, 2, false);
+    mg_apply_settings(&g, 0, false, 5000);
+    mg_apply_settings(&g, 2, false, 5100);
+    assert(g.wl_effective == MS_WL_BLE && !g.wl_pending);
+    // a change between the two wireless targets is applied at once: it is a pick, not a lost read
+    mg_init(&g, MS_MODE_WIFI, 0, 1, false);
+    mg_apply_settings(&g, 2, false, 100);
+    assert(g.wl_effective == MS_WL_BLE && !g.wl_pending);
+    mg_apply_settings(&g, 1, false, 200);
+    assert(g.wl_effective == MS_WL_WIFI && !g.wl_pending);
+    // a number with no transport is "no target" and is confirmed like it
+    mg_init(&g, MS_MODE_BLE, 0, 2, false);
+    mg_apply_settings(&g, 9, false, 100);
+    assert(g.wl_effective == MS_WL_BLE && g.wl_pending);
+}
+
+static void test_a_ble_dial_goes_to_usb_and_comes_back(void)
+{
+    fresh();
+    D.wl_force = 2;
+    D.cable = D.daemon = false;
+    assert(boot() == MS_MODE_BLE && D.running == MS_MODE_BLE && D.mg.wl_effective == MS_WL_BLE);
+    assert(!run(70000));                                   // past the dwell, no cable: nothing to do
+    assert(D.probe_calls == 0);
+    D.cable = D.daemon = true;                             // the user plugs in: the probe runs, a welcome opens T_ENTER, 5 s later USB
+    assert(run(8000) && D.reboot_to[0] == MS_MODE_USB && strcmp(D.order, "LSBR") == 0);
+    assert(config_load_boot_usb());
+    assert(boot() == MS_MODE_USB && D.mg.wl_effective == MS_WL_BLE);   // the cable is in and boot_usb says USB
+    D.cable = D.daemon = false;                            // pulled: after T_LEAVE and the dwell the dial goes back to the target
+    assert(!run(50000));
+    assert(run(20000) && D.reboot_to[1] == MS_MODE_BLE);
+    assert(!config_load_boot_usb());
+    assert(boot() == MS_MODE_BLE);
+    assert(D.mg.ms.flaps == 2);                            // two switches by the rule, and the cap is the shared one
+}
+
+static void test_a_ble_dial_whose_radio_does_not_start_runs_usb_and_is_bounded(void)
+{
+    fresh();
+    D.wl_force = 2;
+    D.radio_fails = true;
+    assert(boot() == MS_MODE_USB);                         // the plan said Bluetooth; the radio did not come up: USB in the same boot
+    int reboots = run_wall(30 * 60 * 1000);
+    assert_bounded(reboots, 30 * 60 * 1000);
+    assert(reboots <= (int)MS_FLAP_CAP * 4);
+}
+
+static void test_picking_usb_while_ble_runs_goes_to_usb(void)
+{
+    fresh();
+    D.wl_force = 2;
+    assert(boot() == MS_MODE_BLE);
+    assert(!run(1000));
+    D.wl_force = 0;                                        // no stored target any more: the user picked USB on the Link screen
+    D.reload = true;
+    assert(!run(MG_CONFIRM_MS - 250));                     // the drop is held until a second read agrees
+    assert(run(2000) && D.reboot_to[0] == MS_MODE_USB);
+    assert(boot() == MS_MODE_USB);
+    assert(!run(5 * 60 * 1000) && D.reboots == 1);         // and USB with no target never leaves
+}
+
+// B6: the same rules over the REAL accessors (config_net_set_ble, config_net_set_mode(2)), no forced target: the dial boots Bluetooth only with the
+// phone settings whole, and every loss of them is USB.
+static void test_a_phone_provisioned_dial_boots_ble_from_nvs(void)
+{
+    fresh();
+    assert(config_net_set_ble(KEY) == CFG_NET_OK);
+    assert(boot() == MS_MODE_USB && D.mg.wl_effective == MS_WL_UNSET);            // the key alone is no target
+    assert(config_net_set_mode(2) == CFG_NET_OK && config_load_wl_effective() == 2);
+    D.cable = D.daemon = false;
+    assert(boot() == MS_MODE_BLE && D.running == MS_MODE_BLE && D.mg.wl_effective == MS_WL_BLE);
+    assert(!run(5 * 60 * 1000) && D.reboots == 0);                                // the reload at the start of a BLE run keeps the target
+    // Wi-Fi settings and a Wi-Fi pick on top: Wi-Fi boots
+    assert(config_net_set(SSID_FOR_TEST, "correct horse battery", "192.168.1.20", 18480, KEY, 1) == CFG_NET_OK);
+    assert(boot() == MS_MODE_WIFI);
+    assert(config_net_set_mode(2) == CFG_NET_OK);
+    assert(boot() == MS_MODE_BLE);
+    // the user picks USB on the Link screen while Bluetooth runs: confirmed by a second read, then USB
+    assert(config_net_set_mode(0) == CFG_NET_OK);
+    D.reload = true;
+    assert(run(5000) && D.reboot_to[D.reboots - 1] == MS_MODE_USB);
+    // net.clear: nothing left, USB for good
+    assert(config_net_clear() == CFG_NET_OK);
+    assert(boot() == MS_MODE_USB && !run(5 * 60 * 1000));
+    // a lost marker (a cut during a change): no target, USB
+    fresh();
+    assert(config_net_set_ble(KEY) == CFG_NET_OK && config_net_set_mode(2) == CFG_NET_OK);
+    put_u8("bl_ver", 0);
+    assert(boot() == MS_MODE_USB);
+}
+
+static void test_third_crash_in_ble_takes_usb_once(void)
+{
+    fresh();
+    D.wl_force = 2;
+    assert(boot() == MS_MODE_BLE && D.crashes == 0 && !D.crash_usb);
+    assert(crash_and_boot() == MS_MODE_BLE && D.crashes == 1 && !D.crash_usb);
+    assert(crash_and_boot() == MS_MODE_BLE && D.crashes == 2 && !D.crash_usb);
+    assert(crash_and_boot() == MS_MODE_USB && D.crashes == 3 && D.crash_usb);   // the W15d rule, now for Bluetooth
+    assert(config_load_boot_usb());
+    assert(!run(59000));                                   // the ordinary rule: back to the target after the dwell, a software reset holds the count
+    assert(run(2000) && D.reboot_to[0] == MS_MODE_BLE);
+    assert(boot() == MS_MODE_BLE && D.crashes == 3 && !D.crash_usb);
+    assert(crash_and_boot() == MS_MODE_USB && D.crashes == 4 && D.crash_usb);   // the very next crash trips at once
+}
+
+static void test_wifi_and_ble_crashes_share_one_count(void)
+{
+    // Two crashes of a Wi-Fi run, then the user picks Bluetooth: the next crash (it ends a Wi-Fi run) is the third.
+    fresh();
+    provision(1);
+    assert(boot() == MS_MODE_WIFI);
+    assert(crash_and_boot() == MS_MODE_WIFI && D.crashes == 1);
+    assert(crash_and_boot() == MS_MODE_WIFI && D.crashes == 2);
+    D.wl_force = 2;                                        // the stored target is now Bluetooth (a Link-screen pick would reboot; the crash does it here)
+    assert(crash_and_boot() == MS_MODE_USB && D.crashes == 3 && D.crash_usb);
+    // And the other way: two crashes in a Bluetooth run, then Wi-Fi again.
+    fresh();
+    provision(1);
+    D.wl_force = 2;
+    assert(boot() == MS_MODE_BLE);
+    assert(crash_and_boot() == MS_MODE_BLE && D.crashes == 1);
+    assert(crash_and_boot() == MS_MODE_BLE && D.crashes == 2);
+    D.wl_force = 1;
+    assert(crash_and_boot() == MS_MODE_USB && D.crashes == 3 && D.crash_usb);
+    // A crash that ended a USB run is nobody's: the count is held, whichever wireless mode is the target.
+    fresh();
+    D.wl_force = 2;
+    boot();
+    crash_and_boot();
+    assert(crash_and_boot() == MS_MODE_BLE && D.crashes == 2);
+    D.cable = D.daemon = true;
+    assert(run(70000) && D.reboot_to[0] == MS_MODE_USB);
+    assert(boot() == MS_MODE_USB && D.crashes == 2);
+    D.cable = false;
+    assert(crash_and_boot() == MS_MODE_BLE && D.crashes == 2 && !D.crash_usb);
+    assert(crash_and_boot() == MS_MODE_USB && D.crashes == 3 && D.crash_usb);
+}
+
+static void test_ten_minutes_up_in_ble_clears_the_crash_count(void)
+{
+    fresh();
+    D.wl_force = 2;
+    boot();
+    crash_and_boot();
+    assert(crash_and_boot() == MS_MODE_BLE && D.crashes == 2);
+    assert(!run(9 * 60 * 1000));                           // 9 minutes is not enough ...
+    uint8_t n;
+    assert(!mode_record_crash_boot(MS_RESET_HOLD, &n) && n == 2);
+    assert(!run(2 * 60 * 1000));                           // ... 11 minutes is
+    assert(!mode_record_crash_boot(MS_RESET_HOLD, &n) && n == 0);
+    assert(crash_and_boot() == MS_MODE_BLE && D.crashes == 1);
+}
+
+static void test_a_crash_loop_in_ble_is_slowed_to_one_attempt_per_dwell(void)
+{
+    fresh();
+    D.wl_force = 2;
+    boot();
+    const uint64_t wall = 60 * 60 * 1000, start = D.wall;
+    int ble_runs = 0;
+    unsigned crashes_seen = 0;
+    while (D.wall - start < wall) {
+        if (D.running == MS_MODE_BLE) {
+            ble_runs++;
+            if (!run(20000)) crash_and_boot(); else boot();
+        } else if (run(10 * 60 * 1000)) {
+            boot();
+        }
+        assert(D.crashes >= crashes_seen);
+        crashes_seen = D.crashes;
+    }
+    assert(crashes_seen >= MS_CRASH_LIMIT);
+    assert(ble_runs <= (int)MS_CRASH_LIMIT + (int)(wall / (MS_T_DWELL_MS + 20000)) + 1);
+    for (int i = 0; i < D.reboots && i < 64; i++) assert(D.reboot_uptime[i] >= MS_T_DWELL_MS);
+}
+
 int main(void)
 {
+    test_ble_target_is_kept_by_the_glue_state();
+    test_a_drop_from_ble_to_no_target_waits_for_its_confirmation_too();
+    test_a_ble_dial_goes_to_usb_and_comes_back();
+    test_a_ble_dial_whose_radio_does_not_start_runs_usb_and_is_bounded();
+    test_picking_usb_while_ble_runs_goes_to_usb();
+    test_a_phone_provisioned_dial_boots_ble_from_nvs();
+    test_third_crash_in_ble_takes_usb_once();
+    test_wifi_and_ble_crashes_share_one_count();
+    test_ten_minutes_up_in_ble_clears_the_crash_count();
+    test_a_crash_loop_in_ble_is_slowed_to_one_attempt_per_dwell();
     test_restart_refused_when_the_dial_turns_busy_again();
     test_retry_delay_ladder();
     test_a_persistent_refusal_is_rate_bounded();

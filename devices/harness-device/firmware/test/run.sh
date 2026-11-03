@@ -20,6 +20,8 @@ python3 "$here/../scripts/gen_pets.py" --check
 python3 "$here/../scripts/gen_arc_geometry.py" --check
 python3 "$here/../scripts/gen_adpcm_vectors.py" --check
 python3 "$here/test_adpcm_vectors.py"
+python3 "$here/../scripts/gen_ble_vectors.py" --check
+python3 "$here/test_ble_vectors.py"
 
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -I "$here/../main" -o "$out/test_character" "$here/test_character.c" "$here/../main/pet_store.c" "$here/../main/elapsed.c" \
@@ -64,6 +66,16 @@ python3 "$here/test_cable_xport_tls_source.py"
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" \
    -o "$out/test_net_state" "$here/test_net_state.c" "$here/../main/net_state.c"
 "$out/test_net_state"
+# B4a: the BLE link's state machine, deadlines and accept policy; the numbers are read from the shared vector file.
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main"    -o "$out/test_ble_state" "$here/test_ble_state.c" "$here/../main/ble_state.c" "$here/../main/net_state.c"
+"$out/test_ble_state" "$here/vectors/ble_status.txt"
+python3 "$here/test_ble_state_source.py"
+# B4b: the BLE transport (ring, credits, all-or-nothing write) against a fake port, under the address and undefined-behaviour sanitizers; the source rules of the link
+cc -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -O1 -g -pthread -fsanitize=address,undefined -DCABLE_XPORT_BLE_WRITE_CAP_MS=300 -I "$here/host_tls" -I "$here/../main" -o "$out/test_cable_xport_ble" "$here/test_cable_xport_ble.c" "$here/../main/cable_xport_ble.c"
+ASAN_OPTIONS=detect_leaks=0 "$out/test_cable_xport_ble"
+python3 "$here/test_ble_link_source.py"
+# B4e: a development image (unbonded phone accepted) is refused by the upload and flash scripts
+python3 "$here/test_dev_image_guard.py"
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -pthread -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" \
    -o "$out/test_log_ring" "$here/test_log_ring.c" "$here/../main/log_ring.c"
 "$out/test_log_ring"
@@ -122,6 +134,10 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/host_stubs" -I "$here/host_nvs" -I "$here/../main" \
    -o "$out/test_net_config" "$here/test_net_config.c" "$here/host_nvs/host_nvs.c" "$here/../main/config_store.c"
 "$out/test_net_config"
+# B6: the phone-mode settings (key-only form, bl_ver marker, wl_mode 2)
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/host_stubs" -I "$here/host_nvs" -I "$here/../main" \
+   -o "$out/test_ble_config" "$here/test_ble_config.c" "$here/host_nvs/host_nvs.c" "$here/../main/config_store.c"
+"$out/test_ble_config"
 
 cc -std=c11 -Wall -Wextra -Werror -O1 \
    -o "$out/test_cable_machines" "$here/test_cable_machines.c" "$here/../main/cable_machines.c"
@@ -427,6 +443,8 @@ if [[ -n "${IDF_PATH:-}" ]]; then
     python3 "$here/test_cable_xport_tls.py"
     # which mbedTLS errors mean "the daemon refused us" (net_hs_class.h), against the IDF headers
     python3 "$here/test_net_hs_class.py"
+    # B7: voice over the phone mode: ADPCM when offered, PCM on USB, the 96 KB ring for a whole phone mode
+    python3 "$here/test_ble_voice.py"
 fi
 
 python3 "$here/test_companions.py"

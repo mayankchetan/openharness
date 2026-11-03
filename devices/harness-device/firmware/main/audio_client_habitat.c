@@ -300,7 +300,7 @@ void audio_client_init(void)
     // bigger ring (PSRAM only, harmless). If the 96 KB block cannot be had, the 32 KB ring is the fallback, not a dial without voice.
     config_net_info_t net;
     config_net_info(&net);
-    ring_bytes = (net.saved && net.mode == 1) ? BUFFER_BYTES_WIFI : BUFFER_BYTES;
+    ring_bytes = (net.mode == 1 || net.mode == 2) ? BUFFER_BYTES_WIFI : BUFFER_BYTES;   // mode 1 = whole Wi-Fi settings, 2 = whole phone settings (config_net_info)
     storage = ram_psram_alloc(ring_bytes, "voice_stream_ring");
     if (!storage && ring_bytes != BUFFER_BYTES) {
         ring_bytes = BUFFER_BYTES;

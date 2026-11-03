@@ -1209,7 +1209,7 @@ static void test_h11_panic_loop(void)
     CHECK(MS_CRASH_LIMIT == 3 && MS_CRASH_CLEAR_MS == MS_FLAP_CLEAR_MS);
     CHECK(MS_RESET_POWERON == 0);   // a zeroed variable is a power-on
 
-    // the count climbs one per abnormal reset that ended a Wi-Fi run, and trips at the third
+    // the count climbs one per abnormal reset that ended a wireless (Wi-Fi or BLE) run, and trips at the third
     r = crash_rec(0, MS_MODE_WIFI); v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 1 && !v.trip);
     r = crash_rec(1, MS_MODE_WIFI); v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 2 && !v.trip);
     r = crash_rec(2, MS_MODE_WIFI); v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 3 && v.trip);
@@ -1218,7 +1218,15 @@ static void test_h11_panic_loop(void)
     // a crash that ended a USB run is not a Wi-Fi crash: the count is held and nothing trips
     r = crash_rec(2, MS_MODE_USB);  v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 2 && !v.trip);
     r = crash_rec(3, MS_MODE_USB);  v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 3 && !v.trip);
-    r = crash_rec(2, MS_MODE_BLE);  v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 2 && !v.trip);
+    // B8a: Bluetooth is a wireless mode like Wi-Fi: ONE shared count, so a crash loop cannot hide behind a good Wi-Fi history (and the reverse)
+    r = crash_rec(0, MS_MODE_BLE);  v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 1 && !v.trip);
+    r = crash_rec(1, MS_MODE_BLE);  v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 2 && !v.trip);
+    r = crash_rec(2, MS_MODE_BLE);  v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 3 && v.trip);
+    r = crash_rec(3, MS_MODE_BLE);  v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 4 && v.trip);
+    r = crash_rec(250, MS_MODE_BLE); v = crash_boot(&r, MS_RESET_CRASH); CHECK(v.crashes == 250 && v.trip);
+    // a software reset still holds the count of a BLE run, and a power-on still clears it
+    r = crash_rec(2, MS_MODE_BLE);  v = crash_boot(&r, MS_RESET_HOLD);  CHECK(v.crashes == 2 && !v.trip);
+    r = crash_rec(3, MS_MODE_BLE);  v = crash_boot(&r, MS_RESET_POWERON); CHECK(v.crashes == 0 && !v.trip);
     // a software reset (the mode switch, an update) or a deep-sleep wake holds the count and never trips
     r = crash_rec(2, MS_MODE_WIFI); v = crash_boot(&r, MS_RESET_HOLD);  CHECK(v.crashes == 2 && !v.trip);
     r = crash_rec(3, MS_MODE_WIFI); v = crash_boot(&r, MS_RESET_HOLD);  CHECK(v.crashes == 3 && !v.trip);

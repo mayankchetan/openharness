@@ -47,12 +47,19 @@ CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=n
 CONFIG_BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT=12
 CONFIG_BT_NIMBLE_TRANSPORT_EVT_COUNT=15
 CONFIG_BT_NIMBLE_GATT_MAX_PROCS=2
-CONFIG_BT_NIMBLE_MAX_BONDS=1
+CONFIG_BT_NIMBLE_MAX_BONDS=2
 CONFIG_BT_NIMBLE_MAX_CCCDS=1
 
 # The NimBLE host's own allocations (mbuf pools, GATT, L2CAP and security state) come from PSRAM. The controller has no such
 # option: IDF 5.5.6 allocates its memory from internal DMA RAM. Needs SPIRAM_USE_MALLOC (already set).
 CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+
+# Phone mode (task B4b; docs/specs/cable-ble-link.md section 4): LE Secure Connections with numeric comparison (the screen is B5), bonds kept in NVS across a
+# restart, two bonded phones (plan question QQ6). Security stays on: only an encrypted, bonded peer gets the channel (ble_state.c ble_accept_check). The
+# unbonded development switch of the walking skeleton is NOT here and never may be: it is a CMake variable on a command line (test_ble_link_source.py).
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=y
+CONFIG_BT_NIMBLE_SM_SC=y
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
 
 # Plan C12: the controller's code runs from flash instead of IRAM. +20,288 B of internal RAM at run time.
 CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY=y

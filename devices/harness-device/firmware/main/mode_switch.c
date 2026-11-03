@@ -254,7 +254,7 @@ void ms_crash_boot(const ms_crash_t *r, ms_reset_t cls, ms_crash_view_t *out)
     if (r->magic != MS_CRASH_MAGIC || r->check != ms_crash_crc(r)) return;
     if (r->crashes > MS_CRASH_MAX || !mode_valid((ms_mode_t)r->mode)) return;
     v->crashes = r->crashes;
-    if (cls == MS_RESET_CRASH && r->mode == (uint8_t)MS_MODE_WIFI) {
+    if (cls == MS_RESET_CRASH && ms_mode_is_wireless((ms_mode_t)r->mode)) {
         if (v->crashes < MS_CRASH_MAX) v->crashes++;
         v->trip = v->crashes >= MS_CRASH_LIMIT;
     }

@@ -371,7 +371,8 @@ static void test_changes_need_a_configuration(void)
     assert(config_net_set_host("10.1.2.3", 19000) == CFG_NET_OK);
     assert(config_net_load(&n) && !strcmp(n.host, "10.1.2.3") && n.port == 19000 && !memcmp(n.key, KEY2, 32));
     // mode
-    assert(config_net_set_mode(2) == CFG_NET_E_MODE);
+    assert(config_net_set_mode(2) == CFG_NET_E_NOT_PROVISIONED);   // B6: 2 is the phone, and these are Wi-Fi settings (test_ble_config.c holds the rest)
+    assert(config_net_set_mode(3) == CFG_NET_E_MODE);
     assert(config_net_set_mode(-1) == CFG_NET_E_MODE);
     assert(config_net_set_mode(0) == CFG_NET_OK);
     assert(config_net_load(&n) && n.mode == 0);

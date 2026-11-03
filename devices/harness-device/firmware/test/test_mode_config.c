@@ -4,7 +4,7 @@
 //   - stay_wl and boot_usb are true only for the byte 1. A corrupt byte (7, 255, 2) reads as false, which is the default behaviour (boot into
 //     wl_mode, probe for a cable), never "stay in Wi-Fi for ever".
 //   - the wireless target the mode switch sees (config_load_wl_effective) is Wi-Fi only when the Wi-Fi settings are WHOLE (the commit marker and
-//     every key) and wl_mode is exactly 1. A wl_mode with no credentials, a corrupt wl_mode, wl_mode 2 (Bluetooth: no transport exists yet),
+//     every key) and wl_mode is exactly 1 (2, for the phone, needs its own settings: test_ble_config.c). A wl_mode with no credentials, a corrupt wl_mode, wl_mode 2 over Wi-Fi settings,
 //     a missing marker: all of them read as "no wireless target", and the mode switch then never leaves USB.
 //   - forgetting the network (net.clear) and the factory reset take stay_wl with them, so a later provisioning cannot inherit an override that
 //     never probes for a cable.
@@ -146,7 +146,7 @@ static void test_wl_effective(void)
     }
 
     // a corrupt wl_mode byte: not 1, so not Wi-Fi
-    static const uint8_t bad[] = {2 /* Bluetooth: stored, but no transport exists */, 3, 7, 128, 255};
+    static const uint8_t bad[] = {2 /* the phone: a byte of 2 over Wi-Fi settings alone is no target (test_ble_config.c has the phone's own settings) */, 3, 7, 128, 255};
     for (unsigned i = 0; i < sizeof bad; i++) {
         fresh();
         provision(1);

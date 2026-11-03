@@ -199,6 +199,8 @@ if [ "$DO_BUILD" -eq 1 ]; then
 fi
 
 [ -f "$BIN" ] || { echo "error: $BIN not found — build first (drop --no-build)" >&2; exit 1; }
+# A development image (built with -DBLE_DEV_ALLOW_UNBONDED, which accepts an unbonded phone) is never published: devices would update to it by themselves.
+python3 "$HERE/scripts/refuse_dev_image.py" "$BIN" || { echo "error: refusing to upload a development image" >&2; exit 1; }
 
 # --- Step 3: upload the .bin + merge the manifest ---
 GCS_PATH="${GCS_PATH:-harness/esp32/bin/${VER}.bin}"

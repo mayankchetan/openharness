@@ -48,6 +48,10 @@ typedef enum {
 
 const char *ms_mode_name(ms_mode_t mode);   // "usb", "wifi", "ble", "?" for anything else
 
+// A wireless mode is Wi-Fi or BLE: the one ms_step already treats alike (the USB probe, T_ENTER, the busy gate), and, since B8a, the one the panic loop
+// and the glue count as a unit. Any other number (USB, a corrupt byte) is not.
+static inline bool ms_mode_is_wireless(ms_mode_t mode) { return mode == MS_MODE_WIFI || mode == MS_MODE_BLE; }
+
 // ── boot decision (MS section 1 table, first match wins) ───────────────────────────────────────────────────────────────────────────────
 //   1. wl_mode unset                          -> USB
 //   2. stay_wl = 1                            -> wl_mode
@@ -187,12 +191,14 @@ void ms_record_seal(ms_record_t *r, const char *focus, uint8_t flaps);
 bool ms_record_load(const ms_record_t *r, bool reset_is_software, ms_record_view_t *view);
 
 // ── the panic loop (user decision 2026-10-31) ──────────────────────────────────────────────────────────────────────────────────────────────
-// A dial whose Wi-Fi mode crashes at every start would reboot at the speed of a panic and never be reachable by cable. A second RTC record counts
-// the abnormal resets that ended a run in Wi-Fi mode. The boot that sees the MS_CRASH_LIMIT-th takes USB once (the boot decision, mode_glue_core.c)
-// and logs why. The count is held by every reset that is not a crash (a software reset, so the switch back to Wi-Fi does not undo it), and cleared
-// by two things only: a power-on, and MS_CRASH_CLEAR_MS of uptime in Wi-Fi mode (mode_glue_core.c). So after the first three crashes each further
-// crash sends the next boot to USB at once, and a USB dial goes back to Wi-Fi no sooner than MS_T_DWELL_MS: a crash loop becomes one Wi-Fi attempt per
-// dwell, not one per reboot. A power cut that loses the record loses the count (the safe side: the dial then boots as it always did).
+// A dial whose wireless mode crashes at every start would reboot at the speed of a panic and never be reachable by cable. A second RTC record counts
+// the abnormal resets that ended a run in a wireless mode (Wi-Fi or, since B8a, BLE: ONE count for both, so a crash loop in one cannot hide behind a
+// good history in the other, and a dial that crashes alternately in the two still trips). The boot that sees the MS_CRASH_LIMIT-th takes USB once (the
+// boot decision, mode_glue_core.c) and logs why. The count is held by every reset that is not a crash (a software reset, so the switch back to the
+// wireless target does not undo it), and cleared by two things only: a power-on, and MS_CRASH_CLEAR_MS of uptime in a wireless mode
+// (mode_glue_core.c). So after the first three crashes each further crash sends the next boot to USB at once, and a USB dial goes back to its target
+// no sooner than MS_T_DWELL_MS: a crash loop becomes one wireless attempt per dwell, not one per reboot. A power cut that loses the record loses the
+// count (the safe side: the dial then boots as it always did).
 //
 // How a reset looks to this module. The glue maps esp_reset_reason() onto these three (mode_glue.c, reset_class(); the sets are fixed by
 // test_mode_glue_source.py):
@@ -201,7 +207,7 @@ bool ms_record_load(const ms_record_t *r, bool reset_is_software, ms_record_view
 //                     or a debugger; counting them would make three flashes in a row look like three crashes)
 //   MS_RESET_CRASH    everything else: PANIC, INT_WDT, TASK_WDT, WDT, BROWNOUT, UNKNOWN, SDIO, EFUSE, PWR_GLITCH, CPU_LOCKUP, and any reason a later IDF adds
 #define MS_CRASH_LIMIT      3u
-#define MS_CRASH_CLEAR_MS   MS_FLAP_CLEAR_MS   // uptime in Wi-Fi mode that proves the mode works
+#define MS_CRASH_CLEAR_MS   MS_FLAP_CLEAR_MS   // uptime in a wireless mode that proves the mode works
 #define MS_CRASH_MAX        250u               // the count saturates here; a byte never wraps round to "no crashes"
 
 typedef enum {
@@ -214,7 +220,7 @@ typedef enum {
 typedef struct {
     uint32_t magic;
     uint32_t check;
-    uint8_t  crashes;       // abnormal resets that ended a Wi-Fi run, held at MS_CRASH_MAX
+    uint8_t  crashes;       // abnormal resets that ended a wireless (Wi-Fi or BLE) run, held at MS_CRASH_MAX
     uint8_t  mode;          // the ms_mode_t that was running (or being started) when the record was last sealed
     uint8_t  reserved[2];
 } ms_crash_t;
@@ -230,6 +236,6 @@ uint32_t ms_crash_crc(const ms_crash_t *r);
 // crashes is held at MS_CRASH_MAX.
 void ms_crash_seal(ms_crash_t *r, uint8_t crashes, ms_mode_t running);
 // What this boot's reset does to the count. A record that is not believed (magic, checksum, crashes <= MS_CRASH_MAX, mode one of the three) is a count
-// of zero and counts nothing. POWERON: zero. HOLD (or a class outside the enum): the count as it was. CRASH: one more if the run that ended was Wi-Fi,
-// else as it was. `trip` is set only by a CRASH that brings the count to MS_CRASH_LIMIT or more. Writes nothing.
+// of zero and counts nothing. POWERON: zero. HOLD (or a class outside the enum): the count as it was. CRASH: one more if the run that ended was Wi-Fi
+// or BLE, else as it was. `trip` is set only by a CRASH that brings the count to MS_CRASH_LIMIT or more. Writes nothing.
 void ms_crash_boot(const ms_crash_t *r, ms_reset_t cls, ms_crash_view_t *out);

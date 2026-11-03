@@ -106,7 +106,7 @@ ms_mode_t mode_glue_boot(void)
     mode_record_crash_seal(s_boot.crashes, s_boot.mode);
     s_crash_usb = s_boot.crash_usb;
     s_crashes = s_boot.crashes;
-    if (s_crash_usb) ESP_LOGW(TAG, "Wi-Fi mode crashed %u times; started in USB", (unsigned)s_crashes);
+    if (s_crash_usb) ESP_LOGW(TAG, "Wireless mode crashed %u times; started in USB", (unsigned)s_crashes);
     if (s_boot.write_boot_usb && !config_save_boot_usb(s_boot.boot_usb_new))
         ESP_LOGW(TAG, "boot_usb could not be stored; the next boot may pick the other mode (the flap cap bounds it)");
     snprintf(s_focus, sizeof s_focus, "%s", s_boot.focus);
@@ -197,7 +197,7 @@ static void op_clear_crashes(void *ctx)
     (void)ctx;
     mode_record_crash_clear();
     s_crashes = 0;
-    ESP_LOGI(TAG, "10 minutes up in Wi-Fi mode: the crash count is cleared");
+    ESP_LOGI(TAG, "10 minutes up in a wireless mode: the crash count is cleared");
 }
 
 // A refused restart: the sequence had written the target's boot_usb and a raised flap count. Put both back, so a reset that comes for another reason
@@ -322,7 +322,7 @@ static void mode_sw_task(void *arg)
             // The panic loop's reason, again: the boot line may have gone out before a daemon was listening.
             if (s_crash_usb) {
                 s_crash_usb = false;
-                ESP_LOGW(TAG, "Wi-Fi mode crashed %u times; started in USB", (unsigned)s_crashes);
+                ESP_LOGW(TAG, "Wireless mode crashed %u times; started in USB", (unsigned)s_crashes);
             }
         }
 
@@ -338,11 +338,12 @@ static void mode_sw_task(void *arg)
 
 void mode_glue_start(ms_mode_t running)
 {
-    s_running = running == MS_MODE_WIFI ? MS_MODE_WIFI : MS_MODE_USB;
-    // A dial that RUNS Wi-Fi was told by the boot decision that Wi-Fi is a target, so it starts believing that; the first loop re-reads (and a read
-    // that says "no target" has to be confirmed like any other), so one failed read of NVS here cannot send it to USB (review finding 2).
-    mg_init(&s_mg, s_running, s_boot.flaps, s_running == MS_MODE_WIFI ? MS_WL_WIFI : config_load_wl_effective(), config_load_stay_wl());
-    if (s_running == MS_MODE_WIFI) atomic_store(&s_reload, true);
+    s_running = ms_mode_is_wireless(running) ? running : MS_MODE_USB;
+    // A dial that RUNS a wireless mode was told by the boot decision that this mode is a target, so it starts believing that (the stored byte is the
+    // mode number); the first loop re-reads (and a read that says "no target" has to be confirmed like any other), so one failed read of NVS here
+    // cannot send it to USB (review finding 2).
+    mg_init(&s_mg, s_running, s_boot.flaps, ms_mode_is_wireless(s_running) ? (uint8_t)s_running : config_load_wl_effective(), config_load_stay_wl());
+    if (ms_mode_is_wireless(s_running)) atomic_store(&s_reload, true);
     atomic_store(&s_keep_wifi, s_mg.stay_wl);
     mg_note_crashes(&s_mg, s_crashes);
     mode_record_crash_seal(s_crashes, s_running);   // the mode that really started (the radio may not have come up: then USB, and a crash is not Wi-Fi's)

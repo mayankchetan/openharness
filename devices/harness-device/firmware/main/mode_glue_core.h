@@ -10,7 +10,9 @@
 //   the USB probe is installed exactly while ms_out_t.probe_wanted, and uninstalled when it falls
 //   when ms_out_t.flaps_cleared: re-seal the record at zero
 //   the panic loop (mode_switch.h): the glue reads the crash record before mg_boot() and hands its answer in; mg_step() clears the count after
-//     MS_CRASH_CLEAR_MS of uptime in Wi-Fi mode
+//     MS_CRASH_CLEAR_MS of uptime in a wireless mode (Wi-Fi or BLE: one count for both)
+//   a BLE result (B8a): mg_boot() can now answer MS_MODE_BLE. Until the BLE link exists (B4b) app_main starts nothing for it and the dial runs USB in
+//     that boot, exactly as when a radio does not come up; config_load_wl_effective() cannot return 2 before B6, so no dial reaches it yet.
 #pragma once
 
 #include <stdbool.h>
@@ -20,24 +22,24 @@
 
 // ── boot ────────────────────────────────────────────────────────────────────────────────────────────
 typedef struct {
-    uint8_t  wl_effective;      // config_load_wl_effective(): 1 = Wi-Fi is a usable target, 0 = none. Any other number is a mode with no transport.
+    uint8_t  wl_effective;      // config_load_wl_effective(): 1 = Wi-Fi is a usable target, 2 = BLE is, 0 = none. Any other number is a mode with no transport.
     bool     stay_wl;           // config_load_stay_wl()
     bool     boot_usb;          // config_load_boot_usb()
     bool     sof;               // usb_serial_jtag_is_connected(), read no earlier than MS_SOF_SETTLE_MS after the reset
     uint32_t sof_read_ms;       // the uptime of that read
     bool     record_ok;         // mode_record_boot() trusted the record (a software reset, magic and checksum right)
     ms_record_view_t record;    // its contents (zeros when not trusted)
-    bool     crash_trip;        // mode_record_crash_boot(): this boot follows the MS_CRASH_LIMIT-th abnormal reset in a row in Wi-Fi mode
+    bool     crash_trip;        // mode_record_crash_boot(): this boot follows the MS_CRASH_LIMIT-th abnormal reset in a row in a wireless mode
     uint8_t  crashes;           // the crash count after this boot's reset
 } mg_boot_in_t;
 
 typedef struct {
-    ms_mode_t mode;             // MS_MODE_USB or MS_MODE_WIFI. Never BLE: no transport exists, so it would be a dial that cannot start.
+    ms_mode_t mode;             // MS_MODE_USB, MS_MODE_WIFI or MS_MODE_BLE. The glue starts a wireless mode only if its link comes up, else USB.
     bool      write_boot_usb;   // store boot_usb_new in NVS (only when it differs from the stored value)
     bool      boot_usb_new;
     bool      sof_ignored;      // the SOF reading was too early to use (the glue waits, so this should never be true)
-    bool      unsupported;      // wl_effective named a mode this firmware cannot start; the dial boots USB
-    bool      crash_usb;        // the panic loop took USB although the table said Wi-Fi: the glue says why ("Wi-Fi mode crashed N times; started in USB")
+    bool      unsupported;      // wl_effective named a mode this firmware cannot start (not 0, 1 or 2); the dial boots USB
+    bool      crash_usb;        // the panic loop took USB although the table said wireless: the glue says why ("Wireless mode crashed N times; started in USB")
     uint8_t   crashes;          // the crash count to seal (the input's)
     uint8_t   flaps;            // from the record, 0 if untrusted
     char      focus[MS_FOCUS_MAX];   // the agent to put back on the carousel, "" for none
@@ -90,19 +92,20 @@ typedef struct {
     bool       probe_on;
     bool       notice_on;
     bool       done;                 // the restart has been asked for: nothing more is done (until a refused restart gives the dial back)
-    uint8_t    crashes;              // the crash count; zero after MS_CRASH_CLEAR_MS in Wi-Fi mode
+    uint8_t    crashes;              // the crash count; zero after MS_CRASH_CLEAR_MS in a wireless mode
     uint8_t    refusals;             // refused restarts in a row for the switch that is due; zero when none is due or one went
     uint64_t   retry_at;             // uptime before which the sequence is not started again (valid while refusals > 0)
     bool       held_said;            // the hold of the switch that is due has been reported (ops->held) ...
     uint32_t   held_busy;            // ... with this busy mask,
     bool       held_asleep;          // ... and this asleep flag
-    bool       wl_pending;           // a read said "no wireless target" while Wi-Fi runs; waiting for a second one (mg_apply_settings)
+    bool       wl_pending;           // a read said "no wireless target" while a wireless mode runs; waiting for a second one (mg_apply_settings)
     uint64_t   wl_pending_at;        // uptime of that first read
 } mg_t;
 
 // A drop to "no target" while a wireless mode runs is the user's pick of USB, which reboots the dial at once. The value comes from NVS, and a read that
 // lands inside a config_net_set_mode write (marker removed, commit, marker written back) says "no target" for a few milliseconds. So the drop is acted
-// on only when a second read, at least MG_CONFIRM_MS after the first, says the same. 600 ms is longer than any one write window (two commits, tens
+// on only when a second read, at least MG_CONFIRM_MS after the first, says the same. (A change from one wireless target to the other is a pick of a
+// mode, not a lost read: applied at once.) 600 ms is longer than any one write window (two commits, tens
 // of milliseconds) and two steps of the 250 ms task; the cost to the user is that much delay on a pick that takes a reboot anyway.
 #define MG_CONFIRM_MS 600u
 

@@ -64,11 +64,16 @@ i_net = app_main.index('net_link_start()')
 i_start_link = app_main.index('cable_client_start_with(')
 i_focus = app_main.index('mode_glue_restore_focus()')
 i_task = app_main.index('mode_glue_start(')
-assert i_countdown < i_boot < i_net < i_start_link < i_focus < i_task, 'order: factory reset, boot decision, radio, link, focus, task'
-assert re.search(r'const bool wifi_mode = mode_glue_boot\(\) == MS_MODE_WIFI && net_link_start\(\);', app_main), \
+assert i_countdown < i_boot < i_net < app_main.index('ble_link_start()') < i_start_link < i_focus < i_task, 'order: factory reset, boot decision, radio, link, focus, task'
+assert re.search(r'const ms_mode_t boot_mode = mode_glue_boot\(\);', app_main), 'one boot decision'
+assert re.search(r'const bool wifi_mode = boot_mode == MS_MODE_WIFI && net_link_start\(\);', app_main), \
     'net_link_start() runs only when the boot decision is Wi-Fi (a dial that decided USB never starts the radio)'
-assert re.search(r'mode_glue_start\(wifi_mode \? MS_MODE_WIFI : MS_MODE_USB\);', app_main), 'the task gets the mode that really started'
-assert app.count('net_link_start(') == 1 and app.count('mode_glue_boot(') == 1 and app.count('mode_glue_start(') == 1
+assert re.search(r'const bool ble_mode = boot_mode == MS_MODE_BLE && ble_link_start\(\);', app_main), \
+    'ble_link_start() runs only when the boot decision is Bluetooth (B4b); on an image without NimBLE it is the inline stub that returns false'
+assert 'wifi_mode ? net_link_xport() : ble_mode ? ble_link_xport() : cable_xport_usb()' in app_main, 'the link is the transport of the mode that started'
+assert re.search(r'mode_glue_start\(wifi_mode \? MS_MODE_WIFI : ble_mode \? MS_MODE_BLE : MS_MODE_USB\);', app_main), 'the task gets the mode that really started'
+assert app.count('net_link_start(') == 1 and app.count('ble_link_start(') == 1 and app.count('mode_glue_boot(') == 1 and app.count('mode_glue_start(') == 1
+assert '#include "ble_link.h"' in text('app_main.c')
 # the gallery boot (a diagnostic image) has no mode switch
 assert 'mode_glue' not in body(app, 'gallery_main')
 # nothing but app_main calls the three entry points
@@ -90,7 +95,7 @@ assert boot.index('mode_record_boot(') < boot.index('mg_boot('), 'the record is 
 assert 'mode_record_crash_boot(reset_class(esp_reset_reason()), &in.crashes)' in boot and boot.index('mode_record_crash_boot(') < boot.index('mg_boot(')
 assert 'in.crash_trip = mode_record_crash_boot(' in boot, 'the answer of the crash record is the decision input'
 assert 'mode_record_crash_seal(s_boot.crashes, s_boot.mode)' in boot and boot.index('mg_boot(') < boot.index('mode_record_crash_seal('), 'sealed with the decided mode'
-assert 'Wi-Fi mode crashed %u times; started in USB' in raw_glue
+assert 'Wireless mode crashed %u times; started in USB' in raw_glue and 'Wi-Fi mode crashed' not in raw_glue, 'the panic loop counts Wi-Fi and BLE runs alike: the message does not say Wi-Fi'
 assert 's_boot.crash_usb' in boot
 assert 'config_load_wl_effective()' in boot and 'config_load_stay_wl()' in boot and 'config_load_boot_usb()' in boot
 assert 'config_save_boot_usb(s_boot.boot_usb_new)' in boot and 's_boot.write_boot_usb' in boot, 'boot_usb is rewritten only when the plan says so'
@@ -117,7 +122,7 @@ assert re.search(r'if \(ops->restart && !ops->restart\(ops->ctx, out\.target\)\)
     'a refused restart: undo with the value NVS held before the store, then done = false'
 assert step.index('ops->load_boot_usb(') < step.index('ops->store_boot_usb('), 'W15e: the old boot_usb is read before it is overwritten'
 assert re.search(r'if \(g->refusals && w->now_ms < g->retry_at\) return;', step) and 'mg_retry_delay_ms(g->refusals)' in step, 'W15e: a refusal holds the next attempt back (behaviour: test_mode_glue.c)'
-assert 'g->ms.mode == MS_MODE_WIFI' in step and 'MS_CRASH_CLEAR_MS' in step and 'ops->clear_crashes(' in step, 'ten minutes up in Wi-Fi clear the crash count; USB time does not'
+assert 'ms_mode_is_wireless(g->ms.mode)' in step and 'MS_CRASH_CLEAR_MS' in step and 'ops->clear_crashes(' in step, 'ten minutes up in a wireless mode (Wi-Fi or BLE) clear the crash count; USB time does not'
 # a probe that did not install is tried again: a dial that cannot probe cannot come back to USB
 task = body(glue, 'mode_sw_task')
 assert 'PROBE_RETRY_MS' in task and 'usb_probe_running()' in task and 'usb_probe_start(' in task
@@ -176,20 +181,47 @@ task_src = body(glue, 'mode_sw_task')
 assert re.search(r'atomic_exchange\(&s_reload, false\) \|\| s_mg\.wl_pending\) \{\s*mg_apply_settings\(&s_mg, config_load_wl_effective\(\), config_load_stay_wl\(\), now\);\s*atomic_store\(&s_keep_wifi, s_mg\.stay_wl\);\s*\}', task_src)
 assert 'mg_set_settings(' not in glue, 'the glue never applies a read of wl_mode without the confirmation'
 start_src = body(glue, 'mode_glue_start')
-assert 's_running == MS_MODE_WIFI ? MS_WL_WIFI : config_load_wl_effective()' in start_src and 'atomic_store(&s_reload, true)' in start_src
-# no BLE anywhere in the glue: no transport exists for it
-for name in ('mode_glue.c', 'mode_glue_core.c', 'app_main.c', 'usb_probe.c'):
+# B8a: a wireless mode that really started (Wi-Fi now, BLE once B4b starts it) is believed to be a target; USB asks NVS. The glue passes the mode through
+# instead of collapsing everything but Wi-Fi to USB.
+assert 'ms_mode_is_wireless(running) ? running : MS_MODE_USB' in start_src
+assert 'ms_mode_is_wireless(s_running) ? (uint8_t)s_running : config_load_wl_effective()' in start_src
+assert 'if (ms_mode_is_wireless(s_running)) atomic_store(&s_reload, true)' in start_src
+assert 's_running == MS_MODE_WIFI' not in start_src, 'no Wi-Fi-only test left in mode_glue_start'
+assert 'ms_mode_is_wireless' in code('mode_switch.h') and 'MS_MODE_BLE' in code('mode_switch.h')
+# Bluetooth is named by the pure core and the mode module only. Everything that would START it (app_main.c, B4b), read its transport (usb_probe.c) or store
+# its target (config_store.c, B6) still does not: until those land no dial can reach a Bluetooth boot, and a BLE boot result falls back to USB.
+core = code('mode_glue_core.c')
+assert 'MS_WL_BLE' in core and 'wl != MS_WL_BLE' in body(core, 'mg_boot'), 'the boot decision accepts the Bluetooth target'
+assert 'MS_MODE_WIFI' not in body(core, 'mg_boot') and 'MS_MODE_WIFI' not in body(core, 'mg_step'), 'no Wi-Fi-only test left in the boot or the step'
+assert 'MS_MODE_WIFI' not in body(core, 'mg_apply_settings') and 'MS_WL_WIFI ?' not in core, 'the settings path keeps either wireless target'
+# app_main.c starts it since B4b; the glue (mode_glue.c) is mode-agnostic, and the USB probe has no transport of its own to name
+assert 'MS_MODE_BLE' in code('app_main.c')
+for name in ('mode_glue.c', 'usb_probe.c'):
     assert 'MS_MODE_BLE' not in code(name) and 'MS_WL_BLE' not in code(name), f'{name} names Bluetooth'
 assert 'MS_WL_BLE' not in code('config_store.c') and 'MS_MODE_BLE' not in code('config_store.c')
 
 # ── 3. no way to strand a dial ──────────────────────────────────────────────────────────────────────
 store = code('config_store.c')
-assert re.search(r'config_net_err_t config_net_check_mode\(long mode\) \{ return \(mode == 0 \|\| mode == 1\) \? CFG_NET_OK : CFG_NET_E_MODE; \}', store), \
-    'wl_mode 2 (Bluetooth) cannot be stored: net.mode and net.set refuse it'
-assert 'mode != 0 && mode != 1' in body(store, 'config_net_check') and 'mode != 0 && mode != 1' in body(store, 'config_net_set_mode')
-assert 'out->mode = mode == 1 ? 1 : 0;' in body(store, 'config_net_load') and 'out->mode = mode == 1 ? 1 : 0;' in body(store, 'config_net_info'), \
-    'whatever byte is stored, only 1 reads as Wi-Fi'
-assert 'info.saved && info.mode == 1' in body(store, 'config_load_wl_effective')
+# B6: wl_mode 2 (the phone) is storable, but only with the phone settings: the full Wi-Fi form still refuses it, and config_net_set_mode(2) needs bl_ver and a key.
+assert re.search(r'config_net_err_t config_net_check_mode\(long mode\) \{ return \(mode == 0 \|\| mode == 1 \|\| mode == 2\) \? CFG_NET_OK : CFG_NET_E_MODE; \}', store)
+assert 'mode != 0 && mode != 1' in body(store, 'config_net_check'), 'net.set (the Wi-Fi form) refuses mode 2'
+mode_set = body(store, 'config_net_set_mode')
+assert 'config_net_check_mode(mode)' in mode_set and 'mode == 2 ? info.ble' in mode_set and 'mode == 1 ? info.saved' in mode_set, 'mode 2 needs the phone settings, 1 the Wi-Fi settings'
+assert len(re.findall(r'nvs_set_u8\(h, K_WL_MODE', store)) == 2, 'wl_mode is written by config_net_set and config_net_set_mode, and by nothing else'
+assert 'nvs_set_u8(h, K_WL_MODE' in body(store, 'config_net_set') and 'nvs_set_u8(h, K_WL_MODE' in mode_set
+assert 'out->mode = mode == 1 ? 1 : 0;' in body(store, 'config_net_load'), 'whatever byte is stored, only 1 loads as Wi-Fi'
+assert 'out->mode = (mode == 1 && wifi) ? 1 : (mode == 2 && ble) ? 2 : 0;' in body(store, 'config_net_info'), 'each mode reads only over its own whole settings'
+eff = body(store, 'config_load_wl_effective')
+assert 'info.mode == 1' in eff and 'info.mode == 2' in eff and 'config_ble_load(&b)' in eff
+# the phone settings are written by one function, whose marker is last and first out, and which the cable handler reaches only through the store task
+ble_set = body(store, 'config_net_set_ble')
+assert ble_set.index('markers_off(') < ble_set.index('nvs_set_blob(h, K_WL_KEY') < ble_set.index('markers_on('), 'bl_ver comes off first and goes back last'
+assert len(re.findall(r'nvs_set_u8\(h, K_BL_VER', store)) == 1 and 'nvs_set_u8(h, K_BL_VER, BL_VERSION)' in body(store, 'markers_on'), 'bl_ver is written in one place'
+clear = body(store, 'config_net_clear')
+assert 'K_BL_VER' in clear and clear.index('K_BL_VER') < clear.index('K_WL_KEY'), 'a clear takes bl_ver before the key'
+for path in main.rglob('*.c'):
+    if path.name not in ('config_store.c', 'cable_client.c'):
+        assert 'config_net_set_ble(' not in path.read_text(errors='replace'), f'{path.name} writes the phone key'
 assert 'return ok && v == 1;' in body(store, 'flag_load')
 for path in main.rglob('*.c'):
     src = path.read_text(errors='replace')

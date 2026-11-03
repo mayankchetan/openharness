@@ -45,7 +45,7 @@ assert handle_net.index('cable_client_supports(CABLE_FEATURE_NET)') < first_call
 assert not re.search(r'\bnvs_\w+', net_block)
 allowed_in_handle_net = {'config_net_key_decode', 'config_net_check', 'config_net_check_host', 'config_net_check_mode', 'config_net_check_key', 'config_net_err_name', 'config_net_err_t'}
 assert set(re.findall(r'\bconfig_net_\w+', handle_net)) <= allowed_in_handle_net, set(re.findall(r'\bconfig_net_\w+', handle_net))
-writers = {'config_net_set', 'config_net_set_key', 'config_net_set_host', 'config_net_set_mode', 'config_net_clear'}
+writers = {'config_net_set', 'config_net_set_ble', 'config_net_set_key', 'config_net_set_host', 'config_net_set_mode', 'config_net_clear'}
 for name in writers:
     assert not re.search(r'\b' + name + r'\(', handle_net), name
     assert re.search(r'\b' + name + r'\(', net_store), name
@@ -109,8 +109,17 @@ assert frame.index('handle_message(root)') < frame.index('cable_link_scrub_paylo
 assert len(re.findall(r'\breturn;', frame[frame.index('carries_secret = false'):])) == 0, 'no way out of the JSON path skips the scrub'
 assert 'net_zero(key, sizeof key)' in handle_net   # the reader's own copy of the key
 
-# 6. The hello offers net on the cable only.
+# 6. The hello offers net on the cable only, and ble (an image with the BLE link) on the cable only.
 assert re.search(r'if \(cable_link_transport\(\) == CABLE_XPORT_USB\) msg_string\(&root, "net", "v1"\);', CLIENT)
+assert re.search(r'#ifdef DEVICE_BLE_LINK\n[^\n]*\n\s*if \(cable_link_transport\(\) == CABLE_XPORT_USB\) msg_string\(&root, "ble", "v1"\);\n#endif', CLIENT)
+
+# 7. B6: the phone-mode forms (key-only net.set, net.mode 2) need the image AND the daemon's "ble"; the refusal comes before any write.
+assert re.search(r'static bool ble_provisioning_allowed\(void\)\s*\{\s*return cable_ble_link_built\(\) && cable_client_supports\(CABLE_FEATURE_BLE\);\s*\}', CLIENT)
+assert 'feature_refused = !ble_provisioning_allowed();' in handle_net and 'feature_refused = err == CFG_NET_OK && mode == 2 && !ble_provisioning_allowed();' in handle_net
+assert handle_net.index('feature_refused ? "feature"') > handle_net.index('feature_refused = !ble_provisioning_allowed()')
+assert handle_net.index('feature_refused ? "feature"') < handle_net.index('atomic_exchange(&s_net_busy, true)'), 'refused before the line is claimed'
+assert "case 'b': err = config_net_set_ble(r->key); break;" in net_store
+assert not re.search(r'msg_\w+\(&root, "(key|pass)"', net_reply) and 'msg_bool(&root, "ble", info.ble)' in net_reply
 
 # ── the real handler ─────────────────────────────────────────────────────────────────────────────────
 
@@ -207,7 +216,7 @@ code += re.search(r'#define NET_STORE_STACK[^\n]*\n', CLIENT)[0]
 code += re.search(r'typedef struct \{[^}]*\} net_request_t;\n', CLIENT)[0]
 code += re.search(r'static EXT_RAM_BSS_ATTR net_request_t s_net_req;[^\n]*\n', CLIENT)[0]
 code += re.search(r'static atomic_bool\s+s_net_busy;\n', CLIENT)[0]
-for name in ['cable_client_supports', 'send_json', 'msg', 'msg_check', 'msg_string', 'msg_number', 'msg_bool',
+for name in ['cable_client_supports', 'ble_provisioning_allowed', 'send_json', 'msg', 'msg_check', 'msg_string', 'msg_number', 'msg_bool',
              'net_zero', 'net_scrub', 'net_text', 'net_whole', 'net_reply', 'net_store_task', 'handle_net']:
     code += function(name)
 code += r'''
@@ -354,7 +363,8 @@ static void test_the_other_messages(void)
     r = ask("{\"t\":\"net.host\",\"host\":\"10.0.0.2\",\"port\":19000}");
     assert(ok_of(r) && !strcmp(cJSON_GetObjectItemCaseSensitive(r, "host")->valuestring, "10.0.0.2") && cJSON_GetObjectItemCaseSensitive(r, "port")->valueint == 19000);
     // mode
-    refused("{\"t\":\"net.mode\",\"mode\":2}", "mode");
+    refused("{\"t\":\"net.mode\",\"mode\":2}", "feature");   // B6: 2 is the phone; without "ble" in the welcome the dial refuses it before any write
+    refused("{\"t\":\"net.mode\",\"mode\":3}", "mode");
     refused("{\"t\":\"net.mode\"}", "mode");
     r = ask("{\"t\":\"net.mode\",\"mode\":0}");
     assert(ok_of(r) && cJSON_GetObjectItemCaseSensitive(r, "mode")->valueint == 0);
@@ -386,7 +396,7 @@ static void test_the_mode_switch_is_told_after_every_write(void)
     assert(ok_of(ask("{\"t\":\"net.mode\",\"mode\":0}")) && glue_told == 4 && glue_sends_at_told == 0);
     assert(ok_of(ask("{\"t\":\"net.clear\"}")) && glue_told == 5 && glue_sends_at_told == 0);
     // reads and refusals write nothing: no call
-    refused("{\"t\":\"net.mode\",\"mode\":2}", "mode");
+    refused("{\"t\":\"net.mode\",\"mode\":2}", "feature");
     refused("{\"t\":\"net.key\",\"key\":\"???\"}", "key");
     assert(ok_of(ask("{\"t\":\"net.get\"}")) && glue_told == 5);
     // a store that fails: the write may have gone half way, so the glue is told to read what NVS holds
@@ -563,6 +573,116 @@ static void test_every_write_is_a_task_and_nothing_else_is(void)
     assert(ok_of(ask(SET)));
 }
 
+#ifdef DEVICE_BLE_LINK
+// ── B6: the phone-mode forms (an image with the BLE link, and a daemon that listed "ble") ─────────────────────────────────────────────────
+#define KEY_ONLY "{\"t\":\"net.set\",\"id\":11,\"key\":\"" KEY_B64 "\"}"
+static bool ble_of(const cJSON *r) { const cJSON *b = cJSON_GetObjectItemCaseSensitive(r, "ble"); assert(cJSON_IsBool(b)); return cJSON_IsTrue(b); }
+static int mode_of(const cJSON *r) { const cJSON *m = cJSON_GetObjectItemCaseSensitive(r, "mode"); assert(cJSON_IsNumber(m)); return m->valueint; }
+static void with_ble(void) { fresh(); atomic_store(&s_features, CABLE_FEATURE_NET | CABLE_FEATURE_BLE); }
+
+static void test_ble_key_only_form_and_mode_2(void)
+{
+    with_ble();
+    // net.get on a dial with nothing: ble false, still no mode
+    cJSON *r = ask("{\"t\":\"net.get\"}");
+    assert(ok_of(r) && !saved_of(r) && !ble_of(r) && !cJSON_GetObjectItemCaseSensitive(r, "mode"));
+    // mode 2 with no phone settings: the task refuses it (it needs NVS)
+    refused("{\"t\":\"net.mode\",\"mode\":2}", "not_provisioned");
+    // the key-only form
+    cJSON *root = NULL;
+    r = ask_keep(KEY_ONLY, &root);
+    assert(ok_of(r) && !err_of(r) && !saved_of(r) && ble_of(r) && mode_of(r) == 0);
+    assert(cJSON_GetObjectItemCaseSensitive(r, "id")->valueint == 11);
+    assert(!cJSON_GetObjectItemCaseSensitive(r, "key") && !strstr(wire, KEY_B64) && !cJSON_GetObjectItemCaseSensitive(r, "ssid"));
+    assert(cJSON_GetObjectItemCaseSensitive(root, "key")->valuestring[0] == 0);          // scrubbed like any key
+    cJSON_Delete(root);
+    config_ble_t b;
+    assert(config_ble_load(&b) && b.key[1] == 1 && b.key[31] == 31);
+    config_net_t n;
+    assert(!config_net_load(&n) && !host_nvs_has("wl_ssid") && host_nvs_has("bl_ver"));
+    assert(slot_is_clear() && !atomic_load(&s_net_busy));
+    // mode 2, then net.get tells it
+    r = ask("{\"t\":\"net.mode\",\"mode\":2}");
+    assert(ok_of(r) && ble_of(r) && mode_of(r) == 2 && !saved_of(r));
+    r = ask("{\"t\":\"net.get\"}");
+    assert(ok_of(r) && ble_of(r) && mode_of(r) == 2);
+    assert(config_load_wl_effective() == 2);
+    // Wi-Fi settings alongside: both held
+    assert(ok_of(ask(SET)));
+    r = ask("{\"t\":\"net.get\"}");
+    assert(saved_of(r) && ble_of(r));
+    // net.clear forgets both
+    r = ask("{\"t\":\"net.clear\"}");
+    assert(ok_of(r) && !saved_of(r) && !ble_of(r) && !host_nvs_has("bl_ver") && wl_held() == 0 && config_load_wl_effective() == 0);
+    // a mode 2 over Wi-Fi settings alone is refused by the task
+    assert(ok_of(ask(SET)));
+    refused("{\"t\":\"net.mode\",\"mode\":2}", "not_provisioned");
+}
+
+static void test_ble_forms_refusals(void)
+{
+    // bad keys
+    with_ble();
+    refused("{\"t\":\"net.set\",\"key\":\"not base64\"}", "key");
+    refused("{\"t\":\"net.set\"}", "key");
+    refused("{\"t\":\"net.set\",\"key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"}", "key");   // 32 zero bytes
+    assert(host_nvs_count() == 0);
+    // a Wi-Fi form with a field missing stays a Wi-Fi form and is named by its first bad field, key-only or not
+    refused("{\"t\":\"net.set\",\"key\":\"" KEY_B64 "\",\"mode\":1}", "ssid");
+    refused("{\"t\":\"net.set\",\"key\":\"" KEY_B64 "\",\"port\":18480}", "ssid");
+    refused("{\"t\":\"net.set\",\"key\":\"" KEY_B64 "\",\"ssid\":\"" SSID "\"}", "pass");
+    assert(host_nvs_count() == 0);
+    // without the daemon's "ble", nothing is touched, whatever else the welcome said
+    for (unsigned features = 0; features < 2048; features++) {
+        if (!(features & CABLE_FEATURE_NET) || (features & CABLE_FEATURE_BLE)) continue;
+        fresh();
+        atomic_store(&s_features, features);
+        refused(KEY_ONLY, "feature");
+        refused("{\"t\":\"net.mode\",\"mode\":2}", "feature");
+        assert(host_nvs_count() == 0 && tasks_created == 0);
+    }
+    // "ble" without "net" is not enough: net.* is gated by net first
+    fresh();
+    atomic_store(&s_features, CABLE_FEATURE_BLE);
+    refused(KEY_ONLY, "feature");
+    assert(host_nvs_count() == 0);
+    // off the cable, nothing is touched: the transport check comes first
+    for (cable_xport_kind_t kind = CABLE_XPORT_WIFI; kind <= CABLE_XPORT_BLE; kind++) {
+        with_ble();
+        s_transport = kind;
+        refused(KEY_ONLY, "transport");
+        refused("{\"t\":\"net.mode\",\"mode\":2}", "transport");
+        assert(host_nvs_count() == 0 && tasks_created == 0);
+    }
+    // the other Wi-Fi-only modes are unaffected by the BLE feature
+    with_ble();
+    refused("{\"t\":\"net.mode\",\"mode\":1}", "not_provisioned");
+    // the form's task: it runs in the store task like every write, and tells the mode switch
+    with_ble();
+    defer_tasks = true;
+    sends = 0;
+    glue_told = 0;
+    fire(KEY_ONLY);
+    assert(tasks_created == 1 && sends == 0 && s_net_req.op == 'b' && host_nvs_count() == 0);
+    run_pending_task();
+    assert(sends == 1 && glue_told == 1 && slot_is_clear() && host_nvs_has("bl_ver"));
+    // and nothing of the key was logged
+    assert(!strstr(s_log, KEY_B64) && !strstr(s_log, "AAECAwQF"));
+}
+#else
+// An image without the BLE link: even a daemon that lists "ble" gets nothing from the phone-mode forms, and nothing is written.
+static void test_an_image_without_ble_refuses_the_phone_forms(void)
+{
+    fresh();
+    atomic_store(&s_features, CABLE_FEATURE_NET | CABLE_FEATURE_BLE);
+    refused("{\"t\":\"net.set\",\"key\":\"" KEY_B64 "\"}", "feature");
+    refused("{\"t\":\"net.mode\",\"mode\":2}", "feature");
+    assert(host_nvs_count() == 0 && tasks_created == 0 && !host_nvs_has("bl_ver"));
+    // Wi-Fi is untouched
+    assert(ok_of(ask(SET)) && wl_held() == 7);
+}
+#endif
+
 static bool is_zeroes(const char *s) { return !s || !s[0]; }
 
 static void test_secrets_are_scrubbed_on_every_exit(void)
@@ -679,6 +799,12 @@ int main(void)
     test_the_decoders_copy_of_a_frame_is_overwritten();
     test_json_guard();
     test_nothing_is_logged();
+#ifdef DEVICE_BLE_LINK
+    test_ble_key_only_form_and_mode_2();
+    test_ble_forms_refusals();
+#else
+    test_an_image_without_ble_refuses_the_phone_forms();
+#endif
     cJSON_Delete(reply);
     puts("net.*: set, get, clear, mode, key, host; USB only; feature gated; field names, no values; guard in front PASS (offline)");
     return 0;
@@ -691,7 +817,9 @@ with tempfile.TemporaryDirectory(prefix='harness-cable-net-') as folder:
     flags = ['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g',
              '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds')]
     subprocess.run(flags + ['-Wno-deprecated-declarations', '-c', str(JSON_DIR / 'cJSON.c'), '-o', str(out / 'cJSON.o')], check=True)
-    subprocess.run(flags + ['-I', str(JSON_DIR), '-I', str(MAIN), '-I', str(HERE / 'host_stubs'), '-I', str(HERE / 'host_nvs'),
-                            str(out / 'net.c'), str(MAIN / 'config_store.c'), str(MAIN / 'cable_json_guard.c'), str(HERE / 'host_nvs/host_nvs.c'),
-                            str(out / 'cJSON.o'), '-lm', '-o', str(out / 'net')], check=True)
-    subprocess.run([str(out / 'net')], check=True)
+    # Two images: the default one (no BLE link) and one built with DEVICE_BLE_LINK, which is where the phone-mode forms exist.
+    for name, extra in (('net', []), ('net_ble', ['-DDEVICE_BLE_LINK=1'])):
+        subprocess.run(flags + extra + ['-I', str(JSON_DIR), '-I', str(MAIN), '-I', str(HERE / 'host_stubs'), '-I', str(HERE / 'host_nvs'),
+                                        str(out / 'net.c'), str(MAIN / 'config_store.c'), str(MAIN / 'cable_json_guard.c'), str(HERE / 'host_nvs/host_nvs.c'),
+                                        str(out / 'cJSON.o'), '-lm', '-o', str(out / name)], check=True)
+        subprocess.run([str(out / name)], check=True)

@@ -24,6 +24,7 @@
 #include "config_store.h"
 #include "fw_update.h"
 #include "last_words.h"
+#include "ble_link.h"
 #include "mode_glue.h"
 #include "net_link.h"
 #include "board/board.h"
@@ -330,8 +331,13 @@ void app_main(void)
     // factory-reset countdown above (which can wipe what it reads) and long after the 20 ms the SOF flag needs to be believed. If the answer is Wi-Fi,
     // net_link_start() brings the radio up and the link runs over Wi-Fi; if the radio does not come up it returns false having started nothing, and the
     // link is the USB cable in this same boot. A change of mode is a reboot, and the mode switch task started below asks for it.
-    const bool wifi_mode = mode_glue_boot() == MS_MODE_WIFI && net_link_start();
-    if (!cable_client_start_with(wifi_mode ? net_link_xport() : cable_xport_usb())) {
+    // The same for Bluetooth (the phone mode, B4b): ble_link_start() runs only when the decision is Bluetooth, brings the BLE host up and starts the link
+    // task; on an image without NimBLE (no DEVICE_BLE_LINK) it is an inline stub that returns false and the decision falls back to USB, as for a radio that
+    // does not come up.
+    const ms_mode_t boot_mode = mode_glue_boot();
+    const bool wifi_mode = boot_mode == MS_MODE_WIFI && net_link_start();
+    const bool ble_mode = boot_mode == MS_MODE_BLE && ble_link_start();
+    if (!cable_client_start_with(wifi_mode ? net_link_xport() : ble_mode ? ble_link_xport() : cable_xport_usb())) {
         // A dial with no link still runs, still lights up, and still says so on screen. A device stuck in a
         // boot loop is not diagnosable from across the room; one showing "Not connected" is.
         ESP_LOGE(TAG, "cable link did not start — the dial will show no machine");
@@ -339,7 +345,7 @@ void app_main(void)
     // After an automatic switch: the agent the dial was showing (held until the roster arrives), and then the task that decides the next switch, told
     // the mode that REALLY started. The UI exists (ui_init above) and the link is up, which is what the busy gate and the daemon-byte clock read.
     mode_glue_restore_focus();
-    mode_glue_start(wifi_mode ? MS_MODE_WIFI : MS_MODE_USB);
+    mode_glue_start(wifi_mode ? MS_MODE_WIFI : ble_mode ? MS_MODE_BLE : MS_MODE_USB);
 
     // If this boot is a freshly installed image, confirm it HERE and nowhere earlier — see fw_mark_valid.
     // Both things that make the dial fixable have now happened: it can draw, and the port is open so a

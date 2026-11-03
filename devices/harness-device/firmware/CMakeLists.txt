@@ -71,5 +71,18 @@ endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
+# THE UNBONDED DEVELOPMENT IMAGE (phone-bridge plan question QQ5): `idf.py -DBLE_DEV_ALLOW_UNBONDED=1 ...` builds an image that accepts a phone without a bond, because
+# TLS-PSK still authenticates both ends. That is for the walking-skeleton bench and nothing else, so it is loud and it does not stick:
+#   * configure prints a warning, and the image's own version string (esp_app_desc, PROJECT_VER) gets the suffix +bledev;
+#   * the image carries the marker BLE_DEV_UNBONDED_IMAGE, which scripts/refuse_dev_image.py (run by upload-firmware.sh and flash-station.sh) refuses;
+#   * main/CMakeLists.txt removes the variable from the CMake cache once it has read it, so a later build in the same directory WITHOUT -D is a product build.
+#     (Pass it on every build of a development directory; -DBLE_DEV_ALLOW_UNBONDED=0 is the same as leaving it out.)
+if(BLE_DEV_ALLOW_UNBONDED)
+    file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/version.txt" _dev_base_ver LIMIT_COUNT 1)
+    set(PROJECT_VER "${_dev_base_ver}+bledev")
+    message(WARNING "BLE_DEV_ALLOW_UNBONDED is ON: this is a DEVELOPMENT image (version ${PROJECT_VER}) that accepts an unbonded phone. "
+                    "It must never be flashed to a dial that is not on the bench, nor uploaded (scripts/refuse_dev_image.py refuses it).")
+endif()
+
 
 project(interns_commander)
