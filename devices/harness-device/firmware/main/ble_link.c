@@ -65,6 +65,7 @@ static ble_t s_ble;
 static SemaphoreHandle_t s_lock;               // s_ble and the flags below
 static bool s_started;
 static ble_pair_window_t s_pair;               // new bonds only inside this window (closed by default); guarded by s_lock
+static struct { bool active; uint16_t conn; uint32_t number; } s_prompt;   // the numeric-comparison offer on the screen; guarded by s_lock
 static volatile bool s_churn_cut;              // this link was already ended for burning channels
 static _Atomic(const cable_xport_t *) s_tls;
 static char s_mac[DEVICE_MAC_STR_LEN];
@@ -392,6 +393,71 @@ static void terminate_link(void)
     if (c != BLE_HS_CONN_HANDLE_NONE) ble_gap_terminate(c, BLE_ERR_REM_USER_CONN_TERM);
 }
 
+// ── the number on the screen (B5) ───────────────────────────────────────────────────────────────────
+
+// Ends the offer when it has a verdict: `answer` is 1 Yes, 0 No, -1 none (the link task asks with -1 every tick, so the end of the window is noticed). Yes
+// accepts the pairing; No, or a window that has closed, rejects it, closes the window, and ends the link. The pure rules are ble_numcmp_verdict.
+static void prompt_settle(int answer)
+{
+    state_lock();
+    if (!s_prompt.active) {
+        state_unlock();
+        return;
+    }
+    const ble_pair_verdict_t v = ble_numcmp_verdict(&s_pair, now_ms(), answer);
+    if (v == BLE_PAIR_WAIT) {
+        state_unlock();
+        return;
+    }
+    const uint16_t conn = s_prompt.conn;
+    s_prompt.active = false;
+    s_prompt.number = 0;
+    ble_set_prompting(&s_ble, false);
+    if (v == BLE_PAIR_REJECT) ble_pair_close(&s_pair);
+    state_unlock();
+    struct ble_sm_io io;
+    memset(&io, 0, sizeof io);
+    io.action = BLE_SM_IOACT_NUMCMP;
+    io.numcmp_accept = v == BLE_PAIR_ACCEPT;
+    (void)ble_sm_inject_io(conn, &io);
+    ESP_LOGI(TAG, "pairing %s", v == BLE_PAIR_ACCEPT ? "accepted" : "rejected: the window is closed");
+    if (v == BLE_PAIR_REJECT) terminate_link();
+}
+
+bool ble_link_pair_prompt(uint32_t *number)
+{
+    if (!s_started) return false;
+    state_lock();
+    const bool on = s_prompt.active;
+    if (on && number) *number = s_prompt.number;
+    state_unlock();
+    return on;
+}
+
+void ble_link_pair_answer(bool yes) { prompt_settle(yes ? 1 : 0); }
+
+bool ble_link_pairing_busy(void)
+{
+    if (!s_started) return false;
+    state_lock();
+    const bool busy = ble_pair_is_open(&s_pair, now_ms()) || s_prompt.active;
+    state_unlock();
+    return busy;
+}
+
+void ble_link_forget(void)
+{
+    if (!s_started) return;
+    state_lock();
+    ble_pair_close(&s_pair);
+    state_unlock();
+    apply_bonding_policy();
+    prompt_settle(-1);                 // a number on show is rejected: the window is closed
+    const int rc = ble_store_clear();  // every bond, once (the store never evicts by itself)
+    ESP_LOGI(TAG, "forget: bonds cleared (rc=%d)", rc);
+    terminate_link();
+}
+
 static int gap_event(struct ble_gap_event *event, void *arg)
 {
     (void)arg;
@@ -424,6 +490,10 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         s_adv_active = false;
         s_chan = NULL;
         cable_xport_ble_channel_down();
+        state_lock();
+        s_prompt.active = false;   // a lost link takes the offer with it
+        s_prompt.number = 0;
+        state_unlock();
         post(BLE_EV_LINK_DOWN);
         return 0;
     case BLE_GAP_EVENT_ENC_CHANGE:
@@ -445,8 +515,37 @@ static int gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_ADV_COMPLETE:
         s_adv_active = false;
         return 0;
+    case BLE_GAP_EVENT_PASSKEY_ACTION: {
+        // The numeric comparison: show the number only inside the pairing window (and one at a time); the screen answers through ble_link_pair_answer. Anything
+        // else (the dial displays a code, or must type one) is not a pairing this device does: the link is ended.
+        const uint16_t c = event->passkey.conn_handle;
+        const bool numcmp = event->passkey.params.action == BLE_SM_IOACT_NUMCMP;
+        state_lock();
+        const bool show = numcmp && !s_prompt.active && ble_numcmp_request(&s_pair, now_ms()) == BLE_NUMCMP_SHOW;
+        if (show) {
+            s_prompt.active = true;
+            s_prompt.conn = c;
+            s_prompt.number = event->passkey.params.numcmp;
+            ble_set_prompting(&s_ble, true);   // the 3 s encryption deadline waits while the number is on show
+        }
+        state_unlock();
+        if (show) {
+            ESP_LOGI(TAG, "pairing: a number is on the screen");
+        } else if (numcmp) {
+            struct ble_sm_io io;
+            memset(&io, 0, sizeof io);
+            io.action = BLE_SM_IOACT_NUMCMP;
+            io.numcmp_accept = 0;
+            (void)ble_sm_inject_io(c, &io);
+            ESP_LOGW(TAG, "pairing refused: the window is closed (or an offer is already on show)");
+        } else {
+            ESP_LOGW(TAG, "pairing refused: not a numeric comparison");
+            terminate_link();
+        }
+        return 0;
+    }
     default:
-        return 0;   // no passkey UI yet (B5): a pairing that needs one fails, which is the safe answer
+        return 0;
     }
 }
 
@@ -634,6 +733,7 @@ static void ble_link_task(void *arg)
         }
 
         apply_bonding_policy();   // the pairing window opens and closes the bonding switch
+        prompt_settle(-1);        // the window ending under a number on the screen rejects the pairing
 
         // 1b. a screen wake (a touch, the PWR button) while "not found": advertise again at once
         const uint32_t wake = display_wake_seq();

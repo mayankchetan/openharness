@@ -597,6 +597,72 @@ static void test_gatt_values_against_the_vectors(const char *path)
     CHECK(ble_relay_status_check(two, 0, &s) == BLE_HINT_ERR_LEN && ble_relay_status_check(NULL, 1, &s) == BLE_HINT_ERR_LEN);
 }
 
+// ── B5: the number on the screen. The window opens the offer, the answer closes it, and the 3 s encryption deadline waits while it is on show ──
+static void test_the_numeric_comparison_offer(void)
+{
+    ble_pair_window_t w;
+    ble_pair_init(&w);
+    // closed: a pairing that wants a number is refused at once (and so is one at exactly 120.0 s)
+    CHECK(ble_numcmp_request(&w, 1000) == BLE_NUMCMP_REFUSE && ble_numcmp_request(NULL, 1000) == BLE_NUMCMP_REFUSE);
+    ble_pair_open(&w, 5000);
+    CHECK(ble_numcmp_request(&w, 5000) == BLE_NUMCMP_SHOW && ble_numcmp_request(&w, 5000 + BLE_PAIR_WINDOW_MS - 1) == BLE_NUMCMP_SHOW);
+    CHECK(ble_numcmp_request(&w, 5000 + BLE_PAIR_WINDOW_MS) == BLE_NUMCMP_REFUSE);
+    // the verdict while the number is shown: no answer waits, Yes accepts, No rejects
+    CHECK(ble_numcmp_verdict(&w, 6000, -1) == BLE_PAIR_WAIT);
+    CHECK(ble_numcmp_verdict(&w, 6000, 1) == BLE_PAIR_ACCEPT);
+    CHECK(ble_numcmp_verdict(&w, 6000, 0) == BLE_PAIR_REJECT);
+    CHECK(ble_numcmp_verdict(&w, 6000, 2) == BLE_PAIR_WAIT && ble_numcmp_verdict(&w, 6000, -7) == BLE_PAIR_WAIT);   // nothing but 0 and 1 is an answer
+    // the window ends under the number: waiting is over at 120.0 s, and a late Yes is a No
+    CHECK(ble_numcmp_verdict(&w, 5000 + BLE_PAIR_WINDOW_MS - 1, -1) == BLE_PAIR_WAIT);
+    CHECK(ble_numcmp_verdict(&w, 5000 + BLE_PAIR_WINDOW_MS, -1) == BLE_PAIR_REJECT);
+    CHECK(ble_numcmp_verdict(&w, 5000 + BLE_PAIR_WINDOW_MS, 1) == BLE_PAIR_REJECT);
+    // a window closed by hand (or by Forget) under the number: rejected, whatever the answer
+    ble_pair_close(&w);
+    CHECK(ble_numcmp_verdict(&w, 6000, -1) == BLE_PAIR_REJECT && ble_numcmp_verdict(&w, 6000, 1) == BLE_PAIR_REJECT);
+    CHECK(ble_numcmp_verdict(NULL, 6000, 1) == BLE_PAIR_REJECT);
+    // a "No" closes the window: a second try needs the user to open it again (the glue calls ble_pair_close on REJECT; this is the pure half)
+    ble_pair_open(&w, 7000);
+    CHECK(ble_numcmp_verdict(&w, 7100, 0) == BLE_PAIR_REJECT);
+    ble_pair_close(&w);
+    CHECK(ble_numcmp_request(&w, 7200) == BLE_NUMCMP_REFUSE && !ble_bond_allowed(&w, 7200, false));
+}
+
+static void test_the_encryption_deadline_waits_for_the_number(void)
+{
+    ble_t b;
+    ble_init(&b);
+    ble_post(&b, BLE_EV_START, 0);
+    ble_post(&b, BLE_EV_LINK_UP, 1000);
+    CHECK(ble_poll(&b, 1000 + BLE_ENC_DEADLINE_MS - 1) == BLE_EV_NONE && ble_poll(&b, 1000 + BLE_ENC_DEADLINE_MS) == BLE_EV_ENC_TIMEOUT);   // unchanged without a number
+    ble_set_prompting(&b, true);
+    CHECK(ble_poll(&b, 1000 + BLE_ENC_DEADLINE_MS) == BLE_EV_NONE);                          // the number is on the glass: the 3 s do not run out
+    CHECK(ble_poll(&b, 1000 + BLE_PAIR_WINDOW_MS + 60000) == BLE_EV_NONE);                   // the pairing window (glue) ends the offer, not this timer
+    ble_set_prompting(&b, false);
+    CHECK(ble_poll(&b, 1000 + BLE_ENC_DEADLINE_MS) == BLE_EV_ENC_TIMEOUT);                   // answered or withdrawn: the old deadline is due again
+    // it holds nothing else: leaving SECURING ends the offer, and an untrusted peer still has the idle cap
+    ble_set_prompting(&b, true);
+    ble_post(&b, BLE_EV_ENCRYPTED, 2000);
+    CHECK(b.state == BLE_ST_CONNECTED && !b.prompting);
+    CHECK(ble_poll(&b, 2000 + BLE_IDLE_CAP_MS) == BLE_EV_IDLE_TIMEOUT);
+    ble_set_prompting(&b, true);
+    CHECK(ble_poll(&b, 2000 + BLE_IDLE_CAP_MS) == BLE_EV_IDLE_TIMEOUT);                      // a flag in the wrong state holds nothing
+    // a lost link, and a new one, start without an offer
+    ble_init(&b);
+    ble_post(&b, BLE_EV_START, 0);
+    ble_post(&b, BLE_EV_LINK_UP, 10);
+    ble_set_prompting(&b, true);
+    ble_post(&b, BLE_EV_LINK_DOWN, 20);
+    CHECK(!b.prompting && b.state == BLE_ST_ADVERTISING);
+    ble_post(&b, BLE_EV_LINK_UP, 30);
+    CHECK(!b.prompting && ble_poll(&b, 30 + BLE_ENC_DEADLINE_MS) == BLE_EV_ENC_TIMEOUT);
+    ble_set_prompting(NULL, true);
+    // the offer is bounded from outside: the window rejects it at 120.0 s, so the link is held no longer than the window the user opened
+    ble_pair_window_t w;
+    ble_pair_init(&w);
+    ble_pair_open(&w, 0);
+    CHECK(ble_numcmp_verdict(&w, 119000, -1) == BLE_PAIR_WAIT && ble_numcmp_verdict(&w, BLE_PAIR_WINDOW_MS, -1) == BLE_PAIR_REJECT);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2 && "usage: test_ble_state <vectors/ble_status.txt>");
@@ -613,6 +679,8 @@ int main(int argc, char **argv)
     test_refusal_run();
     test_accept_policy();
     test_gatt_values_against_the_vectors(argv[1]);
+    test_the_numeric_comparison_offer();
+    test_the_encryption_deadline_waits_for_the_number();
     printf("test_ble_state: %u checks PASS\n", checks);
     return 0;
 }

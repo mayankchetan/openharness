@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "ble_link.h"
 #include "cable_client.h"
 #include "config_store.h"
 #include "driver/usb_serial_jtag.h"
@@ -133,6 +134,7 @@ uint32_t mode_switch_busy(void)
     uint32_t busy = ui_mode_switch_busy(NULL, 0);
     if (cable_client_models_waiting()) busy |= MS_BUSY_MODEL_LIST;
     if (cable_client_pet_upload_active()) busy |= MS_BUSY_PET_UPLOAD;
+    if (ble_link_pairing_busy()) busy |= MS_BUSY_PAIRING;   // B5: the pairing window is open or its number is on the screen (stub: false)
 #ifndef DEVICE_NO_OTA
     if (fw_update_active()) busy |= MS_BUSY_FW_UPDATE;
 #endif

@@ -74,6 +74,7 @@ bool ble_post(ble_t *b, ble_event_t event, uint64_t now_ms)
     if (event == BLE_EV_LINK_DOWN) b->trusted = false;
     if (event == BLE_EV_TLS_UP) b->churn = 0;                                                // proven: the peer holds the key
     if (b->state == BLE_ST_CHANNEL_UP && (event == BLE_EV_CHANNEL_CLOSED || event == BLE_EV_TLS_FAIL || event == BLE_EV_TLS_REFUSED) && b->churn < 255) b->churn++;
+    b->prompting = false;   // any change of state ends the wait for the number
     b->state = next;
     b->since_ms = now_ms;
     return true;
@@ -100,6 +101,7 @@ ble_event_t ble_poll(const ble_t *b, uint64_t now_ms)
     if (!b) return BLE_EV_NONE;
     uint32_t limit = ble_deadline_ms(b->state);
     if (b->state == BLE_ST_CONNECTED && !b->trusted) limit = BLE_IDLE_CAP_MS;   // only a trusted peer may wait for ever
+    if (b->state == BLE_ST_SECURING && b->prompting) return BLE_EV_NONE;          // the number is on the screen: the person is comparing it (B5)
     if (limit == 0 || now_ms < b->since_ms || now_ms - b->since_ms < limit) return BLE_EV_NONE;
     switch (b->state) {
     case BLE_ST_ADVERTISING: return BLE_EV_ADV_TIMEOUT;
@@ -203,6 +205,24 @@ const char *ble_relay_status_name(uint8_t value)
     case 0x04: return "phone_no_network";
     default:   return "unknown";
     }
+}
+
+void ble_set_prompting(ble_t *b, bool prompting)
+{
+    if (b) b->prompting = prompting;
+}
+
+ble_numcmp_t ble_numcmp_request(const ble_pair_window_t *w, uint64_t now_ms)
+{
+    return ble_pair_is_open(w, now_ms) ? BLE_NUMCMP_SHOW : BLE_NUMCMP_REFUSE;
+}
+
+ble_pair_verdict_t ble_numcmp_verdict(const ble_pair_window_t *w, uint64_t now_ms, int answer)
+{
+    if (!ble_pair_is_open(w, now_ms)) return BLE_PAIR_REJECT;   // closed by hand, expired, or a clock that stepped back: the safe side
+    if (answer == 0) return BLE_PAIR_REJECT;
+    if (answer == 1) return BLE_PAIR_ACCEPT;
+    return BLE_PAIR_WAIT;
 }
 
 bool ble_encryption_required(bool dev_unbonded) { return !dev_unbonded; }

@@ -462,7 +462,7 @@ static void test_h5_leave(void)
 // ── H6: the busy gate ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 static void test_h6_busy(void)
 {
-    const uint32_t soft[] = { MS_BUSY_VOICE, MS_BUSY_DRAFT, MS_BUSY_QUESTION, MS_BUSY_READER, MS_BUSY_PICKER, MS_BUSY_MODEL_LIST, 1u << 20 };
+    const uint32_t soft[] = { MS_BUSY_VOICE, MS_BUSY_DRAFT, MS_BUSY_QUESTION, MS_BUSY_READER, MS_BUSY_PICKER, MS_BUSY_MODEL_LIST, MS_BUSY_PAIRING, 1u << 20 };
     const uint32_t hard[] = { MS_BUSY_FW_UPDATE, MS_BUSY_PET_UPLOAD };
 
     CHECK(!ms_blocked(0, false) && !ms_blocked(0, true));
@@ -479,7 +479,7 @@ static void test_h6_busy(void)
 
     // each row that holds a wireless dial for as long as it lasts (H13: the question, reader and picker rows give way to 30 s of idle instead) blocks
     // entry and shows the notice; release switches on the next step (<= 250 ms)
-    const uint32_t holding[] = { MS_BUSY_VOICE, MS_BUSY_DRAFT, MS_BUSY_MODEL_LIST, 1u << 20 };
+    const uint32_t holding[] = { MS_BUSY_VOICE, MS_BUSY_DRAFT, MS_BUSY_MODEL_LIST, MS_BUSY_PAIRING, 1u << 20 };
     for (unsigned i = 0; i < sizeof holding / sizeof holding[0]; i++) {
         sim_t m;
         wireless_ready(&m, MS_MODE_WIFI);
@@ -579,10 +579,11 @@ static void test_h6_busy(void)
 static void test_h13_idle_gate(void)
 {
     const uint32_t idle_rows[] = { MS_BUSY_QUESTION, MS_BUSY_READER, MS_BUSY_PICKER, MS_BUSY_QUESTION | MS_BUSY_READER | MS_BUSY_PICKER };
-    const uint32_t strong[] = { MS_BUSY_VOICE, MS_BUSY_DRAFT, MS_BUSY_MODEL_LIST, 1u << 20, MS_BUSY_FW_UPDATE, MS_BUSY_PET_UPLOAD,
+    const uint32_t strong[] = { MS_BUSY_VOICE, MS_BUSY_DRAFT, MS_BUSY_MODEL_LIST, MS_BUSY_PAIRING, 1u << 20, MS_BUSY_FW_UPDATE, MS_BUSY_PET_UPLOAD,
                                 MS_BUSY_VOICE | MS_BUSY_READER };
     CHECK(MS_T_IDLE_MS == 30000u);
-    CHECK((MS_BUSY_IDLE_OK & (MS_BUSY_VOICE | MS_BUSY_DRAFT | MS_BUSY_MODEL_LIST | MS_BUSY_HARD)) == 0);
+    CHECK((MS_BUSY_IDLE_OK & (MS_BUSY_VOICE | MS_BUSY_DRAFT | MS_BUSY_MODEL_LIST | MS_BUSY_PAIRING | MS_BUSY_HARD)) == 0);   // B5: a pairing window is not released by idle time
+    CHECK(MS_BUSY_PAIRING == (1u << 8) && (MS_BUSY_PAIRING & MS_BUSY_HARD) == 0);
 
     // the pure gate
     for (ms_mode_t from = MS_MODE_WIFI; from <= MS_MODE_BLE; from++) {

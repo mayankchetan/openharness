@@ -87,6 +87,7 @@ void ms_boot_decide(const ms_boot_in_t *in, ms_boot_out_t *out);
 #define MS_BUSY_MODEL_LIST      (1u << 5)   // the blocking model list
 #define MS_BUSY_FW_UPDATE       (1u << 6)   // fw_update_active(): blocks even asleep
 #define MS_BUSY_PET_UPLOAD      (1u << 7)   // a pet pack arriving: blocks even asleep
+#define MS_BUSY_PAIRING         (1u << 8)   // the BLE pairing window is open or its number is on the screen (<= 120 s): not released by idle time, holds only an awake dial
 #define MS_BUSY_HARD            (MS_BUSY_FW_UPDATE | MS_BUSY_PET_UPLOAD)
 
 // True when a switch must wait. Any bit set blocks an awake dial (an unknown bit too: unsure means wait). Asleep, only MS_BUSY_HARD blocks.

@@ -80,6 +80,7 @@ typedef struct {
     net_refusal_t refusals;   // alerts in a row (net_state.h)
     bool          trusted;    // this link is authenticated, bonded and long-keyed (ble_sec_trusted); set by the glue, cleared at every new link
     uint8_t       churn;      // channels of this link that ended without reaching TLS_UP (saturates); cleared by TLS_UP and by a new link
+    bool          prompting;  // the pairing number is on the screen (ble_set_prompting): the encryption deadline waits; cleared on any state change and on a new link
 } ble_t;
 
 void ble_init(ble_t *b);   // OFF, zeroed
@@ -156,3 +157,19 @@ void ble_pair_close(ble_pair_window_t *w);
 bool ble_pair_is_open(const ble_pair_window_t *w, uint64_t now_ms);
 // May a pairing that wants to save a bond do so: the window is open AND the store has room (`store_full` = the stack asked to evict). Full means no.
 bool ble_bond_allowed(const ble_pair_window_t *w, uint64_t now_ms, bool store_full);
+
+// ── the number on the screen (B5) ───────────────────────────────────────────────────────────────────
+// A pairing by numeric comparison shows a 6-digit number on the dial and asks Yes or No. The rules are pure so the host runs them:
+//  - The offer is made only inside the pairing window. A request outside it is refused at once, with no number shown.
+//  - While the number is shown the 3 s encryption deadline waits (ble_set_prompting): a person cannot compare two numbers in 3 s, and a deadline that cut
+//    every first pairing would make the screen useless. The wait is not open-ended: the verdict below turns into a rejection at the end of the window
+//    (120.0 s), the glue asks for it every tick, and a rejection ends the link. Leaving SECURING, or a link going up or down, ends the wait.
+//  - No rejects the pairing and closes the window; the user opens it again for another try. A Yes that arrives after the window closed is a No.
+typedef enum { BLE_NUMCMP_SHOW = 0, BLE_NUMCMP_REFUSE } ble_numcmp_t;
+ble_numcmp_t ble_numcmp_request(const ble_pair_window_t *w, uint64_t now_ms);
+
+typedef enum { BLE_PAIR_WAIT = 0, BLE_PAIR_ACCEPT, BLE_PAIR_REJECT } ble_pair_verdict_t;
+// `answer`: 1 Yes, 0 No, anything else (use -1) no answer yet.
+ble_pair_verdict_t ble_numcmp_verdict(const ble_pair_window_t *w, uint64_t now_ms, int answer);
+// The glue says the number is on show (true) or gone (false). Only a link in SECURING can hold the deadline; NULL is ignored.
+void ble_set_prompting(ble_t *b, bool prompting);

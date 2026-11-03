@@ -40,6 +40,16 @@ ble_state_t ble_link_state(void);
 // Open (true) or close (false) the pairing window: new bonds are made only inside it, for BLE_PAIR_WINDOW_MS (120 s). Closed by default. B5 calls it from
 // the Settings row "Pair phone". False/no-op when the phone mode is not running. Any task.
 void ble_link_pairing_window(bool open);
+// The pairing screen's three calls (B5; the screen itself is a separate task). The number: true while a pairing by numeric comparison is waiting for Yes or
+// No, with the 6 digits to show (the window is open, spec section 4). The answer: Yes accepts, No rejects, closes the window and ends the link; a pairing
+// that no longer has a window is rejected whatever the answer. Busy: the window is open or a number is on show (the mode switch waits, MS_BUSY_PAIRING).
+// Any task, none of them writes flash.
+bool ble_link_pair_prompt(uint32_t *number);
+void ble_link_pair_answer(bool yes);
+bool ble_link_pairing_busy(void);
+// "Forget": closes the window, rejects an offer, wipes ALL bonds once (ble_store_clear) and ends the link. It WRITES FLASH (the bond store in NVS): call it
+// from the worker that does the other NVS writes, never from the link task or a PSRAM stack that must not touch flash.
+void ble_link_forget(void);
 // What the phone wrote to the two characteristics (spec section 5; only a peer that passes the channel rule may write). The relay status is the byte of the
 // spec table (ble_relay_status_name); the home hint is true when the phone sees the home network. Any task; cheap.
 uint8_t ble_link_relay_status(void);
@@ -53,6 +63,10 @@ static inline bool ble_link_start(void) { return false; }
 static inline const cable_xport_t *ble_link_xport(void) { return NULL; }
 static inline ble_state_t ble_link_state(void) { return BLE_ST_OFF; }
 static inline bool ble_link_restart(void) { return false; }
+static inline bool ble_link_pair_prompt(uint32_t *number) { (void)number; return false; }
+static inline void ble_link_pair_answer(bool yes) { (void)yes; }
+static inline bool ble_link_pairing_busy(void) { return false; }
+static inline void ble_link_forget(void) {}
 static inline uint8_t ble_link_relay_status(void) { return 0; }
 static inline bool ble_link_home_hint(void) { return false; }
 static inline void ble_link_pairing_window(bool open) { (void)open; }

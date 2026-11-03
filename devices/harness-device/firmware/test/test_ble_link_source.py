@@ -191,9 +191,44 @@ init_b = body(link, 'ble_init_task')
 assert init_b.index('ble_gatts_count_cfg(GATT_SVCS)') < init_b.index('ble_gatts_add_svcs(GATT_SVCS)') < init_b.index('nimble_port_freertos_init(host_task)'), 'the table is added before the host starts'
 assert 'ble_link_home_hint' in text('ble_link.h') and 'ble_link_relay_status' in text('ble_link.h')
 
+# ── 5b. B5: the pairing window, the number on the screen, Forget ────────────────────────────────────────────────────────────────────────
+# The offer: only inside the window, only the numeric comparison; anything else is refused and the link is ended. The number is kept under the lock for the
+# screen (ble_link_pair_prompt) and never logged.
+pk = re.search(r'case BLE_GAP_EVENT_PASSKEY_ACTION:(.*?)(?=\n    case |\n    default:)', gap, re.S)
+assert pk, 'the passkey event is handled (it fell to default before B5)'
+pk = pk[1]
+assert 'event->passkey.params.action == BLE_SM_IOACT_NUMCMP' in pk and 'ble_numcmp_request(&s_pair, now_ms()) == BLE_NUMCMP_SHOW' in pk
+assert 'ble_set_prompting(&s_ble, true)' in pk and 'event->passkey.params.numcmp' in pk
+assert 'terminate_link()' in pk, 'any other kind of passkey request ends the link'
+settle = body(link, 'prompt_settle')
+assert 'ble_sm_inject_io(' in settle and link.count('ble_sm_inject_io(') == 2, 'one answer path, one refusal at the request'
+assert 'io.numcmp_accept = 0' in pk, 'a refused request is answered No'
+assert 'ble_numcmp_verdict(&s_pair, now_ms(), answer)' in settle and 'ble_set_prompting(&s_ble, false)' in settle
+assert re.search(r'if \(v == BLE_PAIR_REJECT\) ble_pair_close\(&s_pair\);', settle), 'No (or the end of the window) closes the window'
+assert 'terminate_link()' in settle, 'a rejected pairing ends the link'
+assert 'prompt_settle(-1)' in body(link, 'ble_link_task'), 'the window ending under the number is noticed by the link task'
+assert 'prompt_settle(yes ? 1 : 0)' in body(link, 'ble_link_pair_answer')
+assert 's_prompt.active = false' in body(link, 'gap_event'), 'a lost link takes the offer with it'
+for fn in ('gap_event', 'prompt_settle', 'ble_link_pair_prompt'):
+    for call in re.findall(r'ESP_LOG[EWIDV]\((.*?)\);', body(link, fn), re.S):   # literals are blanked: the arguments are what is checked
+        assert 'number' not in call and 'numcmp' not in call and 'passkey' not in call, f'{fn} logs the number'
+fget = body(link, 'ble_link_forget')
+assert fget.index('ble_pair_close(&s_pair)') < fget.index('prompt_settle(-1)') < fget.index('ble_store_clear()') < fget.index('terminate_link()'), 'Forget: close the window, drop an offer, wipe the bonds once, end the link'
+busy = body(link, 'ble_link_pairing_busy')
+assert 'ble_pair_is_open(&s_pair, now_ms())' in busy and 's_prompt.active' in busy
+hdr = text('ble_link.h')
+for name in ('ble_link_pair_prompt', 'ble_link_pair_answer', 'ble_link_pairing_busy', 'ble_link_forget'):
+    assert hdr.count(name + '(') == 2, f'{name}: declared and stubbed'
+glue_busy = body(code('mode_glue.c'), 'mode_switch_busy')
+assert 'ble_link_pairing_busy()' in glue_busy and 'MS_BUSY_PAIRING' in glue_busy, 'an open pairing window holds the mode switch'
+assert '#include "ble_link.h"' in text('mode_glue.c')
+
 # ── 5. the link task: no flash operation, the key read once ─────────────────────────────────────────
 # B4e (review H1): the bond store never evicts; a bond is made only inside the pairing window; a repeat pairing never deletes a bond outside it
-assert 'ble_store_util_status_rr' not in link and 'ble_gap_unpair' not in link and 'ble_store_delete' not in link and 'ble_store_clear' not in link, 'no eviction anywhere'
+assert 'ble_store_util_status_rr' not in link and 'ble_gap_unpair' not in link and 'ble_store_delete' not in link, 'no eviction anywhere'
+# B5: the one deliberate wipe of the bonds is the user's Forget row; nothing else in the file clears the store, and the link task never calls it (it writes flash)
+assert link.count('ble_store_clear(') == 1 and 'ble_store_clear()' in body(link, 'ble_link_forget'), 'one wipe, in ble_link_forget'
+assert link.count('ble_link_forget(') == 1, 'only the definition: the link task does not call it'
 assert 'ble_hs_cfg.store_status_cb = store_status;' in link
 st = body(link, 'store_status')
 assert 'BLE_STORE_EVENT_OVERFLOW' in st and 'BLE_STORE_EVENT_FULL' in st and st.count('return BLE_HS_ENOMEM;') == 1 and 'return 0' not in st, 'full or overflowing: refuse the new bond'
@@ -230,7 +265,7 @@ for path in sorted(main.rglob('*')):
 
 FLASH = re.compile(r'\b(nvs_\w+|config_\w+|esp_ota_\w+|esp_partition_\w+|esp_flash_\w+|spi_flash_\w+|fw_update_\w+)\(')
 for fn in ('ble_link_task', 'handshake', 'advertise', 'terminate_link', 'port_send', 'port_disconnect', 'port_rearm', 'port_peer_mtu', 'log_stacks',
-           'x_read', 'x_write', 'x_is_up', 'chr_access', 'post', 'current', 'link_sec', 'note_security', 'store_status', 'apply_bonding_policy', 'rx_arm'):
+           'x_read', 'x_write', 'x_is_up', 'chr_access', 'prompt_settle', 'post', 'current', 'link_sec', 'note_security', 'store_status', 'apply_bonding_policy', 'rx_arm'):
     assert not FLASH.search(body(link, fn)), f'{fn} reaches a flash operation (the link task has a PSRAM stack)'
 assert len(re.findall(r'config_ble_load\(', link)) == 1 and 'config_ble_load(&cfg)' in body(link, 'ble_link_start')
 start = body(link, 'ble_link_start')
