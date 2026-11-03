@@ -65,6 +65,12 @@ class DialLink(
     private val main = Handler(Looper.getMainLooper())
 
     @Volatile private var gatt: BluetoothGatt? = null
+
+    /** Set once close() ran on the GATT: no status write can start after that. */
+    private val gattClosed = AtomicBoolean(false)
+
+    /** The token of our status writer on the shared publisher, so a late detach cannot drop a newer link's writer. */
+    @Volatile private var statusToken: Any? = null
     @Volatile private var scanCallback: ScanCallback? = null
 
     /** The socket while connect() blocks, so stop() can close it and unblock that thread. */
@@ -114,15 +120,43 @@ class DialLink(
         if (!stopped.compareAndSet(false, true)) return
         main.removeCallbacks(scanTimeout)
         stopScan()
-        StatusPublisher.shared?.detach()
         try {
             connecting?.close() // unblocks connect() on its thread
         } catch (_: Exception) {
         }
+        val g = gatt ?: return
+        val publisher = StatusPublisher.shared
+        val token = statusToken
+        if (publisher == null || token == null) {
+            closeGatt(g)
+            return
+        }
+        // The last status (token rejected, no network) may still be on its way to the dial: let that write finish before
+        // the link goes down, but wait at most STATUS_DRAIN_MS. Off the main thread, so the caller is not held.
+        Thread({
+            publisher.awaitIdle(token, STATUS_DRAIN_MS)
+            publisher.detach(token)
+            closeGatt(g)
+        }, "dial-status-drain").start()
+    }
+
+    private fun closeGatt(g: BluetoothGatt) {
+        gattClosed.set(true)
         try {
-            gatt?.close()
+            g.close()
         } catch (_: Exception) {
         }
+    }
+
+    /**
+     * Opens a new CoC on the GATT link that is still up (spec 6.3 rule 4: a tunnel error closes only the channel).
+     * False if the link is gone or stopped; the caller then starts over with a scan.
+     */
+    fun reopenChannel(): Boolean {
+        val g = gatt
+        if (stopped.get() || g == null || gattClosed.get() || !channelStarted.get()) return false
+        Thread({ openChannel(g.device) }, "dial-coc-reconnect").start()
+        return true
     }
 
     private fun stopScan() {
@@ -139,7 +173,7 @@ class DialLink(
                 g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
                 g.discoverServices()
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                StatusPublisher.shared?.detach()
+                statusToken?.let { StatusPublisher.shared?.detach(it) }
                 if (!stopped.get()) listener.onFailed("link lost, status $status")
             }
         }
@@ -163,14 +197,14 @@ class DialLink(
             // Spec 6.3 rule 8. The characteristic needs an encrypted link, so a dev build that skips pairing writes only to a
             // dial that is already bonded: a write to an unbonded dial would start a pairing the user did not ask for.
             if (!allowUnbonded || g.device.bondState == BluetoothDevice.BOND_BONDED) {
-                StatusPublisher.shared?.attach { writeStatus(g, it) }
+                statusToken = StatusPublisher.shared?.attach { writeStatus(g, it) }
             }
         }
     }
 
     /** One write of the relay-status byte. Returns true when the write is out and onCharacteristicWrite will follow. */
     private fun writeStatus(g: BluetoothGatt, status: RelayStatus): Boolean {
-        if (stopped.get()) return false
+        if (gattClosed.get()) return false
         val ch = g.getService(Wire.SERVICE_UUID)?.getCharacteristic(Wire.STATUS_UUID) ?: return false
         val value = byteArrayOf(status.code)
         return try {
@@ -218,6 +252,9 @@ class DialLink(
     companion object {
         /** How long to scan before giving up with "dial not found". */
         const val SCAN_TIMEOUT_MS = 30_000L
+
+        /** How long stop() lets the last relay-status write finish before it closes the GATT link. */
+        const val STATUS_DRAIN_MS = 300L
         private const val TAG = "DialLink"
     }
 }

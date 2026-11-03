@@ -33,15 +33,19 @@ class BridgeService : Service() {
         Cancelable { main.removeCallbacks(task) }
     }
     private val bleRetry = Reconnector(ReconnectLadder(random = java.util.Random()), scheduler) { begin() }
-    private val tunnelRetry = Reconnector(ReconnectLadder(random = java.util.Random()), scheduler) { begin() }
+    private val tunnelRetry = Reconnector(ReconnectLadder(random = java.util.Random()), scheduler) { reopenChannelOrBegin() }
     private var session = 0 // bumped on every start, so a late callback of an old session is ignored
+
+    /** The session id the callbacks of one DialLink carry. A tunnel retry that keeps the link moves it to the new session. */
+    private class LinkSession(@Volatile var id: Int)
+    private var linkSession: LinkSession? = null
 
     private val ticker = object : Runnable {
         override fun run() {
             val p = pump ?: return
             val cur = BridgeState.snapshot
-            if (cur.phase == Phase.RELAYING || cur.phase == Phase.CHANNEL_OPEN) {
-                val phase = if (p.bytesToTunnel() > 0) Phase.RELAYING else cur.phase
+            if (cur.phase == Phase.RELAYING || cur.phase == Phase.CHANNEL_OPEN || cur.phase == Phase.TUNNEL_UP) {
+                val phase = if (p.bytesToTunnel() > 0 && cur.phase == Phase.CHANNEL_OPEN) Phase.RELAYING else cur.phase
                 BridgeState.set(phase, cur.detail, p.bytesToTunnel(), p.bytesToDial())
             }
             main.postDelayed(this, 1000)
@@ -107,19 +111,40 @@ class BridgeService : Service() {
             return
         }
 
+        val tag = LinkSession(mySession)
+        linkSession = tag
         val link = DialLink(this, BuildConfig.DEV_ALLOW_UNBONDED, object : DialLink.Listener {
-            override fun onScanning() = update(mySession, Phase.SCANNING, "scanning for the dial")
-            override fun onConnecting(name: String) = update(mySession, Phase.CONNECTING, "connecting to $name")
+            override fun onScanning() = update(tag.id, Phase.SCANNING, "scanning for the dial")
+            override fun onConnecting(name: String) = update(tag.id, Phase.CONNECTING, "connecting to $name")
             override fun onChannel(channel: DialChannel) {
-                main.post { startPump(mySession, channel) }
+                val id = tag.id
+                main.post { startPump(id, channel) }
             }
             override fun onFailed(detail: String) {
                 // Also ends a running session (link lost). The dial may be asleep or out of range: try again later.
-                main.post { finish(mySession, Phase.FAILED, detail, bleRetry) }
+                val id = tag.id
+                main.post { finish(id, Phase.FAILED, detail, bleRetry) }
             }
         })
         dialLink = link
         link.start()
+    }
+
+    /**
+     * Tunnel retry (spec 6.3 rule 4): the GATT link is still up, so open a new CoC on it. If the link is gone, start over.
+     */
+    private fun reopenChannelOrBegin() {
+        val link = dialLink
+        val tag = linkSession
+        if (link != null && tag != null) {
+            val id = ++session
+            tag.id = id
+            if (link.reopenChannel()) {
+                update(id, Phase.CONNECTING, "opening the channel again")
+                return
+            }
+        }
+        begin()
     }
 
     private fun startPump(mySession: Int, channel: DialChannel) {
@@ -133,7 +158,7 @@ class BridgeService : Service() {
             override fun onTunnelOpening() = update(mySession, Phase.RELAYING, "tunnel opening")
             override fun onTunnelOpen() {
                 tunnelRetry.connected()
-                update(mySession, Phase.RELAYING, "tunnel up")
+                update(mySession, Phase.TUNNEL_UP, "tunnel up")
             }
             override fun onClosed(reason: CloseReason, httpCode: Int?) {
                 // The code comes with the call: teardown() may have nulled `pump` on another thread already.
@@ -173,23 +198,39 @@ class BridgeService : Service() {
         val up = pump?.bytesToTunnel() ?: 0
         val down = pump?.bytesToDial() ?: 0
         Log.i(TAG, "finish: $phase")
-        teardown()
-        if (retry != null && retry.failed()) {
-            BridgeState.set(Phase.WAITING_RETRY, "$detail; trying again soon", up, down)
+        val retrying = retry != null && retry.failed()
+        // Publish the state first: the dial gets status 3 (token rejected) or 4 (no network) while the link is still up.
+        // DialLink.stop() then lets that write finish before it closes the GATT link.
+        if (retrying) BridgeState.set(Phase.WAITING_RETRY, "$detail; trying again soon", up, down)
+        else BridgeState.set(phase, detail, up, down)
+        // A tunnel error closes only the CoC and keeps the GATT link and the bond (spec 6.3 rule 4).
+        val keepLink = retrying && retry === tunnelRetry && dialLink != null
+        if (keepLink) {
+            linkSession?.id = session // the kept link's callbacks follow the new session
+            teardownPump()
+        } else {
+            teardown()
+        }
+        if (retrying) {
             updateNotification("Waiting to reconnect")
             return
         }
-        BridgeState.set(phase, detail, up, down)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
-    private fun teardown() {
+    /** Stops the relay (and with it the CoC) but leaves the GATT link up. */
+    private fun teardownPump() {
         main.removeCallbacks(ticker)
         pump?.stop()
         pump = null
+    }
+
+    private fun teardown() {
+        teardownPump()
         dialLink?.stop()
         dialLink = null
+        linkSession = null
     }
 
     private fun notification(text: String): Notification {

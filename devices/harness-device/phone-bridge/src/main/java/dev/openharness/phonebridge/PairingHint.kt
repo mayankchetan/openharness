@@ -10,7 +10,7 @@ object PairingHint {
         Phase.IDLE -> "The bridge is stopped. Start it from the main screen."
         Phase.SCANNING -> "Looking for the dial."
         Phase.CONNECTING -> "Found the dial. Connecting."
-        Phase.CHANNEL_OPEN, Phase.RELAYING -> "Connected to the dial."
+        Phase.CHANNEL_OPEN, Phase.RELAYING, Phase.TUNNEL_UP -> "Connected to the dial."
         Phase.CLOSED -> "The dial closed the link."
         Phase.FAILED -> "Could not reach the dial."
         Phase.NO_PERMISSION -> "Allow Nearby devices for this app."

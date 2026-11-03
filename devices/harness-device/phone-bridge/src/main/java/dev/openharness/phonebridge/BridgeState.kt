@@ -8,6 +8,7 @@ enum class Phase {
     CONNECTING,
     CHANNEL_OPEN,
     RELAYING,
+    TUNNEL_UP,
     CLOSED,
     FAILED,
     NO_PERMISSION,
