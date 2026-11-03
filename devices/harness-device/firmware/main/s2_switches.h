@@ -7,6 +7,8 @@
 //   S2_AMP_OFF      GPIO46 (BSP_PA_IO, the NS4150B amplifier enable) is driven low when the audio clocks stop for S2 (audio_capture.c).
 //   S2_CODEC_OFF    the ES7210 and ES8311 codecs are put in the driver's own stopped state when the audio clocks stop for S2 (audio_capture.c).
 //   S2_CPU80        in S2 the CPU is capped at 80 MHz (esp_pm max 80, min 80), put back to 240/80 the moment S2 is left (power_sleep.c).
+//   S2_WIFI_OFF     after S2_WIFI_OFF_MIN minutes of dark battery time the Wi-Fi link is closed cleanly and the radio stopped; it comes back on the wake
+//                   (power_policy.h pp_wifi_off_wanted, power_sleep.c, net_link.c). Needs DEVICE_BATTERY_POWEROFF: it reads the off timers' span.
 //   S2_PANEL_SLPIN  the CO5300 panel gets DISPOFF and DCS sleep-in (0x10) at S2 entry, sleep-out (0x11) at S2 exit (display_habitat.c, power_sleep.c).
 #pragma once
 
@@ -15,6 +17,7 @@
 #undef S2_CODEC_OFF
 #undef S2_PANEL_SLPIN
 #undef S2_CPU80
+#undef S2_WIFI_OFF
 #endif
 
 #ifndef S2_AMP_OFF
@@ -31,4 +34,18 @@
 
 #ifndef S2_CPU80
 #define S2_CPU80 0
+#endif
+
+#ifndef S2_WIFI_OFF
+#define S2_WIFI_OFF 0
+#endif
+
+// Minutes of dark battery time before the radio goes off (S2_WIFI_OFF). A constant, user decision 2026-11-02.
+#ifndef S2_WIFI_OFF_MIN
+#define S2_WIFI_OFF_MIN 5
+#endif
+
+#if S2_WIFI_OFF && !defined(DEVICE_BATTERY_POWEROFF)
+#undef S2_WIFI_OFF
+#define S2_WIFI_OFF 0   // the span comes from the power-off triggers' timer: without them there is nothing to count
 #endif

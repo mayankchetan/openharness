@@ -109,6 +109,10 @@ static bool        s_last_on_battery;  // the last fresh PMIC read said "on the 
 static pp_state_t  s_applied;          // what the render task has applied
 static bool        s_pm_battery;       // power management is configured for battery (frequency scaling, maybe light sleep)
 static bool        s_audio_idle;       // the I2S channels are stopped (audio_capture_idle)
+#if S2_WIFI_OFF
+static atomic_bool s_wifi_off;         // the radio is wanted off (power_policy.h pp_wifi_off_wanted); written by the ptt task and the screen hook, read by net_link
+static void      (*s_wake_cb)(void);   // pokes the net_link task when the radio is wanted back (set once, before the first wake that matters)
+#endif
 #if S2_CPU80
 static bool        s_pm_light;         // the battery configuration has light sleep on (set in enter_battery): the S2 cpu cap keeps it
 static bool        s_s2_capped;        // the S2 cpu cap (S2_CPU80) is in force; render task only
@@ -206,6 +210,16 @@ static void s2_cpu_cap(bool cap)
     }
     s_s2_capped = cap;
     ESP_LOGI(TAG, "S2: cpu max %d MHz", cap ? 80 : 240);
+}
+#endif
+
+#if S2_WIFI_OFF
+bool power_sleep_wifi_off_wanted(void) { return atomic_load(&s_wifi_off); }
+void power_sleep_set_wake_cb(void (*cb)(void)) { s_wake_cb = cb; }
+// The radio is wanted back: the wish ends first (so the task finds it ended when it wakes), then the poke. Any task.
+static void wifi_back(void)
+{
+    if (atomic_exchange(&s_wifi_off, false) && s_wake_cb) s_wake_cb();
 }
 #endif
 
@@ -340,6 +354,16 @@ void power_sleep_poll(void)
         const pp_off_in_t oin = {.now_ms = in.now_ms, .state = out.state, .on_battery = s_last_on_battery, .sof = in.sof, .screen_asleep = in.screen_asleep,
                                  .pct = battery_pct_raw()};
         const pp_off_reason_t why = pp_off_step(&s_off, &oin);
+#if S2_WIFI_OFF
+        {   // the radio off after S2_WIFI_OFF_MIN minutes of dark battery time: a READ of the off timers' span, nothing of theirs is changed
+            const bool want = pp_wifi_off_wanted(&s_off, in.now_ms, (uint32_t)S2_WIFI_OFF_MIN * 60u * 1000u);
+            if (want) {
+                if (!atomic_exchange(&s_wifi_off, true)) ESP_LOGI(TAG, "s2: wifi off wanted after %d min", (int)S2_WIFI_OFF_MIN);
+            } else {
+                wifi_back();
+            }
+        }
+#endif
         if (why != PP_OFF_NONE && power_off_request((int)why, false))
             ESP_LOGW(TAG, "power-off asked for: %s (state %s, pct %d)", pp_off_reason_name(why), pp_state_name(out.state), oin.pct);
     }
@@ -363,6 +387,9 @@ void power_sleep_poll(void)
 
 static void on_screen(bool on)
 {
+#if S2_WIFI_OFF
+    if (on) wifi_back();   // PWR woke the screen: the radio is wanted back now, before the next poll has looked at the timers
+#endif
     // The screen woke while the chip was allowed to sleep: take the awake lock back before anything else, so the chip does not go
     // back to sleep under a finger. The render task restores the rest when it sees the screen on.
     if (on && atomic_load(&s_in_s2)) {

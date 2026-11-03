@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "power_policy.h"
+#include "s2_switches.h"
 
 #ifdef DEVICE_BATTERY_SLEEP
 
@@ -38,6 +39,16 @@ void power_sleep_pm_leave_battery(void);
 uint32_t power_sleep_wait_ms(pp_poller_t who, uint32_t awake_ms);
 uint32_t power_sleep_ptt_poll_ms(uint32_t awake_ms);
 bool power_sleep_relaxed(void);
+#if S2_WIFI_OFF
+// True while the dial wants its Wi-Fi radio off (S2_WIFI_OFF: 5 minutes of dark battery time, power_policy.h pp_wifi_off_wanted). Any task; net_link.c reads it.
+bool power_sleep_wifi_off_wanted(void);
+// The wake poke: called (from the screen hook, or from the ptt task when the wish ends) whenever the radio is wanted back, so net_link need not poll for it.
+// It must only notify a task; it runs on any task and takes no lock.
+void power_sleep_set_wake_cb(void (*cb)(void));
+#else
+static inline bool power_sleep_wifi_off_wanted(void) { return false; }
+static inline void power_sleep_set_wake_cb(void (*cb)(void)) { (void)cb; }
+#endif
 #ifdef DEVICE_S2_DIAG
 // Wake diagnosis image only (s2_diag.h): while in S2, log the wake causes since the last call, esp_pm_dump_locks and esp_timer_dump. Render task, once per alive period.
 void power_sleep_diag_dump(void);
@@ -72,5 +83,7 @@ static inline uint32_t power_sleep_wait_ms(pp_poller_t who, uint32_t awake_ms) {
 static inline uint32_t power_sleep_ptt_poll_ms(uint32_t awake_ms) { return awake_ms; }
 static inline bool power_sleep_relaxed(void) { return false; }
 static inline bool power_sleep_input_allowed(void) { return true; }
+static inline bool power_sleep_wifi_off_wanted(void) { return false; }
+static inline void power_sleep_set_wake_cb(void (*cb)(void)) { (void)cb; }
 
 #endif

@@ -1011,6 +1011,54 @@ static void scenario_audio_resume_retry(void) {
     assert(!strcmp(power_sleep_state_name(), "S2") && audio_stopped && in_order("AUDIO+", "AUDIO-"));
 }
 
+#if S2_WIFI_OFF
+static int wake_pokes;
+static void wake_poke(void) { wake_pokes++; }
+static void scenario_wifi_off(void) {
+    // S2_WIFI_OFF: 5 minutes of dark battery time ask for the radio off (power_sleep_wifi_off_wanted, read by net_link); the 30 min power-off timer is not
+    // touched by it; a wake asks for the radio back at once and pokes the net_link task; no PP_HOLD_LINK is taken by this code.
+    reset_world();
+    power_sleep_init();
+    power_sleep_set_wake_cb(wake_poke);
+    assert(!power_sleep_wifi_off_wanted());
+    to_s2(80);
+    tick(4 * 60 * 1000 + 40 * 1000);                          // 4 min 40 s after S2 began
+    assert(!power_sleep_wifi_off_wanted() && wake_pokes == 0);
+    tick(30 * 1000);                                          // 5 min 10 s
+    assert(power_sleep_wifi_off_wanted() && off_calls == 0);
+    assert(strstr(g_logs, "s2: wifi off wanted after 5 min"));
+    // a hold excursion while it is wanted (the radio is parked, but anything else may hold PP_HOLD_LINK): still wanted, and the 30 min does not move
+    power_sleep_hold(PP_HOLD_LINK); tick(10 * 1000); power_sleep_release(PP_HOLD_LINK); tick(6 * 1000);
+    assert(power_sleep_wifi_off_wanted());
+    tick(24 * 60 * 1000);                                     // about 29 min 40 s after S2 began
+    assert(off_calls == 0 && power_sleep_wifi_off_wanted());
+    tick(60 * 1000);
+    assert(off_calls > 0 && off_first_reason == PP_OFF_S2_TIMEOUT && strstr(g_logs, "power-off asked for: s2_30min"));   // counted from S2 entry, not from the radio-off
+}
+static void scenario_wifi_off_wake(void) {
+    reset_world();
+    power_sleep_init();
+    power_sleep_set_wake_cb(wake_poke);
+    to_s2(80);
+    tick(5 * 60 * 1000 + 20 * 1000);
+    assert(power_sleep_wifi_off_wanted() && wake_pokes == 0);
+    screen(true);                                             // PWR: the hook asks for the radio back and pokes the net_link task, before any poll
+    assert(!power_sleep_wifi_off_wanted() && wake_pokes == 1);
+    tick(2000);
+    assert(!power_sleep_wifi_off_wanted());                   // and it stays that way: the screen is on, the span is thrown away
+    screen(false); tick(5000);                                // dark again: its own 5 minutes
+    tick(4 * 60 * 1000);
+    assert(!power_sleep_wifi_off_wanted());
+    tick(80 * 1000);
+    assert(power_sleep_wifi_off_wanted());
+    // a USB host while the radio is off: S0, the radio is wanted back at once, and the poke is sent
+    const int pokes = wake_pokes;
+    usb_host = true; tick(600);
+    assert(!power_sleep_wifi_off_wanted() && wake_pokes > pokes && !strcmp(power_sleep_state_name(), "S0"));
+    assert(off_calls == 0);
+}
+#endif
+
 static void scenario_stats(void) {
     reset_world();
     power_sleep_init();
@@ -1054,6 +1102,10 @@ int main(int argc, char **argv) {
 #ifdef DEVICE_BATTERY_POWEROFF
     else if (!strcmp(argv[1], "off_s2_timeout_0")) scenario_off_s2_timeout_0();
     else if (!strcmp(argv[1], "off_s2_timeout_1")) scenario_off_s2_timeout_1();
+#if S2_WIFI_OFF
+    else if (!strcmp(argv[1], "wifi_off")) scenario_wifi_off();
+    else if (!strcmp(argv[1], "wifi_off_wake")) scenario_wifi_off_wake();
+#endif
     else if (!strcmp(argv[1], "off_hold_timeout")) scenario_off_hold_timeout();
     else if (!strcmp(argv[1], "off_hold_low")) scenario_off_hold_low();
     else if (!strcmp(argv[1], "off_hold_input")) scenario_off_hold_input();
@@ -1107,10 +1159,14 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
     # the bench aid of the RTC watchdog: armed, never fed
     build('glue_selftest', '-DSLEEP_WDT_SELFTEST=1')
     subprocess.run([str(folder / 'glue_selftest'), 'wdt_selftest'], check=True)
+    # S2_WIFI_OFF: the radio-off request after 5 minutes of dark battery time (needs the power-off triggers' timer, so the POWEROFF build)
+    build('glue_wifi', '-DDEVICE_BATTERY_POWEROFF=1', '-DS2_WIFI_OFF=1')
+    for name in ('wifi_off', 'wifi_off_wake'):
+        subprocess.run([str(folder / 'glue_wifi'), name], check=True)
     # the S3 triggers through the real glue (power_off_request is a fake that counts)
     build('glue_off', '-DDEVICE_BATTERY_POWEROFF=1')
     for name in ('off_hold_timeout', 'off_hold_low', 'off_hold_input', 'off_hold_external', 'off_s2_timeout_0', 'off_s2_timeout_1', 'off_low_battery_0', 'off_low_battery_1', 'off_low_battery_2', 'off_drain_0', 'off_drain_1', 'off_never_on_external_power_0', 'off_never_on_external_power_1', 'off_never_on_external_power_2', 'off_never_on_external_power_3'):
         subprocess.run([str(folder / 'glue_off'), name], check=True)
     print('power sleep glue: ' + ', '.join(scenarios) + ' PASS (boot order, unplug, S2 entry and wake order without a touch wake, plug-in, 200 cycles balanced, '
           'no retention RAM, PWR wake during entry, other boards, host, holds, Wi-Fi session and link holds, the D+ bounce after a sleep, the RTC watchdog and the breadcrumb in S2, audio retry, audio resume retry, D1 input gate, sleep statistics); '
-          'the off timers through hold excursions PASS with DEVICE_BATTERY_POWEROFF=1; panel PASS with S2_PANEL_SLPIN=1; cpu80 PASS with S2_CPU80=1; noarm, lost, armhold PASS with PP_TOUCH_WAKE_ON_BATTERY=1; wdt_selftest PASS with SLEEP_WDT_SELFTEST=1; the S3 triggers PASS with DEVICE_BATTERY_POWEROFF=1')
+          'the off timers through hold excursions PASS with DEVICE_BATTERY_POWEROFF=1; panel PASS with S2_PANEL_SLPIN=1; cpu80 PASS with S2_CPU80=1; wifi_off, wifi_off_wake PASS with S2_WIFI_OFF=1; noarm, lost, armhold PASS with PP_TOUCH_WAKE_ON_BATTERY=1; wdt_selftest PASS with SLEEP_WDT_SELFTEST=1; the S3 triggers PASS with DEVICE_BATTERY_POWEROFF=1')

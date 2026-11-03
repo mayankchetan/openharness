@@ -213,6 +213,11 @@ pp_off_reason_t pp_off_step(pp_off_t *o, const pp_off_in_t *in);
 // The fall in percent, scaled to an hour, over the S2 history, or -1 while there is less than PP_OFF_DRAIN_MIN_MS of it (or it was thrown away).
 int pp_off_drain_per_hour(const pp_off_t *o);
 const char *pp_off_reason_name(pp_off_reason_t r);
+// THE RADIO OFF IN S2 (2026-11-02, user approved; s2_switches.h S2_WIFI_OFF). True once the dark battery time of the off timers (the span the 30 min timer counts:
+// S2, or S1 with the screen asleep, so a Wi-Fi join's hold does not break it) has lasted `after_ms`. It READS pp_off_t and changes nothing: the 30 min timer, the
+// flat-cell minute and the drain history are exactly what they were. It goes false the moment the span is thrown away (the screen woke, external power,
+// a USB host), which is how the radio is asked for back. The glue (power_sleep.c) publishes it; net_link.c acts on it.
+bool pp_wifi_off_wanted(const pp_off_t *o, uint32_t now_ms, uint32_t after_ms);
 
 // "On the battery", the three facts of one fresh read (see the rules at the top of this file).
 bool pp_on_battery(const pp_in_t *in);

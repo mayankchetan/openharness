@@ -227,6 +227,11 @@ pp_off_reason_t pp_off_step(pp_off_t *o, const pp_off_in_t *in)
     return PP_OFF_NONE;
 }
 
+bool pp_wifi_off_wanted(const pp_off_t *o, uint32_t now_ms, uint32_t after_ms)
+{
+    return o->s2_armed && span_reached(now_ms, o->s2_since_ms, after_ms);
+}
+
 const char *pp_off_reason_name(pp_off_reason_t r)
 {
     switch (r) {

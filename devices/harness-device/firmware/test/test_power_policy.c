@@ -326,6 +326,67 @@ static void test_poweroff_hold_excursions(void)
     assert(r.o.hist_count == 1);                                                       // started again from the sample after the gap
 }
 
+// ---- the radio off in S2 (2026-11-02): pp_wifi_off_wanted reads the dark-time span of the off timers and never changes them ----
+#define WIFI_OFF_MS (5u * 60u * 1000u)
+static void test_wifi_off_wanted(void)
+{
+    offrig_t r;
+    uint32_t at = 0;
+    // 5 minutes of dark battery time asks for the radio off; not a second earlier; the 30 min timer is the same span and still fires on time
+    offrig_init(&r, 0, PP_S2, 80);
+    assert(!pp_wifi_off_wanted(&r.o, r.in.now_ms, WIFI_OFF_MS));                // before the first step: nothing armed
+    assert(offstep(&r, 1000) == PP_OFF_NONE);                                    // arms at t = 1 s
+    assert(!pp_wifi_off_wanted(&r.o, r.in.now_ms, WIFI_OFF_MS));
+    assert(offrun(&r, WIFI_OFF_MS - 2000) == PP_OFF_NONE);                       // t = 299 s
+    assert(!pp_wifi_off_wanted(&r.o, r.in.now_ms, WIFI_OFF_MS));
+    assert(offstep(&r, 1000) == PP_OFF_NONE);                                    // t = 300 s: 299 s since the arm
+    assert(!pp_wifi_off_wanted(&r.o, r.in.now_ms, WIFI_OFF_MS));
+    assert(offstep(&r, 1000) == PP_OFF_NONE);                                    // t = 301 s: 300 s since the arm
+    assert(pp_wifi_off_wanted(&r.o, r.in.now_ms, WIFI_OFF_MS));
+    // asking changes nothing: the same state, the 30 min timer fires at 30 min after the arm, counted from S2 entry
+    const pp_off_t before = r.o;
+    for (int i = 0; i < 100; i++) (void)pp_wifi_off_wanted(&r.o, r.in.now_ms, WIFI_OFF_MS);
+    assert(!memcmp(&before, &r.o, sizeof r.o));
+    assert(offrun(&r, PP_OFF_S2_MS - 301000u - 1000u) == PP_OFF_NONE);
+    assert(pp_wifi_off_wanted(&r.o, r.in.now_ms, WIFI_OFF_MS));                  // stays wanted for the whole rest of the span
+    assert(offrun(&r, 3000) == PP_OFF_S2_TIMEOUT && r.in.now_ms >= 1000u + PP_OFF_S2_MS && r.in.now_ms <= 1000u + PP_OFF_S2_MS + 2000u);
+    // hold excursions (dark S1: a Wi-Fi join, or the PP_HOLD_LINK of anything else) neither reset it nor delay the 30 min
+    offrig_init(&r, 0, PP_S2, 80);
+    pp_off_reason_t e = excursion_run(&r, WIFI_OFF_MS + 5000u, &at);
+    assert(e == PP_OFF_NONE && pp_wifi_off_wanted(&r.o, r.in.now_ms, WIFI_OFF_MS));
+    e = excursion_run(&r, PP_OFF_S2_MS, &at);
+    assert(e == PP_OFF_S2_TIMEOUT && at <= PP_OFF_S2_MS + 2000u);
+    // radio off, then the wake: S1 with the screen on throws the span away (the radio comes back at once); the next dark spell needs its own 5 minutes
+    offrig_init(&r, 0, PP_S2, 80);
+    offrun(&r, WIFI_OFF_MS + 3000u);
+    assert(pp_wifi_off_wanted(&r.o, r.in.now_ms, WIFI_OFF_MS));
+    r.in.state = PP_S1; r.in.screen_asleep = false; offstep(&r, 1000);
+    assert(!pp_wifi_off_wanted(&r.o, r.in.now_ms, WIFI_OFF_MS));
+    r.in.screen_asleep = true; r.in.state = PP_S2;
+    offrun(&r, WIFI_OFF_MS - 3000u);
+    assert(!pp_wifi_off_wanted(&r.o, r.in.now_ms, WIFI_OFF_MS));                 // 4 min 57 s into the new spell
+    offrun(&r, 6000u);
+    assert(pp_wifi_off_wanted(&r.o, r.in.now_ms, WIFI_OFF_MS));
+    // external power (VBUS, a USB host, S0) cancels it
+    for (int how = 0; how < 3; how++) {
+        offrig_init(&r, 0, PP_S2, 80);
+        offrun(&r, WIFI_OFF_MS + 3000u);
+        assert(pp_wifi_off_wanted(&r.o, r.in.now_ms, WIFI_OFF_MS));
+        if (how == 0) r.in.on_battery = false;
+        if (how == 1) r.in.sof = true;
+        if (how == 2) r.in.state = PP_S0;
+        offstep(&r, 1000);
+        assert(!pp_wifi_off_wanted(&r.o, r.in.now_ms, WIFI_OFF_MS));
+    }
+    // 32-bit clock wrap in the middle
+    offrig_init(&r, UINT32_MAX - 150000u, PP_S2, 80);
+    offstep(&r, 1000);
+    offrun(&r, WIFI_OFF_MS - 1000u);
+    assert(!pp_wifi_off_wanted(&r.o, r.in.now_ms, WIFI_OFF_MS));
+    offrun(&r, 3000u);
+    assert(pp_wifi_off_wanted(&r.o, r.in.now_ms, WIFI_OFF_MS));
+}
+
 int main(void)
 {
     rig_t r;
@@ -628,6 +689,7 @@ int main(void)
     // --- The PMIC power-off triggers (S3, plan section 3.6 / 16): 30 min in S2, a flat cell, a fast drain; never on external power ---
     test_poweroff_triggers();
     test_poweroff_hold_excursions();
+    test_wifi_off_wanted();
 
     puts("power policy: S0/S1/S2 transitions, PMIC read schedule, hold bits, anti-flap, 32-bit clock wrap, poller table, battery screen levels, D1 input gate, power-off triggers PASS");
     return 0;
