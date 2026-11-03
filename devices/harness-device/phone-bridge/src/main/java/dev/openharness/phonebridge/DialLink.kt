@@ -4,14 +4,17 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothSocket
+import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
@@ -111,6 +114,7 @@ class DialLink(
         if (!stopped.compareAndSet(false, true)) return
         main.removeCallbacks(scanTimeout)
         stopScan()
+        StatusPublisher.shared?.detach()
         try {
             connecting?.close() // unblocks connect() on its thread
         } catch (_: Exception) {
@@ -134,8 +138,16 @@ class DialLink(
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
                 g.discoverServices()
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED && !stopped.get()) {
-                listener.onFailed("link lost, status $status")
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                StatusPublisher.shared?.detach()
+                if (!stopped.get()) listener.onFailed("link lost, status $status")
+            }
+        }
+
+        override fun onCharacteristicWrite(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (characteristic.uuid == Wire.STATUS_UUID) {
+                if (status != BluetoothGatt.GATT_SUCCESS) Log.w(TAG, "status write failed, code $status")
+                StatusPublisher.shared?.onWriteDone()
             }
         }
 
@@ -148,6 +160,33 @@ class DialLink(
             if (channelStarted.compareAndSet(false, true)) {
                 Thread({ openChannel(g.device) }, "dial-coc-connect").start()
             }
+            // Spec 6.3 rule 8. The characteristic needs an encrypted link, so a dev build that skips pairing writes only to a
+            // dial that is already bonded: a write to an unbonded dial would start a pairing the user did not ask for.
+            if (!allowUnbonded || g.device.bondState == BluetoothDevice.BOND_BONDED) {
+                StatusPublisher.shared?.attach { writeStatus(g, it) }
+            }
+        }
+    }
+
+    /** One write of the relay-status byte. Returns true when the write is out and onCharacteristicWrite will follow. */
+    private fun writeStatus(g: BluetoothGatt, status: RelayStatus): Boolean {
+        if (stopped.get()) return false
+        val ch = g.getService(Wire.SERVICE_UUID)?.getCharacteristic(Wire.STATUS_UUID) ?: return false
+        val value = byteArrayOf(status.code)
+        return try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                g.writeCharacteristic(ch, value, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                run {
+                    ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                    ch.value = value
+                    g.writeCharacteristic(ch)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "status write refused: ${e.javaClass.simpleName}")
+            false
         }
     }
 
