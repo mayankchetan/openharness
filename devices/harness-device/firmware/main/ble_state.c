@@ -230,6 +230,17 @@ ble_pair_verdict_t ble_numcmp_verdict(const ble_pair_window_t *w, uint64_t now_m
     return BLE_PAIR_WAIT;
 }
 
+ble_pair_verdict_t ble_prompt_verdict(const ble_pair_window_t *w, uint64_t shown_ms, uint64_t now_ms, int answer)
+{
+    if (now_ms < shown_ms || now_ms - shown_ms >= BLE_PROMPT_MAX_MS) return BLE_PAIR_REJECT;
+    return ble_numcmp_verdict(w, now_ms, answer);
+}
+
+bool ble_bond_unwanted(const ble_sec_t *sec)
+{
+    return sec && sec->bonded && !ble_sec_trusted(sec);
+}
+
 bool ble_encryption_required(bool dev_unbonded) { return !dev_unbonded; }
 
 // ── what goes on the air ────────────────────────────────────────────────────────────────────────────

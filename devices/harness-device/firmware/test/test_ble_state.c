@@ -680,6 +680,44 @@ static void test_the_window_time_left(void)
     CHECK(ble_pair_left_ms(&w, 6000) == 0);
 }
 
+// Review M1: a number that stays on the screen is withdrawn after BLE_PROMPT_MAX_MS, whatever the window says, and a Yes that arrives after it is a No.
+static void test_the_number_is_shown_for_a_bounded_time(void)
+{
+    ble_pair_window_t w;
+    ble_pair_init(&w);
+    ble_pair_open(&w, 1000);
+    CHECK(BLE_PROMPT_MAX_MS == 30000 && BLE_PROMPT_MAX_MS < BLE_PAIR_WINDOW_MS);
+    const uint64_t shown = 2000;
+    CHECK(ble_prompt_verdict(&w, shown, shown, -1) == BLE_PAIR_WAIT);
+    CHECK(ble_prompt_verdict(&w, shown, shown + BLE_PROMPT_MAX_MS - 1, -1) == BLE_PAIR_WAIT);
+    CHECK(ble_prompt_verdict(&w, shown, shown + BLE_PROMPT_MAX_MS, -1) == BLE_PAIR_REJECT);          // 30.0 s: over, like the window's own end
+    CHECK(ble_prompt_verdict(&w, shown, shown + BLE_PROMPT_MAX_MS, 1) == BLE_PAIR_REJECT);           // a late Yes is a No
+    CHECK(ble_prompt_verdict(&w, shown, shown + BLE_PROMPT_MAX_MS - 1, 1) == BLE_PAIR_ACCEPT);
+    CHECK(ble_prompt_verdict(&w, shown, shown + 10, 0) == BLE_PAIR_REJECT);
+    CHECK(ble_prompt_verdict(&w, shown, 1000 + BLE_PAIR_WINDOW_MS, -1) == BLE_PAIR_REJECT);          // the window rule still holds
+    CHECK(ble_prompt_verdict(&w, shown, shown - 1, 1) == BLE_PAIR_REJECT);                           // a clock that stepped back: the safe side
+    CHECK(ble_prompt_verdict(NULL, shown, shown, 1) == BLE_PAIR_REJECT);
+}
+
+// Review M2: a bond that is not an authenticated, long-keyed one (Just Works) is deleted at once; it must not fill the two slots.
+static void test_a_weak_bond_is_unwanted(void)
+{
+    for (unsigned m = 0; m < 16; m++) {
+        for (unsigned k = 0; k < 2; k++) {
+            ble_sec_t s = {.encrypted = m & 1, .bonded = m & 2, .authenticated = m & 4, .key_size = k ? 16 : 15};
+            if (m & 8) s.key_size = 0;
+            CHECK(ble_bond_unwanted(&s) == (s.bonded && !ble_sec_trusted(&s)));
+        }
+    }
+    const ble_sec_t good = {.encrypted = true, .bonded = true, .authenticated = true, .key_size = 16};
+    const ble_sec_t just_works = {.encrypted = true, .bonded = true, .authenticated = false, .key_size = 16};
+    const ble_sec_t short_key = {.encrypted = true, .bonded = true, .authenticated = true, .key_size = 7};
+    const ble_sec_t no_bond = {.encrypted = true, .bonded = false, .authenticated = false, .key_size = 16};
+    CHECK(!ble_bond_unwanted(&good) && ble_bond_unwanted(&just_works) && ble_bond_unwanted(&short_key));
+    CHECK(!ble_bond_unwanted(&no_bond));    // nothing was stored: nothing to delete (the channel rule refuses it anyway)
+    CHECK(!ble_bond_unwanted(NULL));
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2 && "usage: test_ble_state <vectors/ble_status.txt>");
@@ -699,6 +737,8 @@ int main(int argc, char **argv)
     test_the_numeric_comparison_offer();
     test_the_encryption_deadline_waits_for_the_number();
     test_the_window_time_left();
+    test_the_number_is_shown_for_a_bounded_time();
+    test_a_weak_bond_is_unwanted();
     printf("test_ble_state: %u checks PASS\n", checks);
     return 0;
 }

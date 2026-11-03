@@ -203,7 +203,7 @@ assert 'terminate_link()' in pk, 'any other kind of passkey request ends the lin
 settle = body(link, 'prompt_settle')
 assert 'ble_sm_inject_io(' in settle and link.count('ble_sm_inject_io(') == 2, 'one answer path, one refusal at the request'
 assert 'io.numcmp_accept = 0' in pk, 'a refused request is answered No'
-assert 'ble_numcmp_verdict(&s_pair, now_ms(), answer)' in settle and 'ble_set_prompting(&s_ble, false)' in settle
+assert 'ble_prompt_verdict(&s_pair, s_prompt.since_ms, now_ms(), answer)' in settle and 'ble_set_prompting(&s_ble, false)' in settle   # ble_prompt_verdict = ble_numcmp_verdict + the 30 s bound (review M1)
 assert re.search(r'if \(v == BLE_PAIR_REJECT\) ble_pair_close\(&s_pair\);', settle), 'No (or the end of the window) closes the window'
 assert 'terminate_link()' in settle, 'a rejected pairing ends the link'
 assert 'prompt_settle(-1)' in body(link, 'ble_link_task'), 'the window ending under the number is noticed by the link task'
@@ -228,6 +228,38 @@ for name in ('ble_link_pair_prompt', 'ble_link_pair_answer', 'ble_link_pairing_b
 glue_busy = body(code('mode_glue.c'), 'mode_switch_busy')
 assert 'ble_link_pairing_busy()' in glue_busy and 'MS_BUSY_PAIRING' in glue_busy, 'an open pairing window holds the mode switch'
 assert '#include "ble_link.h"' in text('mode_glue.c')
+
+# ── 5c. review fixes after B5 (M1, M2, M4 and the Low items) ──────────────────────────────────────────────────────────────────────────
+gapb = body(link, 'gap_event')
+# M4: three one-token facts that the earlier checks only held in pieces. Each is pinned as a whole line so that changing one token fails here.
+assert 'io.numcmp_accept = v == BLE_PAIR_ACCEPT;' in settle, 'the answer to the stack is Yes only for an ACCEPT verdict'
+chr_b = body(link, 'chr_access')
+gate = 'if (ble_accept_check(&sec, DEV_UNBONDED, false) != BLE_ACCEPT_OK) return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;'
+assert gate in chr_b, 'a write needs the channel rule, and is refused with "insufficient authentication"'
+assert chr_b.index('(void)link_sec(conn, &sec);') < chr_b.index(gate) < chr_b.index('atomic_store(&s_home_hint') and chr_b.index(gate) < chr_b.index('atomic_store(&s_relay_status'), 'the gate comes before either store'
+assert chr_b.count('atomic_store(') == 2, 'two stores, both behind the gate'
+assert 'const bool show = numcmp && !s_prompt.active && ble_numcmp_request(&s_pair, now_ms()) == BLE_NUMCMP_SHOW;' in gapb, 'show: a numeric comparison AND no offer on show AND the window open'
+# M1: a failed encryption takes the offer with it; a shown number is withdrawn after BLE_PROMPT_MAX_MS
+enc = re.search(r'case BLE_GAP_EVENT_ENC_CHANGE:(.*?)\n    case BLE_GAP_EVENT_REPEAT_PAIRING', gapb, re.S)
+assert enc, 'ENC_CHANGE'
+enc = enc[1]
+failed = re.search(r'if \(event->enc_change\.status != 0\) \{(.*?)\n        \}', enc, re.S)
+assert failed, 'a failed encryption has its own branch'
+failed = failed[1]
+assert 's_prompt.active = false;' in failed and 's_prompt.number = 0;' in failed and 'ble_set_prompting(&s_ble, false);' in failed, 'the offer and the deadline hold are cleared'
+assert failed.index('state_lock()') < failed.index('s_prompt.active = false;') < failed.index('ble_set_prompting(&s_ble, false);') < failed.index('state_unlock()') < failed.index('terminate_link()'), 'under the lock, then the link is ended'
+assert 'ble_prompt_verdict(&s_pair, s_prompt.since_ms, now_ms(), answer)' in settle and 'ble_numcmp_verdict(' not in settle, 'the bounded verdict'
+assert 's_prompt.since_ms = now_ms();' in gapb, 'the time the number went on show'
+assert 'since_ms' in raw_link[raw_link.index('static struct { bool active'):raw_link.index('static struct { bool active') + 160]
+# M2: Just Works must not fill the two bond slots
+assert 'ble_bond_unwanted(&sec)' in enc and 'ble_store_util_delete_peer(&d.peer_id_addr)' in enc, 'a bond that is not authenticated and long-keyed is deleted'
+assert enc.index('ble_bond_unwanted(&sec)') < enc.index('ble_store_util_delete_peer(&d.peer_id_addr)') < enc.index('terminate_link()', enc.index('ble_store_util_delete_peer')) < enc.index('note_security('), 'delete it, end the link, and only otherwise judge the link trusted'
+assert re.search(r'ble_gap_conn_find\(event->enc_change\.conn_handle, &d\) == 0', enc)
+# Low: the window closing in prompt_settle re-applies the bonding switch; a lost link forgets what the phone wrote; the inject result is logged
+assert re.search(r'if \(v == BLE_PAIR_REJECT\) \{?\s*ble_pair_close\(&s_pair\);', settle) and settle.index('state_unlock()') < settle.index('apply_bonding_policy()'), 'a closed window switches bonding off at once'
+disc = re.search(r'case BLE_GAP_EVENT_DISCONNECT:(.*?)\n    case BLE_GAP_EVENT_ENC_CHANGE', gapb, re.S)[1]
+assert 'atomic_store(&s_relay_status, 0);' in disc and 'atomic_store(&s_home_hint, 0);' in disc, 'what the phone wrote is forgotten with the link'
+assert 'const int irc = ble_sm_inject_io(conn, &io);' in settle and re.search(r'ESP_LOG[IW]\(TAG, "pairing [^"]*rc=%d', raw_link[raw_link.index('static void prompt_settle'):raw_link.index('bool ble_link_pair_prompt')]), 'the stack\'s answer is logged'
 
 # ── 5. the link task: no flash operation, the key read once ─────────────────────────────────────────
 # B4e (review H1): the bond store never evicts; a bond is made only inside the pairing window; a repeat pairing never deletes a bond outside it

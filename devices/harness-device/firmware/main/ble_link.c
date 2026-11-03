@@ -65,7 +65,7 @@ static ble_t s_ble;
 static SemaphoreHandle_t s_lock;               // s_ble and the flags below
 static bool s_started;
 static ble_pair_window_t s_pair;               // new bonds only inside this window (closed by default); guarded by s_lock
-static struct { bool active; uint16_t conn; uint32_t number; } s_prompt;   // the numeric-comparison offer on the screen; guarded by s_lock
+static struct { bool active; uint16_t conn; uint32_t number; uint64_t since_ms; } s_prompt;   // the numeric-comparison offer on the screen and when it went up (30 s at most); guarded by s_lock
 static volatile bool s_churn_cut;              // this link was already ended for burning channels
 static _Atomic(const cable_xport_t *) s_tls;
 static char s_mac[DEVICE_MAC_STR_LEN];
@@ -405,7 +405,7 @@ static void prompt_settle(int answer)
         state_unlock();
         return;
     }
-    const ble_pair_verdict_t v = ble_numcmp_verdict(&s_pair, now_ms(), answer);
+    const ble_pair_verdict_t v = ble_prompt_verdict(&s_pair, s_prompt.since_ms, now_ms(), answer);   // the window's rule, and 30 s at most on the screen
     if (v == BLE_PAIR_WAIT) {
         state_unlock();
         return;
@@ -416,12 +416,14 @@ static void prompt_settle(int answer)
     ble_set_prompting(&s_ble, false);
     if (v == BLE_PAIR_REJECT) ble_pair_close(&s_pair);
     state_unlock();
+    if (v == BLE_PAIR_REJECT) apply_bonding_policy();   // the window just closed: bonding is off from now, not at the next tick
     struct ble_sm_io io;
     memset(&io, 0, sizeof io);
     io.action = BLE_SM_IOACT_NUMCMP;
     io.numcmp_accept = v == BLE_PAIR_ACCEPT;
-    (void)ble_sm_inject_io(conn, &io);
-    ESP_LOGI(TAG, "pairing %s", v == BLE_PAIR_ACCEPT ? "accepted" : "rejected: the window is closed");
+    const int irc = ble_sm_inject_io(conn, &io);
+    if (irc == 0) ESP_LOGI(TAG, "pairing %s (rc=%d)", v == BLE_PAIR_ACCEPT ? "accepted" : "rejected", irc);
+    else ESP_LOGW(TAG, "pairing %s but the stack did not take the answer (rc=%d)", v == BLE_PAIR_ACCEPT ? "accepted" : "rejected", irc);
     if (v == BLE_PAIR_REJECT) terminate_link();
 }
 
@@ -521,11 +523,33 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         s_prompt.active = false;   // a lost link takes the offer with it
         s_prompt.number = 0;
         state_unlock();
+        atomic_store(&s_relay_status, 0);   // and what the phone wrote: the next phone starts from idle, and a stale hint steers nothing
+        atomic_store(&s_home_hint, 0);
         post(BLE_EV_LINK_DOWN);
         return 0;
-    case BLE_GAP_EVENT_ENC_CHANGE:
-        if (event->enc_change.status == 0) note_security(event->enc_change.conn_handle);
+    case BLE_GAP_EVENT_ENC_CHANGE: {
+        if (event->enc_change.status != 0) {
+            // The encryption failed (the user said No at the phone, a timeout, a bad key): the offer and the deadline hold go with it, and so does the link.
+            state_lock();
+            s_prompt.active = false;
+            s_prompt.number = 0;
+            ble_set_prompting(&s_ble, false);
+            state_unlock();
+            terminate_link();
+            return 0;
+        }
+        // A bond that is not the product's kind (Just Works, or a short key) is deleted now, so two such pairings cannot fill the two slots.
+        struct ble_gap_conn_desc d;
+        ble_sec_t sec;
+        if (link_sec(event->enc_change.conn_handle, &sec) && ble_gap_conn_find(event->enc_change.conn_handle, &d) == 0 && ble_bond_unwanted(&sec)) {
+            ble_store_util_delete_peer(&d.peer_id_addr);
+            ESP_LOGW(TAG, "bond is not authenticated or not long-keyed (auth=%d key=%u): deleted, link ended", (int)sec.authenticated, (unsigned)sec.key_size);
+            terminate_link();
+            return 0;
+        }
+        note_security(event->enc_change.conn_handle);
         return 0;
+    }
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
         // A peer pairs again although a bond exists. Inside the pairing window the user asked for it: the old bond of THAT peer goes and the pairing goes on.
         // Outside it the request is ignored, so a spoofed address cannot delete the real phone's bond.
@@ -553,6 +577,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             s_prompt.active = true;
             s_prompt.conn = c;
             s_prompt.number = event->passkey.params.numcmp;
+            s_prompt.since_ms = now_ms();
             ble_set_prompting(&s_ble, true);   // the 3 s encryption deadline waits while the number is on show
         }
         state_unlock();

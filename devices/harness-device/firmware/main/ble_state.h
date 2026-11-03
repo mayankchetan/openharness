@@ -173,5 +173,12 @@ ble_numcmp_t ble_numcmp_request(const ble_pair_window_t *w, uint64_t now_ms);
 typedef enum { BLE_PAIR_WAIT = 0, BLE_PAIR_ACCEPT, BLE_PAIR_REJECT } ble_pair_verdict_t;
 // `answer`: 1 Yes, 0 No, anything else (use -1) no answer yet.
 ble_pair_verdict_t ble_numcmp_verdict(const ble_pair_window_t *w, uint64_t now_ms, int answer);
+// Review M1: a number is shown for at most BLE_PROMPT_MAX_MS (30 s), inside the window or not. The verdict with that bound: `shown_ms` is when the number went on
+// the screen. Over the bound is a rejection, a late Yes included; a clock that stepped back from `shown_ms` is the safe side too.
+#define BLE_PROMPT_MAX_MS 30000u
+ble_pair_verdict_t ble_prompt_verdict(const ble_pair_window_t *w, uint64_t shown_ms, uint64_t now_ms, int answer);
+// Review M2: a stored bond that is not the product's kind (authenticated, 16-byte key): Just Works, or a short key. It is deleted as soon as the link is
+// encrypted, so it cannot fill the bond slots. A link with no bond has nothing to delete. NULL: false.
+bool ble_bond_unwanted(const ble_sec_t *sec);
 // The glue says the number is on show (true) or gone (false). Only a link in SECURING can hold the deadline; NULL is ignored.
 void ble_set_prompting(ble_t *b, bool prompting);
