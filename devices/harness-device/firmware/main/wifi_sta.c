@@ -88,13 +88,14 @@ static bool fail(const char *what, esp_err_t e, bool driver_inited)
 }
 
 // HOOK 1 (wifi_sta.h). The two profiles are separate names on purpose: the battery plan changes NET_PS_IDLE and nothing else. Default IDLE = ACTIVE.
-// net_link.c power_profile_sync() calls the hook with IDLE while the chip may sleep (S2). IDLE is WIFI_PS_MAX_MODEM since 2026-11-02 (user approved, after the
-// FINAL5 S2 bench): the station wakes for every third beacon (the listen interval of 3 set at association, below) instead of every DTIM beacon, and it still
-// keeps the association. Its cost is downlink latency of up to about 300 ms and, on an access point that does not buffer for it, a dropped session while
-// asleep: the bench decides, and this one line goes back to MIN_MODEM if it drops. ACTIVE (S0, S1, the join and the handshake)
-// stays MIN_MODEM, the mode every number in the spec was measured with. test_wifi_power_source.py pins both values.
+// net_link.c power_profile_sync() calls the hook with IDLE while the chip may sleep (S2). IDLE is MIN_MODEM unless the image is built with -DS2_PS_MAX_MODEM=1
+// (s2_switches.h): with MAX_MODEM the station wakes for every third beacon (the listen interval of 3 set at association, below) instead of every DTIM beacon.
+// On 2026-11-03 the DIAG7 image (MAX_MODEM in S2) failed voice over Wi-Fi twice after an S2 exit: no TCP ACK reached the dial for 3 s, the send queue filled and the
+// TLS write gave up at its 2 s cap, in the old session and in a fresh one on the same association, although the profile had been put back to MIN_MODEM 20 s earlier;
+// FINAL5 (MIN_MODEM in S2) worked. So MAX_MODEM is an opt-in image until a bench run clears it. ACTIVE (S0, S1, the join and the handshake) is MIN_MODEM, the mode
+// every number in the spec was measured with. test_wifi_power_source.py pins both.
 #define NET_PS_ACTIVE WIFI_PS_MIN_MODEM
-#define NET_PS_IDLE WIFI_PS_MAX_MODEM
+#define NET_PS_IDLE (S2_PS_MAX_MODEM ? WIFI_PS_MAX_MODEM : WIFI_PS_MIN_MODEM)
 
 static const char *ps_name(wifi_ps_type_t m) { return m == WIFI_PS_MAX_MODEM ? "max_modem" : m == WIFI_PS_MIN_MODEM ? "min_modem" : "other"; }
 

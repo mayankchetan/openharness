@@ -80,7 +80,16 @@ idle = re.search(r'#define\s+NET_PS_IDLE\s+(\w+)', sta)
 assert active and active.group(1) == 'WIFI_PS_MIN_MODEM', 'ACTIVE is min-modem'
 # 2026-11-02 (user approved): IDLE, the profile used while the chip may sleep (S2), is max-modem. The association request carries listen_interval 3 (section 2
 # below), so the station wakes for every third beacon; ACTIVE (S0, S1, the link join and handshake) stays min-modem, which every spec number was measured with.
-assert idle and idle.group(1) == 'WIFI_PS_MAX_MODEM',     'IDLE is max-modem (2026-11-02), ACTIVE stays min-modem'
+# 2026-11-03: MAX_MODEM in S2 is a build switch, OFF by default. On the bench (DIAG7 on :50) voice over Wi-Fi failed twice after an S2 exit that had run max-modem
+# (no TCP ACK reached the dial for 3 s: the send queue filled and the TLS write gave up after its 2 s cap) while FINAL5, min-modem in S2, worked. The switch keeps the image
+# that proves or clears it (-DS2_PS_MAX_MODEM=1); the default is the mode every working number was measured with.
+sta_raw = text('wifi_sta.c')
+assert '#define NET_PS_IDLE (S2_PS_MAX_MODEM ? WIFI_PS_MAX_MODEM : WIFI_PS_MIN_MODEM)' in sta_raw, 'IDLE follows the switch'
+sw = text('s2_switches.h')
+assert '#ifndef S2_PS_MAX_MODEM\n#define S2_PS_MAX_MODEM 0\n#endif' in sw, 'the switch is off by default'
+cm = text('CMakeLists.txt')
+assert not re.search(r'foreach\(s2_switch[^)]*S2_PS_MAX_MODEM', cm), 'not in the loop that turns switches ON'
+assert re.search(r'if\(S2_PS_MAX_MODEM\)\n\s*target_compile_definitions\(\$\{COMPONENT_LIB\} PRIVATE S2_PS_MAX_MODEM=1\)', cm), 'on only when asked'
 hook_text = text('wifi_sta.c')
 log_at = hook_text.index('power save now')
 assert hook_text.index('esp_wifi_set_ps(') < hook_text.index('esp_wifi_get_ps(') < log_at, 'the mode is read back from the driver after it was set, then logged'

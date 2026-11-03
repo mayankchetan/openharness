@@ -288,6 +288,10 @@ if(DEVICE_BATTERY_SLEEP)
     if(DEVICE_S2_DIAG)
         target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_S2_DIAG=1)
     endif()
+    # MAX_MODEM as the S2 Wi-Fi power-save mode, off by default and NOT in the loop above (it broke voice after an S2 exit on the DIAG7 image, 2026-11-03). -DS2_PS_MAX_MODEM=1.
+    if(S2_PS_MAX_MODEM)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE S2_PS_MAX_MODEM=1)
+    endif()
     # Bench aid, off by default: arm the RTC watchdog at S2 entry and never feed it (power_sleep.c WDT_STARVE). -DSLEEP_WDT_SELFTEST=1. Never for a product image.
     if(SLEEP_WDT_SELFTEST)
         target_compile_definitions(${COMPONENT_LIB} PRIVATE SLEEP_WDT_SELFTEST=1)
