@@ -837,6 +837,8 @@ static void *duo_writer(void *p)
     return NULL;
 }
 
+static int g_duo_read_ms = 100;   // the reader's wait per read(): 100 ms is the awake dial, 5000 ms the relaxed S2 read (PP_POLLER_CABLE_READER)
+
 static void *duo_reader(void *p)
 {
     duo_t *d = p;
@@ -847,7 +849,7 @@ static void *duo_reader(void *p)
     uint8_t chunk[1500];
     int64_t last = ms_now();
     while (c.seen < d->frames && !atomic_load(&d->stop)) {
-        int n = d->t->read(d->t, chunk, sizeof(chunk), 100);
+        int n = d->t->read(d->t, chunk, sizeof(chunk), g_duo_read_ms);
         if (n < 0) { d->rc = -2; break; }
         if (n > 0) { cable_decoder_buf_feed(&dec, chunk, (size_t)n, on_frame, &c); last = ms_now(); }
         if (ms_now() - last > 15000) { d->rc = -3; break; }
@@ -932,6 +934,16 @@ static void run_writer_not_starved(bool with_wait_op)
     free(l);
     printf("ok writer not starved by a waiting reader (%s): %d writes, worst %lld ms, mean %lld ms, %d inner reads meanwhile\n",
            with_wait_op ? "reader waits on the socket" : "reader polls in slices", N, (long long)worst, (long long)(total / N), reads);
+}
+
+// 2026-11-03 regression hunt (voice stalled after an S2 exit): the hypothesis was that a reader inside a LONG read (5 s, waiting on the socket in 2 s slices since the
+// wake diet) delays a writer by up to a slice. It does not: the reader waits without the mutex. 300 voice-sized writes beside a reader in a 5 s read, none slower than
+// 120 ms (the run_writer_not_starved bound), and the link survives (no 2 s write stall).
+static void test_writer_during_long_read(void)
+{
+    g_duo_read_ms = 5000;
+    run_writer_not_starved(true);
+    g_duo_read_ms = 100;
 }
 
 static void test_writer_not_starved(void)
@@ -1695,6 +1707,7 @@ int main(int argc, char **argv)
     test_partial_write_same_buffer();
     test_concurrent_echo();
     test_writer_not_starved();
+    test_writer_during_long_read();
     test_idle_read_few_wakes();
     test_long_read_few_wakes();
     test_data_ends_wait();
