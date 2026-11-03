@@ -135,9 +135,9 @@ class BridgeService : Service() {
                 tunnelRetry.connected()
                 update(mySession, Phase.RELAYING, "tunnel up")
             }
-            override fun onClosed(reason: CloseReason) {
-                val http = pump?.lastHttpCode()
-                main.post { sessionEnded(mySession, reason, http) }
+            override fun onClosed(reason: CloseReason, httpCode: Int?) {
+                // The code comes with the call: teardown() may have nulled `pump` on another thread already.
+                main.post { sessionEnded(mySession, reason, httpCode) }
             }
         })
         pump = p
@@ -153,14 +153,13 @@ class BridgeService : Service() {
     }
 
     private fun sessionEnded(mySession: Int, reason: CloseReason, http: Int?) {
-        when {
-            ReconnectPolicy.isTokenRejected(http) ->
+        when (ReconnectPolicy.decide(reason, http)) {
+            SessionEnd.TOKEN_REJECTED ->
                 finish(mySession, Phase.TOKEN_REJECTED, "the tunnel refused the service token ($http). Check it in Settings.")
-            !ReconnectPolicy.shouldRetry(reason, http) -> finish(mySession, Phase.CLOSED, "stopped")
-            // The dial closed its side: a BLE matter. Anything else is the tunnel.
-            reason == CloseReason.DIAL_CLOSED ->
-                finish(mySession, Phase.CLOSED, "session ended: dial closed", bleRetry)
-            else -> finish(mySession, Phase.CLOSED, "session ended: ${reason.name.lowercase()}", tunnelRetry)
+            SessionEnd.STOP -> finish(mySession, Phase.CLOSED, "stopped")
+            SessionEnd.RETRY_LINK -> finish(mySession, Phase.CLOSED, "session ended: dial closed", bleRetry)
+            SessionEnd.RETRY_TUNNEL ->
+                finish(mySession, Phase.CLOSED, "session ended: ${reason.name.lowercase()}", tunnelRetry)
         }
     }
 

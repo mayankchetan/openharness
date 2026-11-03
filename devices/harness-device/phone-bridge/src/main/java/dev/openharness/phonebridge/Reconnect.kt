@@ -4,7 +4,8 @@ import java.util.Random
 
 /**
  * The back-off ladder of spec rule 4: 1, 2, 4, 8, 16, 30 s, then 30 s for ever. A good connection calls reset().
- * With a `random`, each delay is cut by up to a quarter, so the delay never passes the step (and never the 30 s cap).
+ * With a `random`, each delay is lengthened by up to a quarter of its step, then capped at 30 s. So a delay is never
+ * shorter than its step (never below the 1 s floor) and never longer than 30 s.
  */
 class ReconnectLadder(
     private val steps: List<Long> = Wire.BACKOFF_LADDER_MS,
@@ -16,12 +17,16 @@ class ReconnectLadder(
     fun nextDelayMs(): Long {
         val base = steps[minOf(next, steps.size - 1)]
         if (next < steps.size) next++
-        return if (random == null) base else base - random.nextLong(base / 4 + 1)
+        return if (random == null) base else minOf(base + random.nextLong(base / 4 + 1), MAX_DELAY_MS)
     }
 
     @Synchronized
     fun reset() {
         next = 0
+    }
+
+    private companion object {
+        const val MAX_DELAY_MS = 30_000L
     }
 }
 
@@ -82,7 +87,22 @@ class Reconnector(
     }
 }
 
+/** What to do when a relay session ends (see ReconnectPolicy.decide). */
+enum class SessionEnd { TOKEN_REJECTED, STOP, RETRY_LINK, RETRY_TUNNEL }
+
 object ReconnectPolicy {
+    /**
+     * The one decision for a closed session. `httpCode` is the code the pump reported with the close, never read
+     * later from the pump, so a teardown on another thread cannot hide a 401 or 403.
+     */
+    fun decide(reason: CloseReason, httpCode: Int?): SessionEnd = when {
+        isTokenRejected(httpCode) -> SessionEnd.TOKEN_REJECTED
+        reason == CloseReason.STOPPED -> SessionEnd.STOP
+        // The dial closed its side: a BLE matter. Anything else is the tunnel.
+        reason == CloseReason.DIAL_CLOSED -> SessionEnd.RETRY_LINK
+        else -> SessionEnd.RETRY_TUNNEL
+    }
+
     /** The edge refuses a wrong or revoked service token with 401 or 403. */
     fun isTokenRejected(httpCode: Int?): Boolean = httpCode == 401 || httpCode == 403
 

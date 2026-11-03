@@ -135,4 +135,64 @@ class SettingsStoreTest {
         store.clearToken()
         assertTrue(store.load().headers().isEmpty())
     }
+
+    @Test
+    fun aCipherThatThrowsStoresNothingAndKeepsTheOldValues() {
+        val cipher = ThrowingCipher()
+        val st = SettingsStore(kv, cipher)
+        assertNull(st.save("wss://old.example.org/relay", "old-id", "old-secret"))
+        val before = kv.map.toMap()
+        cipher.failEncrypt = true
+        val msg = st.save("wss://new.example.org/relay", "new-id", "new-secret")
+        assertNotNull(msg)
+        assertFalse(msg!!, msg.contains("new-secret"))
+        assertEquals(before, kv.map.toMap())
+        cipher.failEncrypt = false
+        val s = st.load()
+        assertEquals("old-id", s.clientId)
+        assertEquals("old-secret", s.secret.reveal())
+        assertEquals("wss://old.example.org/relay", s.relayUrl)
+    }
+
+    @Test
+    fun aSecretWithoutAClientIdIsAnErrorAndNothingIsStored() {
+        val msg = store.save(SettingsStore.DEFAULT_RELAY_URL, "", "lonely-secret")
+        assertEquals("Client ID is needed with a secret", msg)
+        assertTrue(kv.map.isEmpty())
+    }
+
+    @Test
+    fun aBlankIdAndBlankSecretStillClearsTheToken() {
+        store.save(SettingsStore.DEFAULT_RELAY_URL, "id", "first-secret")
+        assertNull(store.save(SettingsStore.DEFAULT_RELAY_URL, "", ""))
+        assertFalse(store.load().hasToken)
+    }
+
+    @Test
+    fun theSchemeAndHostAreMatchedWithoutRegardToCase() {
+        assertNull(SettingsStore.validateRelayUrl("WSS://dial.example.org/relay", false))
+        assertNull(SettingsStore.validateRelayUrl("Wss://Dial.Example.org/relay", false))
+        assertNull(SettingsStore.validateRelayUrl("WS://127.0.0.1:18481/relay", true))
+        assertNotNull(SettingsStore.validateRelayUrl("WS://127.0.0.1:18481/relay", false))
+        assertNotNull(SettingsStore.validateRelayUrl("WS://192.168.1.5/relay", true))
+        assertNotNull(SettingsStore.validateRelayUrl("HTTPS://dial.example.org/relay", false))
+    }
+
+    @Test
+    fun aBlobNeedsRoomForTheIvAndTheTag() {
+        assertFalse(GcmBlob.isWellFormed(0))
+        assertFalse(GcmBlob.isWellFormed(12))
+        assertFalse(GcmBlob.isWellFormed(12 + 15))
+        assertTrue(GcmBlob.isWellFormed(12 + 16))
+        assertTrue(GcmBlob.isWellFormed(12 + 16 + 20))
+    }
+}
+
+class ThrowingCipher(var failEncrypt: Boolean = false) : SecretCipher {
+    private val inner = FakeCipher()
+    override fun encrypt(plain: ByteArray): ByteArray {
+        if (failEncrypt) throw java.security.GeneralSecurityException("keystore unavailable")
+        return inner.encrypt(plain)
+    }
+    override fun decrypt(blob: ByteArray): ByteArray = inner.decrypt(blob)
 }

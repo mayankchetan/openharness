@@ -107,6 +107,20 @@ class PumpTest {
     }
 
     @Test
+    fun theCloseCallbackCarriesTheHttpCodeSoNoCallerHasToAskThePumpLater() {
+        val dial = FakeDial()
+        val tunnel = FakeTunnel()
+        val listener = RecordingListener()
+        val pump = newPump(dial, tunnel, listener)
+        pump.start()
+        dial.feed(byteArrayOf(1))
+        waitUntil(what = "tunnel opened") { tunnel.openCount.get() == 1 }
+        tunnel.events!!.onFailure(401, RuntimeException("edge said no"))
+        waitUntil(what = "listener") { listener.httpCodes.isNotEmpty() }
+        assertEquals(listOf<Int?>(401), listener.httpCodes.toList())
+    }
+
+    @Test
     fun tunnelClosedByPeerClosesTheDialChannel() {
         val dial = FakeDial()
         val tunnel = FakeTunnel()

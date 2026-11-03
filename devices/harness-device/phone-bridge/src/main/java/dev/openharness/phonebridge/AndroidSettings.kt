@@ -22,10 +22,10 @@ class KeystoreCipher(private val alias: String = "phonebridge_settings_key") : S
     }
 
     override fun decrypt(blob: ByteArray): ByteArray {
-        require(blob.size > IV_BYTES) { "short blob" }
+        require(GcmBlob.isWellFormed(blob.size)) { "short blob" }
         val c = Cipher.getInstance(TRANSFORM)
-        c.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(TAG_BITS, blob, 0, IV_BYTES))
-        return c.doFinal(blob, IV_BYTES, blob.size - IV_BYTES)
+        c.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(TAG_BITS, blob, 0, GcmBlob.IV_BYTES))
+        return c.doFinal(blob, GcmBlob.IV_BYTES, blob.size - GcmBlob.IV_BYTES)
     }
 
     private fun key(): SecretKey {
@@ -45,7 +45,6 @@ class KeystoreCipher(private val alias: String = "phonebridge_settings_key") : S
     private companion object {
         const val PROVIDER = "AndroidKeyStore"
         const val TRANSFORM = "AES/GCM/NoPadding"
-        const val IV_BYTES = 12
         const val TAG_BITS = 128
     }
 }

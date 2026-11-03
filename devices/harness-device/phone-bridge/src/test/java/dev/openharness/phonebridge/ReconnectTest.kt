@@ -62,13 +62,22 @@ class ReconnectTest {
     }
 
     @Test
-    fun jitterOnlyShortensAndNeverPassesTheCap() {
-        val ladder = ReconnectLadder(random = Random(5))
-        val base = Wire.BACKOFF_LADDER_MS + List(20) { 30_000L }
-        for (b in base) {
-            val d = ladder.nextDelayMs()
-            assertTrue("$d must be in [${b * 3 / 4}, $b]", d in (b * 3 / 4)..b)
+    fun jitterNeverGoesBelowTheStepOrPastThe30SecondCap() {
+        // Many random draws: every delay is at least its step (so at least the 1 s floor) and never above 30 s.
+        for (seed in 1L..200L) {
+            val ladder = ReconnectLadder(random = Random(seed))
+            val base = Wire.BACKOFF_LADDER_MS + List(20) { 30_000L }
+            for (b in base) {
+                val d = ladder.nextDelayMs()
+                assertTrue("seed $seed: $d must be in [$b, min(${b * 5 / 4}, 30000)]", d >= b && d >= 1000L && d <= minOf(b * 5 / 4, 30_000L))
+            }
         }
+    }
+
+    @Test
+    fun jitterStillSpreadsTheShortSteps() {
+        val delays = (1L..200L).map { ReconnectLadder(random = Random(it)).nextDelayMs() }.toSet()
+        assertTrue("1 s step shows no spread: $delays", delays.size > 10)
     }
 
     @Test
@@ -154,6 +163,25 @@ class ReconnectTest {
         assertTrue(ReconnectPolicy.isTokenRejected(401))
         assertTrue(ReconnectPolicy.isTokenRejected(403))
         assertFalse(ReconnectPolicy.isTokenRejected(502))
+    }
+
+    @Test
+    fun aRejectedTokenIsNeverRetriedWhateverTheCloseReason() {
+        for (reason in CloseReason.values()) {
+            for (code in listOf(401, 403)) {
+                val d = ReconnectPolicy.decide(reason, code)
+                assertEquals("$reason $code", SessionEnd.TOKEN_REJECTED, d)
+            }
+        }
+    }
+
+    @Test
+    fun decideMapsTheOtherEnds() {
+        assertEquals(SessionEnd.STOP, ReconnectPolicy.decide(CloseReason.STOPPED, null))
+        assertEquals(SessionEnd.RETRY_LINK, ReconnectPolicy.decide(CloseReason.DIAL_CLOSED, null))
+        assertEquals(SessionEnd.RETRY_TUNNEL, ReconnectPolicy.decide(CloseReason.TUNNEL_FAILED, 502))
+        assertEquals(SessionEnd.RETRY_TUNNEL, ReconnectPolicy.decide(CloseReason.TUNNEL_CLOSED, null))
+        assertEquals(SessionEnd.RETRY_TUNNEL, ReconnectPolicy.decide(CloseReason.STALL_TO_DIAL, null))
     }
 
     @Test

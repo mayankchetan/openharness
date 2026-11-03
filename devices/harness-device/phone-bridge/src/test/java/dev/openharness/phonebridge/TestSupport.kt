@@ -104,7 +104,9 @@ class FakeTunnel : TunnelOpener {
 
 class RecordingListener : PumpListener {
     val reasons: MutableList<CloseReason> = java.util.Collections.synchronizedList(mutableListOf<CloseReason>())
+    val httpCodes: MutableList<Int?> = java.util.Collections.synchronizedList(mutableListOf<Int?>())
     override fun onClosed(reason: CloseReason) { reasons.add(reason) }
+    override fun onClosed(reason: CloseReason, httpCode: Int?) { httpCodes.add(httpCode); onClosed(reason) }
 }
 
 fun waitUntil(timeoutMs: Long = 10_000, what: String = "condition", cond: () -> Boolean) {

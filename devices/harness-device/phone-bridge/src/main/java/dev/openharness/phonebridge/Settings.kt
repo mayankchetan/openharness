@@ -66,9 +66,16 @@ class SettingsStore(
         validateRelayUrl(url, allowCleartextLoopback)?.let { return it }
         if (id.isNotEmpty() && !isHeaderSafe(id)) return "Client ID: use visible characters only, no spaces."
         if (sec.isNotEmpty() && !isHeaderSafe(sec)) return "Client Secret: use visible characters only, no spaces."
+        if (sec.isNotEmpty() && id.isEmpty()) return "Client ID is needed with a secret"
+        // Encrypt first: if the Keystore fails, nothing is written and the old URL, ID and secret stay together.
+        val encrypted = if (sec.isEmpty()) null else try {
+            Base64.getEncoder().encodeToString(cipher.encrypt(sec.toByteArray(Charsets.UTF_8)))
+        } catch (_: Exception) {
+            return "Could not store the secret: the Android Keystore refused. Nothing was saved."
+        }
         kv.put(KEY_URL, url)
         kv.put(KEY_ID, id.ifEmpty { null })
-        if (sec.isNotEmpty()) kv.put(KEY_SECRET, Base64.getEncoder().encodeToString(cipher.encrypt(sec.toByteArray(Charsets.UTF_8))))
+        if (encrypted != null) kv.put(KEY_SECRET, encrypted)
         if (id.isEmpty()) kv.put(KEY_SECRET, null)
         return null
     }
@@ -107,9 +114,9 @@ class SettingsStore(
             }
             val host = u.host
             if (host.isNullOrEmpty() || u.userInfo != null || u.rawQuery != null || u.rawFragment != null) return bad
-            return when (u.scheme) {
+            return when (u.scheme?.lowercase()) {
                 "wss" -> null
-                "ws" -> if (allowCleartextLoopback && host == "127.0.0.1") null else bad
+                "ws" -> if (allowCleartextLoopback && host.lowercase() == "127.0.0.1") null else bad
                 else -> bad
             }
         }
@@ -117,4 +124,13 @@ class SettingsStore(
         /** Header values must be visible ASCII: OkHttp refuses anything else with a message that includes the value. */
         fun isHeaderSafe(v: String): Boolean = v.length <= MAX_FIELD && v.all { it.code in 0x21..0x7E }
     }
+}
+
+/** Layout of an AES-GCM blob: a 12-byte IV, the cipher text, a 16-byte tag. */
+object GcmBlob {
+    const val IV_BYTES = 12
+    const val TAG_BYTES = 16
+
+    /** Room for the IV and the tag at least (an empty plain text still makes IV + tag). */
+    fun isWellFormed(size: Int): Boolean = size >= IV_BYTES + TAG_BYTES
 }

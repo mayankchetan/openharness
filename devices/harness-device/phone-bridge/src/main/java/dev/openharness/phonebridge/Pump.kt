@@ -44,7 +44,10 @@ interface PumpListener {
     fun onTunnelOpen() {}
 
     /** Called once, from whichever thread closed the pump. Both sides are already closed. */
-    fun onClosed(reason: CloseReason)
+    fun onClosed(reason: CloseReason) {}
+
+    /** Same call, with the HTTP status of a refused upgrade (401, 403 ...) or null. Override this one if you need the code. */
+    fun onClosed(reason: CloseReason, httpCode: Int?) = onClosed(reason)
 }
 
 /**
@@ -210,7 +213,7 @@ class Pump(
             dial.close()
         } catch (_: Exception) {
         }
-        listener.onClosed(reason)
+        listener.onClosed(reason, httpCode)
     }
 
     /**
