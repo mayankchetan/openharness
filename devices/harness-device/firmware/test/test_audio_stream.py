@@ -99,6 +99,8 @@ static int audio_capture_read(uint8_t *out,int capacity) {
 static unsigned audio_capture_overruns(void) {return overruns;}
 static void audio_capture_stop(void) {stops++;}
 static void config_load_voicelang(char *out,size_t n) {snprintf(out,n,"en");}
+#define VOICE_LINK_WAIT_MS 2800
+static bool cable_client_wait_session(uint32_t ms) { (void)ms; return true; }   /* no radio-off in this harness: the link is always there */
 static bool audio_stream_begin(const char *id,const char *cmd,const char *lang,int rate) {
     assert(id&&!strcmp(id,"target-agent")&&!strcmp(cmd,"")&&!strcmp(lang,"en")&&rate==16000);
     begins++;return mode!=BEGIN_FAIL;

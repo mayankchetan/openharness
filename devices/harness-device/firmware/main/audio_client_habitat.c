@@ -30,6 +30,10 @@
 // (the scarce budget). The ring is full-or-abort: a stall longer than the ring ends the turn (capture() below), as it always did.
 #define BUFFER_BYTES 32768
 #define BUFFER_BYTES_WIFI 98304
+// A turn that starts while the Wi-Fi radio is still coming back (S2_WIFI_OFF: the PWR wake starts it, a join and a handshake take seconds) waits this long for the link
+// before voice.begin, while the capture keeps filling the ring above. 98,304 B at 32,000 B/s is 3.07 s of speech: the wait is shorter, so the first words are kept when
+// the link comes in time. Past the ring the capture aborts the turn ("USB stalled beyond the PCM buffer"), as it always did. test/test_voice_link_wait.py holds the numbers.
+#define VOICE_LINK_WAIT_MS 2800
 static const char *TAG = "audio_fast";
 static TaskHandle_t capture_task, sender_task;
 static uint8_t *storage;
@@ -205,6 +209,12 @@ static void send_audio(void *unused)
                                                       : "";
         int64_t began = esp_timer_get_time();
         xTaskNotifyGive(capture_task);
+        {   // no-op unless net_link says the radio is coming back (cable_client_set_link_waking): USB and an ordinary link never wait here
+            const int64_t waited_from = esp_timer_get_time();
+            const bool up = cable_client_wait_session(VOICE_LINK_WAIT_MS);
+            const uint32_t waited_ms = (uint32_t)((esp_timer_get_time() - waited_from) / 1000);
+            if (waited_ms >= 40) ESP_LOGI(TAG, "voice: waited %u ms for the link (%s)", (unsigned)waited_ms, up ? "up" : "not up");
+        }
         if (!audio_stream_begin(agent[0] ? agent : NULL, cmd, lang, AUDIO_SAMPLE_RATE))
             atomic_store(&abort_requested, true);
         uint32_t delivered = 0, send_max_us = 0;

@@ -134,6 +134,7 @@ static int audio_capture_read(uint8_t *,int);
 static void audio_capture_stop(void);
 static unsigned audio_capture_overruns(void) {return atomic_load(&overruns);}
 static bool audio_stream_begin(const char *,const char *,const char *,int);
+static bool cable_client_wait_session(uint32_t ms) { (void)ms; return true; }   /* no radio-off in this harness: the link is always there */
 static bool audio_stream_pcm(const uint8_t *,size_t);
 static void audio_stream_end(void);
 static void audio_stream_abort(const char *);

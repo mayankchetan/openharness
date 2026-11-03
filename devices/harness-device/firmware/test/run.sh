@@ -76,6 +76,7 @@ python3 "$here/test_net_link_source.py"
 # runs on the host against the table the daemon's spec reads too (vectors/keepalive.txt).
 python3 "$here/test_wifi_power_source.py"
 python3 "$here/test_net_radio_source.py"   # the radio off in S2: goodbye, close, park; no join, hold or backoff while parked; internal-stack radio job
+python3 "$here/test_voice_link_wait.py"   # voice right after the radio comes back: wait for the link while the ring fills
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" \
    -o "$out/test_cable_keepalive" "$here/test_cable_keepalive.c" -lm
 "$out/test_cable_keepalive" "$here/vectors/keepalive.txt"
