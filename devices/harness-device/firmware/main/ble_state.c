@@ -174,6 +174,11 @@ bool ble_pair_is_open(const ble_pair_window_t *w, uint64_t now_ms)
     return w && w->open && now_ms >= w->from_ms && now_ms < w->until_ms;
 }
 
+uint32_t ble_pair_left_ms(const ble_pair_window_t *w, uint64_t now_ms)
+{
+    return ble_pair_is_open(w, now_ms) ? (uint32_t)(w->until_ms - now_ms) : 0;
+}
+
 bool ble_bond_allowed(const ble_pair_window_t *w, uint64_t now_ms, bool store_full)
 {
     return !store_full && ble_pair_is_open(w, now_ms);

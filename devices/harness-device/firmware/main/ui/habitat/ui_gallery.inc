@@ -463,6 +463,21 @@ SETUP(settings_2) { LOCKED(view(SETTINGS); s.offset = 5); }
 SETUP(link_wifi) { LOCKED(link_ui.loaded = link_ui.provisioned = link_ui.wifi = true; link_ui.stay = false; view(LINK)); }
 SETUP(link_keep) { LOCKED(link_ui.loaded = link_ui.provisioned = link_ui.wifi = link_ui.stay = true; view(LINK)); }
 SETUP(link_none) { LOCKED(link_ui.loaded = true; link_ui.provisioned = link_ui.wifi = link_ui.stay = false; view(LINK)); }
+// The Phone screens (B5). phone_ui is set by hand: the gallery has no radio, and phone_poll is not compiled into it. The view first, the struct after it, so
+// that leaving a phone view (phone_leave) can never wipe what the item set.
+static void g_phone(unsigned bonds, bool running, bool linked, bool window, uint32_t left_s, uint32_t code, view_t v)
+{
+    LOCKED(view(v); memset(&phone_ui, 0, sizeof phone_ui); phone_ui.known = true; phone_ui.running = running; phone_ui.linked = linked;
+           phone_ui.window = window; phone_ui.bonds = bonds; phone_ui.left_s = left_s; phone_ui.code = code);
+}
+SETUP(phone_off) { g_phone(0, false, false, false, 0, 0, PHONE); }
+SETUP(phone_unpaired) { g_phone(0, true, false, false, 0, 0, PHONE); }
+SETUP(phone_paired) { g_phone(1, true, false, false, 0, 0, PHONE); }
+SETUP(phone_connected) { g_phone(2, true, true, false, 0, 0, PHONE); }
+SETUP(phone_waiting) { g_phone(1, true, false, true, 118, 0, PHONE); }
+SETUP(passkey) { g_phone(0, true, true, true, 90, 482913, PASSKEY); }
+SETUP(passkey_zeros) { g_phone(0, true, true, true, 3, 5, PASSKEY); }   // leading zeros are shown: 000 005
+SETUP(forget_ask) { g_phone(1, true, false, false, 0, 0, FORGET); }
 SETUP(models_loading) { LOCKED(GCOPY(s.model_agent, g_id(0)); s.model_count = -1; view(MODELS)); }
 SETUP(models) { LOCKED(GCOPY(s.model_agent, g_id(0)); s.model_count = 8; view(MODELS)); }
 SETUP(models_empty) { LOCKED(GCOPY(s.model_agent, g_id(0)); s.model_count = 0; view(MODELS)); }

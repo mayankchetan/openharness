@@ -663,6 +663,23 @@ static void test_the_encryption_deadline_waits_for_the_number(void)
     CHECK(ble_numcmp_verdict(&w, 119000, -1) == BLE_PAIR_WAIT && ble_numcmp_verdict(&w, BLE_PAIR_WINDOW_MS, -1) == BLE_PAIR_REJECT);
 }
 
+// B5 screen: the countdown the Phone screen shows is the time left in the window, rounded UP to whole seconds by the screen, in ms here.
+static void test_the_window_time_left(void)
+{
+    ble_pair_window_t w;
+    ble_pair_init(&w);
+    CHECK(ble_pair_left_ms(&w, 0) == 0 && ble_pair_left_ms(NULL, 0) == 0);                                  // closed: nothing left
+    ble_pair_open(&w, 5000);
+    CHECK(ble_pair_left_ms(&w, 5000) == BLE_PAIR_WINDOW_MS);
+    CHECK(ble_pair_left_ms(&w, 5000 + 1) == BLE_PAIR_WINDOW_MS - 1);
+    CHECK(ble_pair_left_ms(&w, 5000 + BLE_PAIR_WINDOW_MS - 1) == 1);
+    CHECK(ble_pair_left_ms(&w, 5000 + BLE_PAIR_WINDOW_MS) == 0);                                            // 120.0 s: over, like ble_pair_is_open
+    CHECK(ble_pair_left_ms(&w, 5000 + BLE_PAIR_WINDOW_MS + 99999) == 0);
+    CHECK(ble_pair_left_ms(&w, 4999) == 0);                                                                  // a clock that stepped back: closed, like ble_pair_is_open
+    ble_pair_close(&w);
+    CHECK(ble_pair_left_ms(&w, 6000) == 0);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2 && "usage: test_ble_state <vectors/ble_status.txt>");
@@ -681,6 +698,7 @@ int main(int argc, char **argv)
     test_gatt_values_against_the_vectors(argv[1]);
     test_the_numeric_comparison_offer();
     test_the_encryption_deadline_waits_for_the_number();
+    test_the_window_time_left();
     printf("test_ble_state: %u checks PASS\n", checks);
     return 0;
 }

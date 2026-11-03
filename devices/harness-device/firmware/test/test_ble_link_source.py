@@ -212,12 +212,18 @@ assert 's_prompt.active = false' in body(link, 'gap_event'), 'a lost link takes 
 for fn in ('gap_event', 'prompt_settle', 'ble_link_pair_prompt'):
     for call in re.findall(r'ESP_LOG[EWIDV]\((.*?)\);', body(link, fn), re.S):   # literals are blanked: the arguments are what is checked
         assert 'number' not in call and 'numcmp' not in call and 'passkey' not in call, f'{fn} logs the number'
-fget = body(link, 'ble_link_forget')
+# Forget (review M3): the wipe runs on the NimBLE host task, which owns the bond store. ble_link_forget only posts the event; the handler is the one caller.
+fget = body(link, 'forget_run')
 assert fget.index('ble_pair_close(&s_pair)') < fget.index('prompt_settle(-1)') < fget.index('ble_store_clear()') < fget.index('terminate_link()'), 'Forget: close the window, drop an offer, wipe the bonds once, end the link'
+post_forget = body(link, 'ble_link_forget')
+assert 'ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_forget_ev)' in post_forget and 'ble_store_clear' not in post_forget, 'ble_link_forget posts to the host task and wipes nothing itself'
+assert re.search(r'ble_npl_event_init\(&s_forget_ev, forget_run, NULL\);', body(link, 'ble_init_task')), 'the event runs forget_run, set up before the host starts'
+assert body(link, 'ble_init_task').index('ble_npl_event_init(&s_forget_ev') < body(link, 'ble_init_task').index('nimble_port_freertos_init(host_task)')
+assert link.count('forget_run') == 2, 'the definition and the one event_init'
 busy = body(link, 'ble_link_pairing_busy')
 assert 'ble_pair_is_open(&s_pair, now_ms())' in busy and 's_prompt.active' in busy
 hdr = text('ble_link.h')
-for name in ('ble_link_pair_prompt', 'ble_link_pair_answer', 'ble_link_pairing_busy', 'ble_link_forget'):
+for name in ('ble_link_pair_prompt', 'ble_link_pair_answer', 'ble_link_pairing_busy', 'ble_link_forget', 'ble_link_bond_count', 'ble_link_pairing_left_ms'):
     assert hdr.count(name + '(') == 2, f'{name}: declared and stubbed'
 glue_busy = body(code('mode_glue.c'), 'mode_switch_busy')
 assert 'ble_link_pairing_busy()' in glue_busy and 'MS_BUSY_PAIRING' in glue_busy, 'an open pairing window holds the mode switch'
@@ -227,8 +233,9 @@ assert '#include "ble_link.h"' in text('mode_glue.c')
 # B4e (review H1): the bond store never evicts; a bond is made only inside the pairing window; a repeat pairing never deletes a bond outside it
 assert 'ble_store_util_status_rr' not in link and 'ble_gap_unpair' not in link and 'ble_store_delete' not in link, 'no eviction anywhere'
 # B5: the one deliberate wipe of the bonds is the user's Forget row; nothing else in the file clears the store, and the link task never calls it (it writes flash)
-assert link.count('ble_store_clear(') == 1 and 'ble_store_clear()' in body(link, 'ble_link_forget'), 'one wipe, in ble_link_forget'
+assert link.count('ble_store_clear(') == 1 and 'ble_store_clear()' in body(link, 'forget_run'), 'one wipe, in the host-task handler forget_run'
 assert link.count('ble_link_forget(') == 1, 'only the definition: the link task does not call it'
+assert link.count('forget_run') == 2 and 'forget_run(' not in re.sub(r'static void forget_run\(struct ble_npl_event \*ev\)', '', link), 'nothing calls the handler directly: it is reached through the event queue only'
 assert 'ble_hs_cfg.store_status_cb = store_status;' in link
 st = body(link, 'store_status')
 assert 'BLE_STORE_EVENT_OVERFLOW' in st and 'BLE_STORE_EVENT_FULL' in st and st.count('return BLE_HS_ENOMEM;') == 1 and 'return 0' not in st, 'full or overflowing: refuse the new bond'

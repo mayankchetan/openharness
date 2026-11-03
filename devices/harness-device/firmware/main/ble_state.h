@@ -155,6 +155,8 @@ void ble_pair_init(ble_pair_window_t *w);                       // closed
 void ble_pair_open(ble_pair_window_t *w, uint64_t now_ms);      // open (again) for BLE_PAIR_WINDOW_MS from now
 void ble_pair_close(ble_pair_window_t *w);
 bool ble_pair_is_open(const ble_pair_window_t *w, uint64_t now_ms);
+// Milliseconds of the window still to run (0 when closed, over, NULL, or the clock stepped back): the Phone screen's countdown. Open exactly when > 0.
+uint32_t ble_pair_left_ms(const ble_pair_window_t *w, uint64_t now_ms);
 // May a pairing that wants to save a bond do so: the window is open AND the store has room (`store_full` = the stack asked to evict). Full means no.
 bool ble_bond_allowed(const ble_pair_window_t *w, uint64_t now_ms, bool store_full);
 

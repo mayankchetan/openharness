@@ -47,9 +47,13 @@ void ble_link_pairing_window(bool open);
 bool ble_link_pair_prompt(uint32_t *number);
 void ble_link_pair_answer(bool yes);
 bool ble_link_pairing_busy(void);
-// "Forget": closes the window, rejects an offer, wipes ALL bonds once (ble_store_clear) and ends the link. It WRITES FLASH (the bond store in NVS): call it
-// from the worker that does the other NVS writes, never from the link task or a PSRAM stack that must not touch flash.
+// "Forget": closes the window, rejects an offer, wipes ALL bonds once (ble_store_clear) and ends the link. It only POSTS the request: the wipe runs on the NimBLE
+// host task, which owns the bond store (review M3). It writes no flash on the caller's stack; any task may call it. A second call before the first has run is a
+// second wipe, which does nothing more.
 void ble_link_forget(void);
+// The Phone screen's two reads. Bond count: how many bonds are stored (0 to the store's limit, 2). Left: milliseconds of the pairing window still to run, 0 when it is closed or over. Any task, cheap.
+unsigned ble_link_bond_count(void);
+uint32_t ble_link_pairing_left_ms(void);
 // What the phone wrote to the two characteristics (spec section 5; only a peer that passes the channel rule may write). The relay status is the byte of the
 // spec table (ble_relay_status_name); the home hint is true when the phone sees the home network. Any task; cheap.
 uint8_t ble_link_relay_status(void);
@@ -67,6 +71,8 @@ static inline bool ble_link_pair_prompt(uint32_t *number) { (void)number; return
 static inline void ble_link_pair_answer(bool yes) { (void)yes; }
 static inline bool ble_link_pairing_busy(void) { return false; }
 static inline void ble_link_forget(void) {}
+static inline unsigned ble_link_bond_count(void) { return 0; }
+static inline uint32_t ble_link_pairing_left_ms(void) { return 0; }
 static inline uint8_t ble_link_relay_status(void) { return 0; }
 static inline bool ble_link_home_hint(void) { return false; }
 static inline void ble_link_pairing_window(bool open) { (void)open; }

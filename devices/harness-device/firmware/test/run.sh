@@ -115,6 +115,7 @@ python3 "$here/test_mode_glue_source.py"
 python3 "$here/test_mode_sw_wait.py"   # the mode switch task waits every pass, also when the USB probe would not install (idle task watchdog)
 # The Link screen (W16): the edge swipe, no session needed, NVS on the worker only, stay_wl as a toggle with one writer.
 python3 "$here/test_link_screen.py"
+python3 "$here/test_phone_screen.py"
 # W15e: reset_class() compiled and called for every reason the SDK defines (needs IDF_PATH, like the other SDK checks).
 python3 "$here/test_reset_class.py"
 # The decoder buffer is in PSRAM (W6): only cable_link.c names it, and every consumer of a frame payload is CPU-side (no DMA).

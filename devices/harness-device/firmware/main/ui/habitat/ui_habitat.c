@@ -29,6 +29,7 @@ static ht_gallery_t gallery;
 #include "config_store.h"
 #include "cable_client.h"
 #include "net_link.h"
+#include "ble_link.h"
 #include "mode_switch.h"
 #include "mode_glue.h"
 #include "pet_store.h"
@@ -111,7 +112,10 @@ typedef enum {
     MODELS,
     MESSAGE,
     OTA,
-    LINK     // the Link screen (task W16): USB or Wi-Fi, and Keep Wi-Fi
+    LINK,    // the Link screen (task W16): USB or Wi-Fi, and Keep Wi-Fi
+    PHONE,   // the Phone screen (task B5): Not paired / Paired / Connected, Pair, Forget
+    PASSKEY, // the number the phone asks to compare (numeric comparison): Yes or No
+    FORGET   // "forget phone?": one confirmation before the bonds are wiped
 } view_t;
 typedef enum {
     A_NONE,
@@ -141,6 +145,12 @@ typedef enum {
     A_LINK_SYNC,   // to the worker: read wl_mode and stay_wl into link_ui
     A_LINK_MODE,   // to the worker: the Link row, USB <-> Wi-Fi
     A_LINK_STAY,   // to the worker: the Keep Wi-Fi toggle (stay_wl)
+    A_PHONE,             // open (or come back to) the Phone screen
+    A_PHONE_PAIR,        // open the 120 s pairing window
+    A_PHONE_FORGET_ASK,  // the "forget phone?" question
+    A_PHONE_FORGET_YES,  // post Forget to the NimBLE host task (it wipes the bonds there)
+    A_PHONE_YES,         // the number matches
+    A_PHONE_NO,          // the number does not match
     A_STOP,
     A_STOP_YES,
     A_MODELS,
@@ -324,6 +334,22 @@ static action_t pressed_action;
 static bool queue(action_t a);
 static void view(view_t v);
 static const char *voice_status(void);
+/*
+ * THE PHONE SCREENS (task B5): what the Phone screen shows, read from the BLE link once a tick while one of its three views is up (phone_poll, render task,
+ * display lock held) and never by the renderer: render_phone/render_passkey/render_forget draw this struct alone, so the gallery can set it. `code` is the
+ * number on show; it is zeroed when the view goes.
+ */
+static struct {
+    bool known;        // a first read has been taken (a rise in `bonds` is only meaningful after it)
+    bool running;      // the phone mode is on (the BLE link is not OFF)
+    bool linked;       // a phone is connected (encrypted or beyond)
+    bool window;       // the pairing window is open
+    unsigned bonds;    // stored bonds
+    uint32_t left_s;   // seconds of the window left, rounded up
+    uint32_t code;     // the 6-digit number to compare (PASSKEY only)
+} phone_ui;
+static bool phone_view(view_t v) { return v == PHONE || v == PASSKEY || v == FORGET; }
+static void phone_leave(void);
 static uint32_t ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 static void copy(char *dst, size_t cap, const char *src)
 {
@@ -590,6 +616,7 @@ static void view(view_t v)
     if (s.view == INBOX && v != INBOX) s.opening_notice[0] = 0;
     input_cancel();
     s.voice_retry_until = 0;
+    if (phone_view(s.view) && !phone_view(v)) phone_leave();   // back, a swipe or a close: the window ends, an unanswered number is a No
     s.view = v;
     s.error_until = 0;   // a timed error view belongs to ui_turn_error alone; any move off or onto MESSAGE ends it
     s.offset = 0;
@@ -1065,7 +1092,7 @@ static void control(ht_scene_t *f, int x, int y, int w, const char *label, actio
     // 66, not 60: the target is the line plus a thumb's margin, and the line is ten pixels taller now.
     // Keeping 60 would have made the control smaller than its own text.
     s.hits[n] = (hit_t){{x, y - 14, w, 66}, a, value, enabled};
-    uint16_t ink = enabled ? (a == A_STOP_YES ? ERROR : n == s.pressed ? ACCENT : FG) : DIM,
+    uint16_t ink = enabled ? ((a == A_STOP_YES || a == A_PHONE_FORGET_YES) ? ERROR : n == s.pressed ? ACCENT : FG) : DIM,
              ground = n == s.pressed ? SEL : BG;
     if (focus_skin()) {   // Inter, centred in the rect it is tapped in
         const ht_font_t *font = focus_face_for(UI_FONT);
@@ -1797,6 +1824,9 @@ static const char *settings_item(int wanted, action_kind_t *action)
         {"Inbox", A_INBOX, 0}, {"Machines", A_MACHINES, 0},
         {"Model", A_MODELS, 0}, {"Stop current turn", A_STOP, 0},
         {"Nap", A_NAP, 0},
+#ifdef DEVICE_BLE_LINK
+        {"Phone", A_PHONE, 0},   // only in an image built with BLE; always there in that image, set up or not
+#endif
         {"Find Harness", A_FIND, CABLE_FEATURE_FORM},
         {"New Harness", A_FORM, CABLE_FEATURE_FORM},
         {"Latest output", A_LATEST, CABLE_FEATURE_VISIT},
@@ -2366,7 +2396,7 @@ static void render_settings(ht_scene_t *f)
         const char *label = settings_item(s.offset + row, &action);
         if (!label) break;
         if (action == A_NAP) label = s.nap ? "Wake" : "Nap";
-        bool enabled = action == A_INBOX || action == A_NAP ||
+        bool enabled = action == A_INBOX || action == A_NAP || action == A_PHONE ||
             (s.connected && ((action != A_STOP && action != A_MODELS && action != A_SELECT_BEGIN && action != A_LATEST) ||
                 (active() && (action != A_STOP || active()->busy) && (action != A_LATEST || !visit.pending))));
         int y = TAB_TOP + row * TAB_ROW_HEIGHT, hit = s.hit_count++;
@@ -2435,6 +2465,97 @@ static void render_link(ht_scene_t *f)
     }
     ui_wrap(f, FACE_CX(336), 252, 336, 2, 0, &ht_mono_20, DIM, link_ui.stay ? "Stays on Wi-Fi with the cable plugged in." : "Plug the cable in to go back to USB.");
     text_in(f, FACE_CX(336), 322, 336, &ht_mono_20, net_state_line(net_link_state()), DIM, true);
+}
+/*
+ * THE PHONE SCREENS (task B5, lead design 2026-11-03). Three views, one struct (phone_ui, above).
+ *   PHONE    the state line (Not paired / Paired / Connected; Waiting for phone with a countdown while the window is open; Phone mode is off when the BLE
+ *            link is not running), [pair] and [forget]. Pair opens the 120 s window. Back, a swipe or anything that leaves the three views closes it
+ *            (view -> phone_leave). Pair and Forget wait for a closed window, and Forget for a bond.
+ *   PASSKEY  the 6-digit number, large (Inter 44), with [yes] and [no]. It opens by itself when the phone asks (phone_poll) and closes with the window or the link. Leaving
+ *            it any other way answers No.
+ *   FORGET   "forget phone?", [no] and [yes], the shape of the stop question. Yes only POSTS Forget (ble_link_forget): the NimBLE host task owns the bond
+ *            store and does the wipe there (review M3), so nothing here writes flash, and the worker is not involved.
+ * The row is in Settings only in an image built with BLE (DEVICE_BLE_LINK) and is not gated on Wi-Fi.
+ */
+static void phone_code_text(uint32_t code, char *out, size_t cap)
+{
+    snprintf(out, cap, "%03u %03u", (unsigned)(code / 1000 % 1000), (unsigned)(code % 1000));
+}
+static void phone_left_text(uint32_t seconds, char *out, size_t cap)
+{
+    snprintf(out, cap, "%u:%02u left", (unsigned)(seconds / 60), (unsigned)(seconds % 60));
+}
+static void phone_leave(void)
+{
+    if (s.view == PASSKEY) ble_link_pair_answer(false);   // an unanswered number is a No (it also closes the window and ends the link)
+    if (ble_link_pairing_busy()) ble_link_pairing_window(false);
+    memset(&phone_ui, 0, sizeof phone_ui);
+}
+// One read of the link into phone_ui, and the moves that follow from it. Render task, display lock held; the three views only.
+static void phone_poll(void)
+{
+    if (!phone_view(s.view)) return;
+    const ble_state_t st = ble_link_state();
+    const uint32_t left = ble_link_pairing_left_ms();
+    const unsigned bonds = ble_link_bond_count();
+    uint32_t code = 0;
+    const bool prompt = ble_link_pair_prompt(&code);
+    bool window = left > 0;
+    // The bond the user opened the window for is made: the window ends (a second phone is another tap on Pair).
+    if (window && phone_ui.known && bonds > phone_ui.bonds) {
+        ble_link_pairing_window(false);
+        window = false;
+    }
+    const typeof(phone_ui) before = phone_ui;
+    phone_ui.known = true;
+    phone_ui.running = st != BLE_ST_OFF;
+    phone_ui.linked = st == BLE_ST_CONNECTED || st == BLE_ST_CHANNEL_UP || st == BLE_ST_TLS_UP;
+    phone_ui.window = window;
+    phone_ui.bonds = bonds;
+    phone_ui.left_s = (left + 999) / 1000;
+    phone_ui.code = prompt ? code % 1000000 : 0;
+    if (window || prompt) display_bump_activity();   // the screen stays up while the user pairs (the window is 120 s at most)
+    if (prompt && s.view == PHONE) view(PASSKEY);
+    else if (!prompt && s.view == PASSKEY) view(PHONE);   // answered, the window ended, or the link went
+    if (memcmp(&before, &phone_ui, sizeof phone_ui)) change();
+}
+static void render_phone(ht_scene_t *f)
+{
+    heading(f, "phone");
+    const char *state = !phone_ui.running ? "Phone mode is off" : phone_ui.window ? "Waiting for phone" : phone_ui.linked ? "Connected" :
+                        phone_ui.bonds ? "Paired" : "Not paired";
+    center(f, 140, state, phone_ui.running ? FG : DIM);
+    if (phone_ui.window) {
+        char left[24];
+        phone_left_text(phone_ui.left_s, left, sizeof left);
+        center(f, 190, left, DIM);
+        ui_wrap(f, FACE_CX(336), 252, 336, 2, 0, &ht_mono_20, DIM, "Open the app on your phone and pair.");
+    } else if (!phone_ui.running) {
+        ui_wrap(f, FACE_CX(336), 252, 336, 2, 0, &ht_mono_20, DIM, "Pairing needs phone mode to be on.");
+    }
+    const bool idle = phone_ui.running && !phone_ui.window;
+    control(f, 83, 355, 130, "[pair]", A_PHONE_PAIR, 0, idle);
+    control(f, 233, 355, 150, "[forget]", A_PHONE_FORGET_ASK, 0, idle && phone_ui.bonds > 0);
+}
+static void render_passkey(ht_scene_t *f)
+{
+    char code[16];
+    phone_code_text(phone_ui.code, code, sizeof code);
+    center(f, 96, "Phone code", DIM);
+    const ht_font_t *big = &ht_lv_inter_44.base;   // already in the image (the tab names); the pixel face would add 45 KB to an image with no BLE
+    const int w = ht_measure(big, code);
+    ht_text(f, (HT_WIDTH - w) / 2, 168, w, big, FG, BG, code);
+    center(f, 236, "Same on the phone?", DIM);
+    control(f, 83, 340, 130, "[yes]", A_PHONE_YES, 0, true);
+    control(f, 253, 340, 130, "[no]", A_PHONE_NO, 0, true);
+}
+static void render_forget(ht_scene_t *f)
+{
+    heading(f, "forget phone?");
+    center(f, 185, "The phone must pair", FG);
+    center(f, 227, "again after this.", DIM);
+    control(f, 83, 355, 120, "[no]", A_PHONE, 0, true);
+    control(f, 263, 355, 120, "[yes]", A_PHONE_FORGET_YES, 0, true);
 }
 /*
  * WHAT THE APP ASKED FOR, waiting for the worker to write it.
@@ -2535,6 +2656,15 @@ bool habitat_scene_take(ht_scene_t *f)
     case LINK:
         render_link(f);
         break;
+    case PHONE:
+        render_phone(f);
+        break;
+    case PASSKEY:
+        render_passkey(f);
+        break;
+    case FORGET:
+        render_forget(f);
+        break;
     case READER: {
         agent_t *a = active();
         heading(f, "latest result");
@@ -2619,6 +2749,9 @@ const char *habitat_view_name(void)
     case MESSAGE: return "message";
     case OTA: return "ota";
     case LINK: return "link";
+    case PHONE: return "phone";
+    case PASSKEY: return "passkey";
+    case FORGET: return "forget";
     }
     return "unknown";
 }
@@ -3221,6 +3354,36 @@ static void dispatch(action_t a)
     case A_LINK_STAY:
         if (s.view == LINK) queue(a);
         break;
+    case A_PHONE:   // from Settings, and from "no" on the forget question
+        memset(&phone_ui, 0, sizeof phone_ui);
+        view(PHONE);
+        phone_poll();
+        break;
+    case A_PHONE_PAIR:
+        if (s.view == PHONE && phone_ui.running && !phone_ui.window) {
+            ble_link_pairing_window(true);
+            if (ble_link_state() == BLE_ST_NOT_FOUND) (void)ble_link_restart();   // advertise now, not at the next wake
+            phone_poll();
+        }
+        break;
+    case A_PHONE_FORGET_ASK:
+        if (s.view == PHONE && phone_ui.running && !phone_ui.window && phone_ui.bonds) view(FORGET);
+        break;
+    case A_PHONE_FORGET_YES:
+        if (s.view == FORGET) {
+            ble_link_forget();   // a request to the NimBLE host task; the wipe is there
+            view(PHONE);
+            phone_poll();
+        }
+        break;
+    case A_PHONE_YES:
+    case A_PHONE_NO:
+        if (s.view == PASSKEY) {
+            ble_link_pair_answer(a.kind == A_PHONE_YES);
+            view(PHONE);
+            phone_poll();
+        }
+        break;
     case A_STOP:
         COPY(s.stop_agent, a.id);
         view(STOP);
@@ -3763,7 +3926,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                             : s.view == TABS     ? s.tab_count
                             : s.view == MACHINES ? s.machine_count
                             : s.view == MODELS   ? s.model_count
-                            : s.view == SETTINGS ? 9
+                            : s.view == SETTINGS ? settings_count()
                             : s.view == QUESTION ? s.q.item[s.q.index].count : 0;
                 int next = s.offset + (dy < 0 ? 3 : -3);
                 if (next >= 0 && next < count) s.offset = next;
@@ -3836,6 +3999,7 @@ uint32_t habitat_next_wake_ms(void)
         if (due < delay) delay = due;
     }
     if (s.view == FORM && delay > 100) delay = 100;
+    if (phone_view(s.view) && delay > 250) delay = 250;   // the countdown, and a number that arrives
     if (character.motion.next_ms && character.motion.next_ms < delay) delay = character.motion.next_ms;
     if (home_caption_rotates() && home_caption.next_ms && home_caption.next_ms < delay)
         delay = home_caption.next_ms;
@@ -3902,6 +4066,9 @@ void habitat_tick(void)
         }
     }
     surface_tick(now);
+#ifndef DEVICE_UI_GALLERY
+    phone_poll();   // the gallery has no radio: its Phone items set phone_ui by hand
+#endif
     if (ht_workspace_tick(&workspace,now)) workspace_failed("The tab did not open. Choose it again.");
     if ((s.q.loading || (s.q.pending && !s.q.uncertain)) && (int32_t)(now-s.q.deadline)>=0) {
         if (s.q.loading) { s.q.loading=false; COPY(s.q.error,"Question did not arrive. Open the alert again."); }
@@ -4696,7 +4863,7 @@ uint32_t ui_mode_switch_busy(char *focus, size_t cap)
     if (s.view == READER) busy |= MS_BUSY_READER;
     // forms, selections, stop confirmation, model and machine pickers, tabs, the update screen, a message
     switch (s.view) {
-    case FORM: case SELECTION: case STOP: case MODELS: case MACHINES: case TABS: case OTA: case MESSAGE:
+    case FORM: case SELECTION: case STOP: case FORGET: case MODELS: case MACHINES: case TABS: case OTA: case MESSAGE:
         busy |= MS_BUSY_PICKER;
         break;
     default:

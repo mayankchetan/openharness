@@ -23,10 +23,11 @@ int main(void)
 {
     const int count = (int)(sizeof items / sizeof items[0]);
     assert(count >= 100);
-    // View names (habitat_view_name): the 21 view_t values, HOME split by what render_home draws.
+    // View names (habitat_view_name): the 24 view_t values, HOME split by what render_home draws.
     static const char *const views[] = {
         "panes", "agent", "reader", "question", "choice", "answer_review", "inbox", "tabs", "machines", "voice",
-        "selection", "form", "draft", "draft_options", "settings", "stop", "models", "message", "ota", "link"};
+        "selection", "form", "draft", "draft_options", "settings", "stop", "models", "message", "ota", "link",
+        "phone", "passkey", "forget"};
     static const char *const home[] = {"brand", "home_rest", "home", "home_recap", "home_busy", "home_question", "workspace",
                                        "swarm"};
     for (unsigned v = 0; v < sizeof views / sizeof views[0]; v++) {

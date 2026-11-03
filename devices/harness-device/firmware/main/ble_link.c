@@ -71,6 +71,7 @@ static _Atomic(const cable_xport_t *) s_tls;
 static char s_mac[DEVICE_MAC_STR_LEN];
 static uint8_t s_own_addr_type;
 static SemaphoreHandle_t s_synced;             // given by the host's sync callback
+static struct ble_npl_event s_forget_ev;       // Forget, queued on the host task's event queue (forget_run)
 
 static volatile uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
 static struct ble_l2cap_chan *volatile s_chan;
@@ -445,9 +446,29 @@ bool ble_link_pairing_busy(void)
     return busy;
 }
 
-void ble_link_forget(void)
+uint32_t ble_link_pairing_left_ms(void)
 {
-    if (!s_started) return;
+    if (!s_started) return 0;
+    state_lock();
+    const uint32_t left = ble_pair_left_ms(&s_pair, now_ms());
+    state_unlock();
+    return left;
+}
+
+// How many bonds are stored. A read of the host's bond list (RAM; the NVS copy is written by the host task only); the Phone screen asks once a tick while it
+// is open. The stack is not asked while it is not running.
+unsigned ble_link_bond_count(void)
+{
+    if (!s_started) return 0;
+    int n = 0;
+    return ble_store_util_count(BLE_STORE_OBJ_TYPE_OUR_SEC, &n) == 0 && n > 0 ? (unsigned)n : 0;
+}
+
+// Forget, as it runs on the NimBLE HOST task (review M3: the host task owns the bond store, so the wipe, which writes the store's NVS copy, happens there and
+// nowhere else; ble_link_forget only posts it): close the window, drop an offer, wipe every bond once, end the link.
+static void forget_run(struct ble_npl_event *ev)
+{
+    (void)ev;
     state_lock();
     ble_pair_close(&s_pair);
     state_unlock();
@@ -456,6 +477,12 @@ void ble_link_forget(void)
     const int rc = ble_store_clear();  // every bond, once (the store never evicts by itself)
     ESP_LOGI(TAG, "forget: bonds cleared (rc=%d)", rc);
     terminate_link();
+}
+
+void ble_link_forget(void)
+{
+    if (!s_started) return;
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_forget_ev);
 }
 
 static int gap_event(struct ble_gap_event *event, void *arg)
@@ -884,6 +911,7 @@ static void ble_init_task(void *arg)
             ESP_LOGE(TAG, "nimble_port_init failed (0x%x)", (unsigned)e);
             break;
         }
+        ble_npl_event_init(&s_forget_ev, forget_run, NULL);
         ble_hs_cfg.reset_cb = on_reset;
         ble_hs_cfg.sync_cb = on_sync;
         ble_hs_cfg.store_status_cb = store_status;   // a full store refuses the new bond; it never evicts an old one

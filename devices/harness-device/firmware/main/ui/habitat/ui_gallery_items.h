@@ -79,6 +79,14 @@
     X(link_wifi,        "link_wifi",        0, 2000, "link",          "render_link",             NULL) \
     X(link_keep,        "link_keep",        0, 2000, "link",          "render_link",             NULL) \
     X(link_none,        "link_none",        0, 2000, "link",          "render_link",             NULL) \
+    X(phone_off,        "phone_off",        0, 2000, "phone",         "render_phone",            NULL) \
+    X(phone_unpaired,   "phone_unpaired",   0, 2000, "phone",         "render_phone",            NULL) \
+    X(phone_paired,     "phone_paired",     0, 2000, "phone",         "render_phone",            NULL) \
+    X(phone_connected,  "phone_connected",  0, 2000, "phone",         "render_phone",            NULL) \
+    X(phone_waiting,    "phone_waiting",    0, 2000, "phone",         "render_phone",            NULL) \
+    X(passkey,          "passkey",          0, 2000, "passkey",       "render_passkey",          NULL) \
+    X(passkey_zeros,    "passkey_zeros",    0, 2000, "passkey",       "render_passkey",          NULL) \
+    X(forget_ask,       "forget_ask",       0, 2000, "forget",        "render_forget",           NULL) \
     X(models_loading,   "models_loading",   0, 2000, "models",        "habitat_scene_take",      NULL) \
     X(models,           "models",           0, 2000, "models",        "habitat_scene_take",      NULL) \
     X(models_empty,     "models_empty",     0, 2000, "models",        "habitat_scene_take",      NULL) \
