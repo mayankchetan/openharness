@@ -176,6 +176,30 @@ describe('harness dial phone: refusals and failures', () => {
   })
 })
 
+describe('harness dial phone: no key in any output (B12)', () => {
+  const SECRET = 'S3cretKeyBytes-0123456789abcdef'
+
+  it('prints none of the secret-looking fields a daemon reply carries, for every verb', async () => {
+    const body = {
+      ok: true, dial: MAC, ble: true, mode: 2, cleared: true, removed: true,
+      key: SECRET, psk: SECRET, token: SECRET, secret: SECRET,
+      usb: { dial: MAC, ble: true, mode: 2, keyed: true, key: SECRET },
+      keyed: [{ dial: MAC, createdAt: 1, key: SECRET, psk: SECRET }],
+    }
+    for (const verb of ['set', 'show', 'forget', 'on', 'off']) {
+      const r = rig({ status: 200, body })
+      expect(await r.run('phone', verb), verb).toBe(0)
+      expect(r.text(), verb).not.toContain(SECRET)
+    }
+  })
+
+  it('has no rotate verb: a second `set` makes a new key, and `rotate` is a usage error with no request', async () => {
+    const r = rig()
+    expect(await r.run('phone', 'rotate')).toBe(2)
+    expect(r.calls).toEqual([])
+  })
+})
+
 describe('harness help: the dial phone entry', () => {
   const CLI_ROOT = fileURLToPath(new URL('../..', import.meta.url))
   const TSX = join(CLI_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs')

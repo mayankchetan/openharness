@@ -3,6 +3,7 @@
 Status: DRAFT. Source of truth for every byte and number that the dial (C firmware), the phone app (Kotlin) and the
 desktop daemon must agree on for the BLE link. The design reasoning is in the phone bridge spec and plan
 (`briefs/research/2026-10-30-phone-bridge-spec.md` and `2026-11-01-phone-bridge-plan.md` in the workbench repository).
+The how-to for the person at the desk is `docs/dial-phone.md`.
 The cable layers above this link are in [the Wi-Fi link spec](cable-wifi-link.md): frames (section 0), the TLS-PSK
 profile (section 1), ADPCM voice (section 2). This file does not repeat them.
 
