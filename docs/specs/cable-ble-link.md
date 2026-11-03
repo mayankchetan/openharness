@@ -94,7 +94,9 @@ contract.
   authenticates both ends. It is off in every product config (a source test fails the build if it is on in the shipped
   overlay).
 - Characteristics: relay-status and home-hint need an encrypted link (`READ_ENC`, `WRITE_ENC`). The PSM characteristic does
-  not.
+  not. A write to either also needs the channel rule above (bonded, authenticated, long key; the development flag waives it), so a phone
+  that paired outside the window cannot steer the screen or the mode switch; the dial answers ATT error 0x05 (insufficient
+  authentication). A relay-status write of a length other than 1 is rejected with 0x0D, like the hint.
 - TLS-PSK runs end to end inside the CoC stream (Wi-Fi link spec, section 1). Dial deadline: `dial_tls_deadline_ms` = 5000 ms
   for the handshake after the channel opens, then it closes the channel. Daemon deadline: `daemon_tls_deadline_ms` = 3000 ms
   from the FIRST BYTE of the stream reaching the daemon, so the phone opens the WebSocket on the first CoC byte, not at

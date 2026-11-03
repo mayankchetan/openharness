@@ -177,6 +177,34 @@ bool ble_bond_allowed(const ble_pair_window_t *w, uint64_t now_ms, bool store_fu
     return !store_full && ble_pair_is_open(w, now_ms);
 }
 
+// ── the characteristics the phone writes ────────────────────────────────────────────────────────────
+uint8_t ble_hint_check(const uint8_t *data, size_t len, uint8_t *out)
+{
+    if (!data || len != 1) return BLE_HINT_ERR_LEN;
+    if (data[0] > 1) return BLE_HINT_ERR_RANGE;
+    if (out) *out = data[0];
+    return 0;
+}
+
+uint8_t ble_relay_status_check(const uint8_t *data, size_t len, uint8_t *out)
+{
+    if (!data || len != 1) return BLE_HINT_ERR_LEN;
+    if (out) *out = data[0];
+    return 0;
+}
+
+const char *ble_relay_status_name(uint8_t value)
+{
+    switch (value) {
+    case 0x00: return "idle";
+    case 0x01: return "tunnel_connecting";
+    case 0x02: return "tunnel_up";
+    case 0x03: return "token_rejected";
+    case 0x04: return "phone_no_network";
+    default:   return "unknown";
+    }
+}
+
 bool ble_encryption_required(bool dev_unbonded) { return !dev_unbonded; }
 
 // ── what goes on the air ────────────────────────────────────────────────────────────────────────────

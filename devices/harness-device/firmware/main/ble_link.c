@@ -281,6 +281,82 @@ void ble_link_pairing_window(bool open)
     ESP_LOGI(TAG, "pairing window %s", open ? "open" : "closed");
 }
 
+// ── the GATT table (spec sections 1 and 5; B4c) ─────────────────────────────────────────────────────
+
+// The UUIDs are the vector file's, last byte first (test_ble_link_source.py compares them).
+static const ble_uuid128_t UUID_SVC = BLE_UUID128_INIT(0x1d, 0x50, 0x99, 0x8e, 0x7c, 0x65, 0x1c, 0x80, 0x70, 0x4d, 0xe6, 0xbb, 0xf0, 0x01, 0x03, 0xe7);
+static const ble_uuid128_t UUID_PSM = BLE_UUID128_INIT(0x1d, 0x50, 0x99, 0x8e, 0x7c, 0x65, 0x1c, 0x80, 0x70, 0x4d, 0xe6, 0xbb, 0xf1, 0x01, 0x03, 0xe7);
+static const ble_uuid128_t UUID_STATUS = BLE_UUID128_INIT(0x1d, 0x50, 0x99, 0x8e, 0x7c, 0x65, 0x1c, 0x80, 0x70, 0x4d, 0xe6, 0xbb, 0xf2, 0x01, 0x03, 0xe7);
+static const ble_uuid128_t UUID_HINT = BLE_UUID128_INIT(0x1d, 0x50, 0x99, 0x8e, 0x7c, 0x65, 0x1c, 0x80, 0x70, 0x4d, 0xe6, 0xbb, 0xf3, 0x01, 0x03, 0xe7);
+
+static _Atomic uint8_t s_relay_status;   // what the phone last wrote: 0 idle
+static _Atomic uint8_t s_home_hint;      // 0 until the phone writes a 1
+static uint16_t s_status_handle;
+
+static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg);
+
+static const struct ble_gatt_svc_def GATT_SVCS[] = {
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &UUID_SVC.u,
+        .characteristics = (struct ble_gatt_chr_def[]){
+            {.uuid = &UUID_PSM.u, .access_cb = chr_access, .flags = BLE_GATT_CHR_F_READ},
+            {.uuid = &UUID_STATUS.u, .access_cb = chr_access, .val_handle = &s_status_handle,
+             .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_NOTIFY},
+            {.uuid = &UUID_HINT.u, .access_cb = chr_access, .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC},
+            {0},
+        },
+    },
+    {0},
+};
+
+uint8_t ble_link_relay_status(void) { return atomic_load(&s_relay_status); }
+bool ble_link_home_hint(void) { return atomic_load(&s_home_hint) != 0; }
+
+static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)attr;
+    (void)arg;
+    const ble_uuid_t *u = ctxt->chr->uuid;
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        if (ble_uuid_cmp(u, &UUID_PSM.u) == 0) {
+            static const uint8_t psm[2] = {COC_PSM & 0xff, COC_PSM >> 8};   // u16 little endian
+            return os_mbuf_append(ctxt->om, psm, sizeof psm) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
+        if (ble_uuid_cmp(u, &UUID_STATUS.u) == 0) {
+            const uint8_t v = atomic_load(&s_relay_status);
+            return os_mbuf_append(ctxt->om, &v, 1) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
+        return BLE_ATT_ERR_READ_NOT_PERMITTED;
+    }
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
+    // The ENC flags already need an encrypted link. A write also needs the rule of the channel (bonded, authenticated, a long key): a phone that paired
+    // outside the window is encrypted and nothing more, and must not steer the mode switch or the screen. The development build waives it, like the channel.
+    ble_sec_t sec;
+    (void)link_sec(conn, &sec);
+    if (ble_accept_check(&sec, DEV_UNBONDED, false) != BLE_ACCEPT_OK) return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+    uint8_t buf[4];
+    const uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
+    if (len > sizeof buf) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;   // longer than any valid value (and than buf)
+    if (os_mbuf_copydata(ctxt->om, 0, len, buf) != 0) return BLE_ATT_ERR_UNLIKELY;
+    uint8_t value = 0;
+    if (ble_uuid_cmp(u, &UUID_HINT.u) == 0) {
+        const uint8_t err = ble_hint_check(buf, len, &value);
+        if (err) return err;
+        atomic_store(&s_home_hint, value);
+        ESP_LOGI(TAG, "home hint %u", (unsigned)value);
+        return 0;
+    }
+    if (ble_uuid_cmp(u, &UUID_STATUS.u) == 0) {
+        const uint8_t err = ble_relay_status_check(buf, len, &value);
+        if (err) return err;
+        atomic_store(&s_relay_status, value);
+        ESP_LOGI(TAG, "relay status %s", ble_relay_status_name(value));
+        return 0;
+    }
+    return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+}
+
 static void advertise(void)
 {
     uint8_t adv[31], rsp[31];
@@ -328,8 +404,15 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             s_dle_done = false;
             s_churn_cut = false;
             post(BLE_EV_LINK_UP);
-            // Development build: no bond is asked for, so the link counts as encrypted from the start and the 3 s deadline never fires.
-            if (!ble_encryption_required(DEV_UNBONDED)) post(BLE_EV_ENCRYPTED);
+            // The dial asks for encryption itself (spec section 4) and does not wait for the phone: a bonded phone gets its stored key back, an unbonded one
+            // pairs (with a bond only inside the pairing window). Development build: no bond is asked for, so the link counts as encrypted from the start and
+            // the 3 s deadline never fires.
+            if (ble_encryption_required(DEV_UNBONDED)) {
+                const int src = ble_gap_security_initiate(s_conn);
+                if (src != 0) ESP_LOGW(TAG, "security request failed (rc=%d)", src);
+            } else {
+                post(BLE_EV_ENCRYPTED);
+            }
             ESP_LOGI(TAG, "central connected (conn %u)", (unsigned)s_conn);
         } else {
             ESP_LOGW(TAG, "connect failed (status %d)", event->connect.status);
@@ -714,6 +797,10 @@ static void ble_init_task(void *arg)
         apply_bonding_policy();
         ble_svc_gap_init();
         ble_svc_gatt_init();
+        if (ble_gatts_count_cfg(GATT_SVCS) != 0 || ble_gatts_add_svcs(GATT_SVCS) != 0) {
+            ESP_LOGE(TAG, "the GATT table was refused");
+            break;
+        }
         char name[24];
         if (ble_adv_name(s_mac, name, sizeof name)) ble_svc_gap_device_name_set(name);
         ble_store_config_init();

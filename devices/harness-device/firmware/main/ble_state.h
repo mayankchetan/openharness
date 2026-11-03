@@ -136,6 +136,16 @@ ble_accept_t ble_accept_check(const ble_sec_t *sec, bool dev_unbonded, bool chan
 // Does the link need to become encrypted at all? With the dev flag it does not, so the glue posts ENCRYPTED at the connect and the 3 s deadline never fires.
 bool ble_encryption_required(bool dev_unbonded);
 
+// ── the two characteristics the phone writes (docs/specs/cable-ble-link.md section 5; B4c) ────────────────────────────────────────────────
+// The checks are pure so the host test runs them against the `hint` and `status` lines of test/vectors/ble_status.txt. Each returns 0 (accepted: *out is the
+// value) or the ATT error to send back, and leaves *out alone on an error. `out` may be NULL to only ask.
+#define BLE_HINT_ERR_LEN    0x0Du   // the length is not 1 (ATT: invalid attribute value length)
+#define BLE_HINT_ERR_RANGE  0x80u   // a hint above 1 (ATT: application error, value out of range)
+uint8_t ble_hint_check(const uint8_t *data, size_t len, uint8_t *out);          // home hint: one byte, 0 or 1
+uint8_t ble_relay_status_check(const uint8_t *data, size_t len, uint8_t *out);  // relay status: one byte, any value (an unknown one is shown, not an error)
+// "idle", "tunnel_connecting", "tunnel_up", "token_rejected", "phone_no_network"; anything else "unknown".
+const char *ble_relay_status_name(uint8_t value);
+
 // ── bonds ───────────────────────────────────────────────────────────────────────────────────────────
 // A new bond is made only inside an explicit pairing window, and never by evicting an old one. The window is closed by default and closes by itself at
 // BLE_PAIR_WINDOW_MS (120.0 s); B5 opens it from the Settings row. A clock that stepped back before the window opened reads as closed.

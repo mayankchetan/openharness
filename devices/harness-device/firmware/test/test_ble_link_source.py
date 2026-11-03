@@ -102,7 +102,7 @@ assert users == ['ble_link.c'], f'only ble_link.c uses the flag, in code: {users
 assert re.search(r'#ifdef BLE_DEV_ALLOW_UNBONDED\n#define DEV_UNBONDED true\n#else\n#define DEV_UNBONDED false\n#endif', raw_link), 'off unless the build says so'
 assert re.search(r'#ifdef BLE_DEV_ALLOW_UNBONDED\n\s*ESP_LOGW\(TAG, "DEVELOPMENT BUILD[^\n]*\n#endif', raw_link), 'a development build says so at every start'
 assert len(re.findall(r'#\s*if\w*[^\n]*BLE_DEV_ALLOW_UNBONDED', raw_link)) == 2, 'two #ifdef blocks: the constant and the warning, and nothing else'
-assert len(re.findall(r'\bDEV_UNBONDED\b', link)) == 5, 'DEV_UNBONDED: two definitions, the accept check, the encryption rule and the ENCRYPTED rule, and nothing else'
+assert len(re.findall(r'\bDEV_UNBONDED\b', link)) == 6, 'DEV_UNBONDED: two definitions, the accept check, the encryption rule, the ENCRYPTED rule and the characteristic write gate, and nothing else'
 # nothing in the repository's build scripts under the firmware tree turns it on either
 for path in list((fw / 'scripts').glob('*')) + list((fw / 'tools').rglob('*')):
     if path.is_file() and path.suffix in ('.sh', '.py', '.ps1', '.cmake', '.txt', '.md', ''):
@@ -156,6 +156,41 @@ assert re.search(r'if \(trusted \|\| \(DEV_UNBONDED && sec\.encrypted\)\) post\(
 assert 'note_security(event->enc_change.conn_handle)' in body(link, 'gap_event')
 assert 'ble_hs_cfg.sm_sc = 1' in link and 'ble_hs_cfg.sm_mitm = 1' in link and 'BLE_HS_IO_DISPLAY_YESNO' in link and 'ble_hs_cfg.sm_bonding = 0;' in link
 
+# ── 4b. B4c: the dial asks for encryption itself, and the three characteristics are guarded as the spec says ─────────────────────────────
+# The dial does not wait for the phone to start encryption: it calls ble_gap_security_initiate after the connect, in the product build only (a
+# development build waives the bond, so it has no use for a pairing that would need the screen). One call site.
+gap = body(link, 'gap_event')
+assert code('ble_link.c').count('ble_gap_security_initiate(') == 1, 'one security request in the file'
+assert re.search(r'if \(ble_encryption_required\(DEV_UNBONDED\)\) \{[^}]*ble_gap_security_initiate\(s_conn\)', gap, re.S), 'asked for in the connect event, only where a bond is wanted'
+assert gap.index('case BLE_GAP_EVENT_CONNECT:') < gap.index('ble_gap_security_initiate(') < gap.index('case BLE_GAP_EVENT_DISCONNECT:')
+uuids = {}
+for line in (fw / 'test/vectors/ble_status.txt').read_text(encoding='utf-8').replace('\r\n', '\n').split('\n'):
+    f = line.split('\t')
+    if f[0] == 'uuid':
+        uuids[f[1]] = f[3]
+assert set(uuids) == {'service', 'psm', 'status', 'hint'}
+for role, ident in (('service', 'UUID_SVC'), ('psm', 'UUID_PSM'), ('status', 'UUID_STATUS'), ('hint', 'UUID_HINT')):
+    m = re.search(r'static const ble_uuid128_t ' + ident + r' = BLE_UUID128_INIT\(([^)]*)\);', link)
+    assert m, ident
+    assert ''.join(f'{int(b, 16):02x}' for b in m[1].split(',')) == uuids[role], f'{ident} is the {role} UUID of the vector file, last byte first'
+table = re.search(r'static const struct ble_gatt_svc_def GATT_SVCS\[\] = \{(.*?)\n\};', link, re.S)
+assert table, 'one GATT table'
+chrs = {}
+for ident, flags in re.findall(r'\.uuid = &(UUID_\w+)\.u,[^{}]*?\.flags = ([^,}]*)', table[1], re.S):
+    chrs[ident] = {x.strip() for x in flags.split('|')}
+assert chrs['UUID_PSM'] == {'BLE_GATT_CHR_F_READ'}, 'the PSM is readable without encryption (spec section 5)'
+assert chrs['UUID_STATUS'] == {'BLE_GATT_CHR_F_READ', 'BLE_GATT_CHR_F_READ_ENC', 'BLE_GATT_CHR_F_WRITE', 'BLE_GATT_CHR_F_WRITE_ENC', 'BLE_GATT_CHR_F_NOTIFY'}
+assert chrs['UUID_HINT'] == {'BLE_GATT_CHR_F_WRITE', 'BLE_GATT_CHR_F_WRITE_ENC'}, 'the home hint is write only, and only encrypted'
+assert table[1].count('.uuid = &UUID_SVC.u') == 1 and 'BLE_GATT_SVC_TYPE_PRIMARY' in table[1]
+chr_cb = body(link, 'chr_access')
+# a write is taken from a peer that passes the same rule as the channel (encrypted, bonded, authenticated, long key; the dev flag waives it), and the
+# value is checked by the pure functions that test_ble_state.c runs against the vector file
+assert 'ble_accept_check(&sec, DEV_UNBONDED, false) != BLE_ACCEPT_OK' in chr_cb and 'BLE_ATT_ERR_INSUFFICIENT_AUTHEN' in chr_cb
+assert 'ble_hint_check(' in chr_cb and 'ble_relay_status_check(' in chr_cb
+init_b = body(link, 'ble_init_task')
+assert init_b.index('ble_gatts_count_cfg(GATT_SVCS)') < init_b.index('ble_gatts_add_svcs(GATT_SVCS)') < init_b.index('nimble_port_freertos_init(host_task)'), 'the table is added before the host starts'
+assert 'ble_link_home_hint' in text('ble_link.h') and 'ble_link_relay_status' in text('ble_link.h')
+
 # ── 5. the link task: no flash operation, the key read once ─────────────────────────────────────────
 # B4e (review H1): the bond store never evicts; a bond is made only inside the pairing window; a repeat pairing never deletes a bond outside it
 assert 'ble_store_util_status_rr' not in link and 'ble_gap_unpair' not in link and 'ble_store_delete' not in link and 'ble_store_clear' not in link, 'no eviction anywhere'
@@ -195,7 +230,7 @@ for path in sorted(main.rglob('*')):
 
 FLASH = re.compile(r'\b(nvs_\w+|config_\w+|esp_ota_\w+|esp_partition_\w+|esp_flash_\w+|spi_flash_\w+|fw_update_\w+)\(')
 for fn in ('ble_link_task', 'handshake', 'advertise', 'terminate_link', 'port_send', 'port_disconnect', 'port_rearm', 'port_peer_mtu', 'log_stacks',
-           'x_read', 'x_write', 'x_is_up', 'post', 'current', 'link_sec', 'note_security', 'store_status', 'apply_bonding_policy', 'rx_arm'):
+           'x_read', 'x_write', 'x_is_up', 'chr_access', 'post', 'current', 'link_sec', 'note_security', 'store_status', 'apply_bonding_policy', 'rx_arm'):
     assert not FLASH.search(body(link, fn)), f'{fn} reaches a flash operation (the link task has a PSRAM stack)'
 assert len(re.findall(r'config_ble_load\(', link)) == 1 and 'config_ble_load(&cfg)' in body(link, 'ble_link_start')
 start = body(link, 'ble_link_start')

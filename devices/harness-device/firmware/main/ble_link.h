@@ -24,6 +24,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "ble_state.h"
 #include "cable_xport.h"
@@ -39,6 +40,10 @@ ble_state_t ble_link_state(void);
 // Open (true) or close (false) the pairing window: new bonds are made only inside it, for BLE_PAIR_WINDOW_MS (120 s). Closed by default. B5 calls it from
 // the Settings row "Pair phone". False/no-op when the phone mode is not running. Any task.
 void ble_link_pairing_window(bool open);
+// What the phone wrote to the two characteristics (spec section 5; only a peer that passes the channel rule may write). The relay status is the byte of the
+// spec table (ble_relay_status_name); the home hint is true when the phone sees the home network. Any task; cheap.
+uint8_t ble_link_relay_status(void);
+bool ble_link_home_hint(void);
 // Begin advertising again after NOT_FOUND ("Phone not found") or an earlier stop: a START event. False when the phone mode is not running. Any task.
 bool ble_link_restart(void);
 
@@ -48,6 +53,8 @@ static inline bool ble_link_start(void) { return false; }
 static inline const cable_xport_t *ble_link_xport(void) { return NULL; }
 static inline ble_state_t ble_link_state(void) { return BLE_ST_OFF; }
 static inline bool ble_link_restart(void) { return false; }
+static inline uint8_t ble_link_relay_status(void) { return 0; }
+static inline bool ble_link_home_hint(void) { return false; }
 static inline void ble_link_pairing_window(bool open) { (void)open; }
 
 #endif

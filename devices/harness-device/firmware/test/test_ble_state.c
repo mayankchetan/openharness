@@ -541,6 +541,62 @@ static void test_advertising_against_the_vectors(const char *path)
     CHECK(ble_scan_rsp_data(buf, 17) == 0 && ble_scan_rsp_data(buf, 18) == 18 && ble_scan_rsp_data(NULL, 31) == 0);
 }
 
+// ── B4c: the two writable characteristics (spec section 5), against the `status` and `hint` lines of the vector file ─────────────────────
+// hint <written-bytes-hex|empty> <ok:N|err:0xHH>      status <value-hex> <state-name>
+static void test_gatt_values_against_the_vectors(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    assert(f);
+    char line[256];
+    unsigned hints = 0, statuses = 0;
+    while (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        char *fields[3] = {0};
+        unsigned k = 0;
+        for (char *s = line; k < 3; ) {   // a split that keeps an empty field (a zero-length write)
+            fields[k++] = s;
+            char *tab = strchr(s, '	');
+            if (!tab) break;
+            *tab = 0;
+            s = tab + 1;
+        }
+        if (strcmp(fields[0], "hint") == 0 && k == 3) {
+            uint8_t data[8];
+            const size_t n = unhex(fields[1], data, sizeof data);
+            uint8_t value = 0xEE;
+            const uint8_t err = ble_hint_check(n ? data : NULL, n, &value);
+            if (strncmp(fields[2], "ok:", 3) == 0) {
+                CHECK(err == 0 && value == (uint8_t)atoi(fields[2] + 3));
+            } else {
+                CHECK(strncmp(fields[2], "err:", 4) == 0 && err == (uint8_t)strtoul(fields[2] + 4, NULL, 16) && value == 0xEE);   // an error stores nothing
+            }
+            hints++;
+        } else if (strcmp(fields[0], "status") == 0 && k == 3) {
+            uint8_t v;
+            CHECK(unhex(fields[1], &v, 1) == 1);
+            CHECK(strcmp(ble_relay_status_name(v), fields[2]) == 0);
+            statuses++;
+        }
+    }
+    fclose(f);
+    CHECK(hints >= 6 && statuses >= 8);
+    // the edges the file does not list
+    uint8_t v = 7;
+    const uint8_t two[2] = {1, 0};
+    CHECK(ble_hint_check(two, 2, &v) == BLE_HINT_ERR_LEN && v == 7);                  // two bytes, even when the first is valid
+    CHECK(ble_hint_check(NULL, 1, &v) == BLE_HINT_ERR_LEN);                           // a missing buffer is no value
+    CHECK(ble_hint_check(two, 1, NULL) == 0);                                         // the caller may only ask whether it would be accepted
+    CHECK(ble_hint_check(two, 0, &v) == BLE_HINT_ERR_LEN);
+    CHECK(BLE_HINT_ERR_LEN == 0x0D && BLE_HINT_ERR_RANGE == 0x80);
+    // a status write is one byte, any value; the dial shows it and never treats it as an error
+    uint8_t s = 9;
+    CHECK(ble_relay_status_check(two, 1, &s) == 0 && s == 1);
+    const uint8_t big = 0xFE;
+    CHECK(ble_relay_status_check(&big, 1, &s) == 0 && s == 0xFE);
+    CHECK(ble_relay_status_check(two, 2, &s) == BLE_HINT_ERR_LEN && s == 0xFE);
+    CHECK(ble_relay_status_check(two, 0, &s) == BLE_HINT_ERR_LEN && ble_relay_status_check(NULL, 1, &s) == BLE_HINT_ERR_LEN);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2 && "usage: test_ble_state <vectors/ble_status.txt>");
@@ -556,6 +612,7 @@ int main(int argc, char **argv)
     test_post_keeps_the_clock_of_a_state_that_did_not_change();
     test_refusal_run();
     test_accept_policy();
+    test_gatt_values_against_the_vectors(argv[1]);
     printf("test_ble_state: %u checks PASS\n", checks);
     return 0;
 }
