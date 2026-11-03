@@ -184,6 +184,29 @@ void display_render_guard(bool run)
 // Render task only (power_sleep.c enter_s2 / exit_s2). A failed panel write aborts, as every other panel write in this file does.
 #define PANEL_SETTLE_MS 120
 #define PANEL_DCS(cmd) ((int)((0x02u << 24) | ((unsigned)(cmd) << 8)))
+// The sleep-out also resets the extended commands (CO5300 datasheet V0.01, 7.5.12 SLPOUT, p.145: "CO5300 loads all default values of extended and test command to
+// the registers during this 5msec"). init_cmds sets two of them, on the page selected by FE 20 (0x19 and 0x1C), so the slice of init_cmds from that page select up to
+// the select back to page 0 is sent again after every sleep-out. It is read from the table, never copied, so the init and the replay cannot drift. The standard
+// commands (3A, 53, 51, 63, 36) are not sent: their register tables in the datasheet list no reset for sleep-in or sleep-out.
+#define PANEL_PAGE_CMD  0xFE
+#define PANEL_PAGE_EXT  0x20
+#define PANEL_PAGE_USER 0x00
+static void panel_replay_ext_page(void)
+{
+    const size_t n = sizeof init_cmds / sizeof init_cmds[0];
+    size_t first = n, last = n;
+    for (size_t i = 0; i < n && last == n; i++) {
+        if (init_cmds[i].cmd != PANEL_PAGE_CMD || init_cmds[i].data_bytes != 1) continue;
+        const uint8_t page = ((const uint8_t *)init_cmds[i].data)[0];
+        if (first == n && page == PANEL_PAGE_EXT) first = i;
+        else if (first != n && page == PANEL_PAGE_USER) last = i;
+    }
+    ESP_ERROR_CHECK(last < n ? ESP_OK : ESP_ERR_INVALID_STATE);   // the table lost its page select: stop here, not by replaying the wrong commands
+    for (size_t i = first; i <= last; i++) {
+        ESP_ERROR_CHECK(esp_lcd_panel_io_tx_param(panel_io, PANEL_DCS(init_cmds[i].cmd), init_cmds[i].data, init_cmds[i].data_bytes));
+        if (init_cmds[i].delay_ms) vTaskDelay(pdMS_TO_TICKS(init_cmds[i].delay_ms));
+    }
+}
 void display_panel_sleep(bool sleep)
 {
     if (sleep == atomic_load(&s_panel_slpin))
@@ -197,6 +220,7 @@ void display_panel_sleep(bool sleep)
     } else {
         ESP_ERROR_CHECK(esp_lcd_panel_io_tx_param(panel_io, PANEL_DCS(LCD_CMD_SLPOUT), NULL, 0));
         vTaskDelay(pdMS_TO_TICKS(PANEL_SETTLE_MS));
+        panel_replay_ext_page();   // before DISPON, which the render loop sends after the first full frame
         s_panel_woke = true;
         atomic_store(&s_panel_slpin, false);
     }
