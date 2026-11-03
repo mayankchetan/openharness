@@ -28,6 +28,7 @@
 #include "net_link.h"
 #include "board/board.h"
 #include "board/board_probe.h"
+#include "board/power.h"
 #include "driver/gpio.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -287,6 +288,7 @@ void app_main(void)
     power_sleep_init();  // DEVICE_BATTERY_SLEEP only (a no-op otherwise): the awake lock, so nothing sleeps until the policy says so
     config_store_init();
     power_off_boot_report();   // DEVICE_BATTERY_POWEROFF only (a no-op otherwise): the AXP2101 source bytes, and why the last boot ended
+    power_log_rails();         // the AXP2101 rail registers 0x80..0x9A, read only, one log line (which rails are on is not known for this board)
 
 #ifdef DEVICE_UI_GALLERY
     gallery_main();

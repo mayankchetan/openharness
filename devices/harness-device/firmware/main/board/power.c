@@ -88,6 +88,18 @@ static esp_err_t axp_write(uint8_t reg, uint8_t val)
     return i2c_master_transmit(s_dev, buf, sizeof(buf), pdMS_TO_TICKS(50));
 }
 
+// READ ONLY: axp_read only. No rail, no enable bit and no DC-DC mode bit is written anywhere in this firmware (the one rail-wide write is the PMIC power-off,
+// power_pmic_soft_off).
+void power_log_rails(void)
+{
+    if (!board()->has_pmic) return;
+    int regs[POWER_RAILS_COUNT];
+    for (int i = 0; i < POWER_RAILS_COUNT; i++) regs[i] = axp_read((uint8_t)(POWER_RAILS_FIRST + i));
+    char line[200];
+    power_rails_format(line, sizeof line, regs);
+    ESP_LOGI(TAG, "%s", line);
+}
+
 bool power_take_pwrkey_tap(void)
 {
     int st = axp_read(AXP_REG_IRQ_ST1);

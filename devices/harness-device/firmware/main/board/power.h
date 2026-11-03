@@ -2,7 +2,9 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 // AXP2101 datasheet V1.4 p.31 (workbench briefs/research/2026-10-29-axp2101-registers.md):
 //   REG 0x00 PMU status1: bit 5 = VBUS good (1 good), bit 3 = battery present (1 present), bits 7:6 reserved.
@@ -12,6 +14,31 @@
 // The battery current direction out of a raw REG 0x01: 0 standby, 1 charging, 2 discharging, 3 reserved; -1 for a failed read (s < 0).
 // Bit 7 is reserved and is masked off. Pure, so the host tests run it.
 static inline int power_chg_from_status2(int s) { return s < 0 ? -1 : (s >> 5) & 0x03; }
+
+// The rail registers, READ ONLY, for one boot log line (2026-11-02): REG 0x80 DC-DC enable, 0x81 DC-DC mode, 0x82..0x8F DC-DC voltages, 0x90 and 0x91 the LDO
+// enables, 0x92..0x9A the LDO voltages (datasheet V1.4 pages 50-53; workbench briefs/research/2026-10-29-axp2101-registers.md). The map of which rail feeds what
+// on this board is not known: this line is how the bench finds out what is on. No rail register is ever written by this firmware.
+#define POWER_RAILS_FIRST 0x80
+#define POWER_RAILS_LAST  0x9A
+#define POWER_RAILS_COUNT (POWER_RAILS_LAST - POWER_RAILS_FIRST + 1)
+// "AXP2101 rails (read only): 80=xx 81=xx ... 9a=xx", "--" for a register that did not read (regs[i] < 0). Pure; a small buffer is cut, never overrun.
+static inline int power_rails_format(char *out, size_t cap, const int regs[POWER_RAILS_COUNT])
+{
+    if (!cap) return 0;
+    int n = snprintf(out, cap, "AXP2101 rails (read only):");
+    if (n < 0) { out[0] = 0; return 0; }
+    if ((size_t)n >= cap) return (int)cap - 1;
+    for (int i = 0; i < POWER_RAILS_COUNT; i++) {
+        const int w = regs[i] < 0 ? snprintf(out + n, cap - (size_t)n, " %02x=--", POWER_RAILS_FIRST + i)
+                                  : snprintf(out + n, cap - (size_t)n, " %02x=%02x", POWER_RAILS_FIRST + i, regs[i] & 0xFF);
+        if (w < 0) break;
+        if ((size_t)w >= cap - (size_t)n) return (int)cap - 1;
+        n += w;
+    }
+    return n;
+}
+// Reads and logs them once (a board without the PMIC reads nothing). Called at boot.
+void power_log_rails(void);
 
 // Lazily attach the AXP2101 to the shared I2C bus. Idempotent; safe to call from any task.
 // Returns false if the device couldn't be added (then the getters report "unknown").
