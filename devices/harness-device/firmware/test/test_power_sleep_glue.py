@@ -169,7 +169,7 @@ int64_t g_now_us;
 // ---- fake world ----
 static struct fake_lock { int count; const char *name; } the_lock;
 static int lock_creates, lock_acquires, lock_releases;
-static int configure_calls, configure_battery, configure_usb;
+static int configure_calls, configure_battery, configure_usb, configure_cap;   // cap: the S2 cpu cap (max 80 MHz), S2_CPU80 only
 static esp_pm_config_t last_cfg;
 static esp_err_t retention_result = ESP_OK;
 static int pads_kept;
@@ -206,7 +206,8 @@ esp_err_t esp_pm_lock_release(esp_pm_lock_handle_t h) {
 }
 esp_err_t esp_pm_configure(const void *cfg) {
     last_cfg = *(const esp_pm_config_t *)cfg; configure_calls++;
-    if (last_cfg.min_freq_mhz == 240) { configure_usb++; ev("PM240"); } else { configure_battery++; ev(last_cfg.light_sleep_enable ? "PM80L" : "PM80"); }
+    if (last_cfg.max_freq_mhz == 80) { configure_cap++; ev("PM80CAP"); }
+    else if (last_cfg.min_freq_mhz == 240) { configure_usb++; ev("PM240"); } else { configure_battery++; ev(last_cfg.light_sleep_enable ? "PM80L" : "PM80"); }
     return ESP_OK;
 }
 esp_err_t esp_pm_light_sleep_register_cbs(esp_pm_sleep_cbs_register_config_t *c) { exit_cb = c->exit_cb; return ESP_OK; }
@@ -276,7 +277,7 @@ static void plug_in(void)  { pmic_state = 1; cache_chg = 1; pmu0 = 0x28; }   // 
 static void unplug(void)   { pmic_state = 2; cache_chg = 2; pmu0 = 0x08; }   // discharging, VBUS not good, battery present
 static void reset_world(void) {
     memset(&the_lock, 0, sizeof the_lock); lock_creates = lock_acquires = lock_releases = 0;
-    configure_calls = configure_battery = configure_usb = 0; pads_kept = 0; pmic_reads = 0;
+    configure_calls = configure_battery = configure_usb = configure_cap = 0; pads_kept = 0; pmic_reads = 0;
     cache_chg = -1; usb_host = asleep = voice = session = false; transport = CABLE_XPORT_USB; audio_stopped = false; audio_idle_ok = true; audio_resume_ok = true; pmu0 = 0x08; g_logs[0] = 0;
     guard_stops = guard_starts = audio_idles = audio_resumes = touch_arms = touch_disarms = panel_sleeps = panel_wakes = 0; pmic_state = 0; retention_result = ESP_OK;
     wdt_arms = wdt_feeds = wdt_disarms = 0; crumbs = 0; fake_stage = 3; bounces = 0; arm_adds_hold = false; release_wakes_screen = false; release_plugs_usb = false; arm_fails = false; touch_armed = false; touch_pokes = 0;
@@ -917,6 +918,38 @@ static void scenario_off_never_on_external_power_3(void) {
 }
 #endif
 
+#if S2_CPU80
+static void scenario_cpu80(void) {
+    // S2_CPU80: in S2 the CPU is capped at 80 MHz (max 80, min 80, light sleep on), put back to 240/80 the moment S2 is left. S0 and S1 are unchanged.
+    reset_world();
+    power_sleep_init();
+    unplug(); tick(4000);
+    assert(configure_battery == 1 && configure_cap == 0 && last_cfg.max_freq_mhz == 240);       // S1: 240/80 as before
+    screen(false); tick(3500);
+    assert(!strcmp(power_sleep_state_name(), "S2") && configure_cap == 1 && the_lock.count == 0);
+    assert(last_cfg.max_freq_mhz == 80 && last_cfg.min_freq_mhz == 80 && last_cfg.light_sleep_enable);
+    assert(in_order("PM80CAP", "LOCK-"));                                                         // capped BEFORE the awake lock goes
+    clear_events();
+    screen(true);
+    assert(strncmp(g_events, "LOCK+", 5) == 0 && configure_cap == 1);                             // the hook takes the lock back first and does not touch the clocks
+    tick(300);
+    assert(in_order("LOCK+", "PM80L") && last_cfg.max_freq_mhz == 240 && last_cfg.min_freq_mhz == 80 && last_cfg.light_sleep_enable);   // 240/80 again
+    assert(configure_battery == 2 && configure_usb == 0);
+    // paired over many cycles, and when the screen wakes just as the lock is let go
+    for (int i = 0; i < 20; i++) { screen(false); tick(3500); screen(true); tick(300); }
+    assert(configure_cap == 21 && configure_battery == 22 && last_cfg.max_freq_mhz == 240);
+    release_wakes_screen = true;
+    screen(false); tick(3500); tick(500);
+    assert(configure_cap == 22 && configure_battery == 23 && last_cfg.max_freq_mhz == 240 && the_lock.count == 1);
+    // external power in S2: the cap is undone first, then the battery configuration is dropped (240/240)
+    screen(false); tick(3500);
+    assert(configure_cap == 23 && last_cfg.max_freq_mhz == 80);
+    clear_events();
+    usb_host = true; tick(600);
+    assert(in_order("PM80L", "PM240") && last_cfg.min_freq_mhz == 240 && !last_cfg.light_sleep_enable && configure_usb == 1);
+}
+#endif
+
 #if S2_PANEL_SLPIN
 static void scenario_panel(void) {
     // S2_PANEL_SLPIN: the render task puts the CO5300 in sleep-in at S2 entry and brings it out at S2 exit (display_panel_sleep, display_habitat.c).
@@ -1015,6 +1048,9 @@ int main(int argc, char **argv) {
 #if S2_PANEL_SLPIN
     else if (!strcmp(argv[1], "panel")) scenario_panel();
 #endif
+#if S2_CPU80
+    else if (!strcmp(argv[1], "cpu80")) scenario_cpu80();
+#endif
 #ifdef DEVICE_BATTERY_POWEROFF
     else if (!strcmp(argv[1], "off_s2_timeout_0")) scenario_off_s2_timeout_0();
     else if (!strcmp(argv[1], "off_s2_timeout_1")) scenario_off_s2_timeout_1();
@@ -1065,6 +1101,9 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
     # S2_PANEL_SLPIN: the sleep-in / sleep-out calls, their order against the lock, the audio and the stall guard
     build('glue_panel', '-DS2_PANEL_SLPIN=1')
     subprocess.run([str(folder / 'glue_panel'), 'panel'], check=True)
+    # S2_CPU80: the cpu cap in S2
+    build('glue_cpu80', '-DS2_CPU80=1')
+    subprocess.run([str(folder / 'glue_cpu80'), 'cpu80'], check=True)
     # the bench aid of the RTC watchdog: armed, never fed
     build('glue_selftest', '-DSLEEP_WDT_SELFTEST=1')
     subprocess.run([str(folder / 'glue_selftest'), 'wdt_selftest'], check=True)
@@ -1074,4 +1113,4 @@ with tempfile.TemporaryDirectory(prefix='harness-power-sleep-') as folder:
         subprocess.run([str(folder / 'glue_off'), name], check=True)
     print('power sleep glue: ' + ', '.join(scenarios) + ' PASS (boot order, unplug, S2 entry and wake order without a touch wake, plug-in, 200 cycles balanced, '
           'no retention RAM, PWR wake during entry, other boards, host, holds, Wi-Fi session and link holds, the D+ bounce after a sleep, the RTC watchdog and the breadcrumb in S2, audio retry, audio resume retry, D1 input gate, sleep statistics); '
-          'the off timers through hold excursions PASS with DEVICE_BATTERY_POWEROFF=1; panel PASS with S2_PANEL_SLPIN=1; noarm, lost, armhold PASS with PP_TOUCH_WAKE_ON_BATTERY=1; wdt_selftest PASS with SLEEP_WDT_SELFTEST=1; the S3 triggers PASS with DEVICE_BATTERY_POWEROFF=1')
+          'the off timers through hold excursions PASS with DEVICE_BATTERY_POWEROFF=1; panel PASS with S2_PANEL_SLPIN=1; cpu80 PASS with S2_CPU80=1; noarm, lost, armhold PASS with PP_TOUCH_WAKE_ON_BATTERY=1; wdt_selftest PASS with SLEEP_WDT_SELFTEST=1; the S3 triggers PASS with DEVICE_BATTERY_POWEROFF=1')

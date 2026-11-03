@@ -98,6 +98,10 @@ static bool        s_last_on_battery;  // the last fresh PMIC read said "on the 
 static pp_state_t  s_applied;          // what the render task has applied
 static bool        s_pm_battery;       // power management is configured for battery (frequency scaling, maybe light sleep)
 static bool        s_audio_idle;       // the I2S channels are stopped (audio_capture_idle)
+#if S2_CPU80
+static bool        s_pm_light;         // the battery configuration has light sleep on (set in enter_battery): the S2 cpu cap keeps it
+static bool        s_s2_capped;        // the S2 cpu cap (S2_CPU80) is in force; render task only
+#endif
 static bool        s_s2_live;          // the S2 steps that let the chip sleep are done: touch wake armed, pollers relaxed, lock released
 static uint32_t    s_bounced_sleeps;   // s_slept_count at the last D+ bounce: the chip has not slept since then when the two are equal
 static int         s_last_status0 = -1, s_last_status1 = -1;   // the raw AXP2101 bytes of the last fresh read (-1: it failed), for the log
@@ -174,6 +178,25 @@ void power_sleep_pm_leave_battery(void)
 }
 
 // ── init ────────────────────────────────────────────────────────────────────────────────────────────
+
+#if S2_CPU80
+// S2 CPU CAP (S2_CPU80). In S2 the chip is awake for about 22 percent of the time and runs at the S1 maximum of 240 MHz for it; datasheet Table 5-9 (via the
+// research note 2026-11-02-dial-battery-drain.md section 1.3) puts a 240 MHz idle CPU at 32.9 mA against 22.0 mA at 80 MHz (clocks gated). Nothing in S2 is
+// CPU-bound: the Wi-Fi stack and the pollers wait on radio and timers. 80 MHz is also the minimum the S1 configuration already runs at, so the Wi-Fi driver
+// is used to it. Render task only (s2_go_live, exit_s2); S0 and S1 are not touched. esp_pm_configure keeps the light-sleep setting S1 has.
+static void s2_cpu_cap(bool cap)
+{
+    if (cap == s_s2_capped) return;
+    const esp_pm_config_t cfg = {.max_freq_mhz = cap ? 80 : 240, .min_freq_mhz = 80, .light_sleep_enable = s_pm_light};
+    const esp_err_t e = esp_pm_configure(&cfg);
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "esp_pm_configure(%d/80, light=%d) failed: %s", cap ? 80 : 240, (int)s_pm_light, esp_err_to_name(e));
+        return;
+    }
+    s_s2_capped = cap;
+    ESP_LOGI(TAG, "S2: cpu max %d MHz", cap ? 80 : 240);
+}
+#endif
 
 static void on_screen(bool on);
 
@@ -316,6 +339,9 @@ static void enter_battery(void)
     const size_t free_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL), largest_before = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     const bool light = power_sleep_pm_enter_battery(POWER_SLEEP_LIGHT);
     s_pm_battery = true;
+#if S2_CPU80
+    s_pm_light = light;
+#endif
     // G2b of the plan: the retention RAM should show here as about 13.4 KB less free (and the largest block before it at least 64 KB)
     ESP_LOGI(TAG, "battery: %s; int_free %u -> %u, largest %u -> %u", light ? "light sleep on" : "frequency scaling only", (unsigned)free_before,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)largest_before, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
@@ -354,6 +380,9 @@ static bool s2_go_live(void)
     }
 #endif
     atomic_store(&s_relaxed, true);              // the pollers go to their S2 rates (a wake during the arm, or during the release below, clears the flag again in the check that follows)
+#if S2_CPU80
+    s2_cpu_cap(true);                            // before the lock goes: the first sleep already runs the short awake time at 80 MHz; exit_s2 undoes it on every way out
+#endif
     lock_release_once();                         // the chip may sleep from here
     // Look again after the release: the screen may have woken (its hook ran before the release took effect), or the ptt task may have
     // sent the policy back to S0 or S1 (a USB host, a plug-in, work started) while this ran. Either way take the lock back
@@ -386,6 +415,9 @@ static void exit_s2(void)
 {
     lock_acquire_once();                         // FIRST, and idempotent: the ptt task or the screen hook may have done it
     atomic_store(&s_relaxed, false);
+#if S2_CPU80
+    s2_cpu_cap(false);                           // 240 MHz again before anything else the wake needs
+#endif
     s_s2_live = false;
 #if PP_TOUCH_WAKE_ON_BATTERY
     touch_sleep_disarm();                        // the pin goes back to the touch driver's falling-edge interrupt
