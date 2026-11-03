@@ -44,5 +44,14 @@ void net_link_resume(void);
 // reachable, key refused), or NULL (USB mode, or the link is up). Cheap; any task.
 const char *net_link_status_text(void);
 
+#include "s2_switches.h"
+#if S2_WIFI_OFF
+// S2_WIFI_OFF. net_link_poke(): wake the net_link task from its radio-off park (the power code calls it when the radio is wanted back); it only notifies, from any
+// task. net_link_radio_waking(): true while the radio is off or has just been turned back on and the link is not up yet (at most 30 s), for the voice path,
+// which waits for the link instead of losing the first words (cable_client_wait_session). False in USB mode.
+void net_link_poke(void);
+bool net_link_radio_waking(void);
+#endif
+
 // The link state itself (net_state.h), for the Link screen. NET_OFF in USB mode. Cheap; any task.
 net_state_t net_link_state(void);

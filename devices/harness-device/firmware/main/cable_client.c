@@ -2014,6 +2014,18 @@ failed:
 
 bool cable_client_is_connected(void) { return s_session; }
 
+static bool (*s_link_waking)(void);
+void cable_client_set_link_waking(bool (*waking)(void)) { s_link_waking = waking; }
+
+bool cable_client_wait_session(uint32_t max_ms)
+{
+    if (s_session) return true;
+    if (!s_link_waking) return false;
+    const int64_t end_us = esp_timer_get_time() + (int64_t)max_ms * 1000;
+    while (!s_session && esp_timer_get_time() < end_us && s_link_waking()) vTaskDelay(pdMS_TO_TICKS(20));
+    return s_session;
+}
+
 bool cable_client_say_bye(const char *reason)
 {
     if (!s_session || !reason) return false;

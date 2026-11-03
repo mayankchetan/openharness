@@ -120,6 +120,12 @@ bool cable_client_start_with(const cable_xport_t *xport);
 
 // Whether `welcome` has been seen and the session is still believed to be live.
 bool cable_client_is_connected(void);
+// Voice after a radio-off (S2_WIFI_OFF): net_link registers a predicate that says "the Wi-Fi radio is coming back, the link is not up yet". Then
+// cable_client_wait_session(max_ms) waits (polling every 20 ms) until a session is up, the predicate turns false, or the time is out, and says whether a
+// session is up. With no predicate registered, or with a session already up, it returns at once. The voice sender calls it before voice.begin while the
+// capture goes on filling its ring.
+void cable_client_set_link_waking(bool (*waking)(void));
+bool cable_client_wait_session(uint32_t max_ms);
 // Tell the daemon the dial is leaving on purpose (`{t:"bye", reason}`, a short plain word): the daemon logs a clean close. Only while a session is up;
 // false when it is not or the frame did not go. Sent just before a power-off closes the link (net_link.c); nothing waits for an answer.
 bool cable_client_say_bye(const char *reason);

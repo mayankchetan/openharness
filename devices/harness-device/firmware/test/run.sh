@@ -75,6 +75,7 @@ python3 "$here/test_net_link_source.py"
 # holds PP_HOLD_LINK only over connect and handshake; welcome.keepaliveMs on the dial. The timing rule itself (clamp, 1:3, the daemon's window later)
 # runs on the host against the table the daemon's spec reads too (vectors/keepalive.txt).
 python3 "$here/test_wifi_power_source.py"
+python3 "$here/test_net_radio_source.py"   # the radio off in S2: goodbye, close, park; no join, hold or backoff while parked; internal-stack radio job
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" \
    -o "$out/test_cable_keepalive" "$here/test_cable_keepalive.c" -lm
 "$out/test_cable_keepalive" "$here/vectors/keepalive.txt"

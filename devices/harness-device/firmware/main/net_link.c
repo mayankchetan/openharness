@@ -42,6 +42,13 @@ static atomic_int s_state = NET_OFF;       // net_state_t; changed only through 
 static atomic_bool s_ui_dirty;
 static atomic_bool s_halt;                 // a power-off has closed the link on purpose: the task parks and makes no new one (net_link_close_for_power_off)
 static _Atomic(const cable_xport_t *) s_tls;
+#if S2_WIFI_OFF
+static SemaphoreHandle_t s_poke;           // binary: given by net_link_poke() when the radio is wanted back, taken by the parked net_link task
+static atomic_bool s_radio_off;            // the radio is stopped on purpose (S2_WIFI_OFF): the task is parked, nothing reconnects
+static atomic_bool s_waking;               // the radio was just turned back on and the link is not up yet
+static atomic_llong s_wake_us;             // esp_timer time of that radio start, for the log line and the voice wait
+static const char WHY_RADIO_OFF[] = "wifi off (sleep)";   // serve()'s return value; compared by address
+#endif
 static unsigned s_links;                   // links established since boot (net_link task only)
 static net_refusal_t s_refusals;           // handshakes in a row that the daemon answered with an alert (net_link task only)
 
@@ -85,6 +92,9 @@ static void power_profile_sync(void)
 static void sleep_ms(uint32_t ms)
 {
     while (ms) {
+#if S2_WIFI_OFF
+        if (power_sleep_wifi_off_wanted()) return;   // the radio is wanted off: the top of the task loop parks it, a backoff of up to 60 s must not hold that up
+#endif
         power_profile_sync();
         const uint32_t step = power_sleep_wait_ms(PP_POLLER_NET_BACKOFF, SLICE_MS);   // 2 s while the chip may sleep
         const uint32_t slice = ms < step ? ms : step;
@@ -173,6 +183,41 @@ static bool join_wifi(void)
     return false;
 }
 
+#if S2_WIFI_OFF
+// S2_WIFI_OFF. The radio goes off and the task parks until it is wanted back. Net_link task only; no link is up here (serve() has returned and the TLS connection is closed,
+// or there never was one). While parked: no join, no connect, no TLS open, no backoff step, no PP_HOLD_LINK, no power-save profile call (the driver is stopped), nothing posted
+// to the state machine. It leaves when the wish is gone (screen on, external power, a host) and no power-off has parked the link, then starts the radio; the caller goes
+// straight to the top of its loop and joins there. The sleep is a notification wait (net_link_poke), with the relaxed poll as the fallback.
+static void radio_off_park(void)
+{
+    ESP_LOGI(TAG, "s2: wifi off after %d min", (int)S2_WIFI_OFF_MIN);
+    atomic_store(&s_radio_off, true);
+    nwifi_radio_off();
+    for (;;) {
+        if (!atomic_load(&s_halt) && !power_sleep_wifi_off_wanted()) break;
+        xSemaphoreTake(s_poke, pdMS_TO_TICKS(power_sleep_wait_ms(PP_POLLER_NET_BACKOFF, 100)));   // net_link_poke() ends the wait at once
+    }
+    const int64_t t0_us = esp_timer_get_time();
+    atomic_store(&s_wake_us, t0_us);
+    atomic_store(&s_waking, true);
+    const bool ok = nwifi_radio_on();
+    s_idle_profile = false;   // nwifi_radio_on applied ACTIVE; power_profile_sync starts from there
+    atomic_store(&s_radio_off, false);
+    ESP_LOGI(TAG, "s2: wifi starting (radio %s in %d ms)", ok ? "on" : "NOT started", (int)((esp_timer_get_time() - t0_us) / 1000));
+}
+
+void net_link_poke(void)
+{
+    if (s_poke) xSemaphoreGive(s_poke);
+}
+
+bool net_link_radio_waking(void)
+{
+    if (atomic_load(&s_radio_off)) return true;
+    return atomic_load(&s_waking) && esp_timer_get_time() - atomic_load(&s_wake_us) < 30LL * 1000000LL;
+}
+#endif
+
 // open() failed: say why, in terms of the state machine. Codes only in the log, never a key or a name.
 static void note_open_failure(const cable_xport_t *tls)
 {
@@ -225,6 +270,9 @@ static const char *serve(const cable_xport_t *tls)
         if (!tls->is_up(tls)) return "link closed";
         if (bits & NWIFI_DISCONNECTED) return "wifi lost";
         if (!(bits & NWIFI_GOT_IP)) return "ip lost";
+#if S2_WIFI_OFF
+        if (power_sleep_wifi_off_wanted()) return WHY_RADIO_OFF;
+#endif
         cable_link_drain_logs(DRAIN_LINES);
         const int64_t now_us = esp_timer_get_time();
         if (session) {
@@ -248,6 +296,13 @@ static void net_link_task(void *arg)
         ui_flush();
         power_profile_sync();
         while (atomic_load(&s_halt)) vTaskDelay(pdMS_TO_TICKS(100));   // parked by a power-off (net_link_close_for_power_off): no new link until it is given back
+#if S2_WIFI_OFF
+        if (power_sleep_wifi_off_wanted()) {   // no link, or none being made: nothing to say goodbye to
+            radio_off_park();
+            net_backoff_reset(&ladder);
+            continue;
+        }
+#endif
         // POWER (W13, S1). Idle, this task holds nothing: not in the backoff waits. Over the join and the handshake it holds PP_HOLD_LINK, the power
         // policy's hold for a transport with traffic, so the chip does not light-sleep in the middle of a handshake. A failed join or handshake lets it
         // go before any wait; a link that came up keeps it into serve(), which holds it until the session is up. With battery sleep off these calls
@@ -272,6 +327,11 @@ static void net_link_task(void *arg)
         net_refusal_reset(&s_refusals);
         post(NET_EV_LINK_UP);
         s_links++;
+#if S2_WIFI_OFF
+        if (atomic_exchange(&s_waking, false)) {
+            ESP_LOGI(TAG, "s2: wifi back, link up in %d ms", (int)((esp_timer_get_time() - atomic_load(&s_wake_us)) / 1000));
+        }
+#endif
         ESP_LOGI(TAG, "link up #%u handshake_ms=%d boot_ms=%d", s_links, (int)((esp_timer_get_time() - t0_us) / 1000),
                  (int)(esp_timer_get_time() / 1000));
         log_stacks("at link up");
@@ -280,10 +340,21 @@ static void net_link_task(void *arg)
         const char *why = serve(tls);
         power_sleep_release(PP_HOLD_LINK);   // the link is over: nothing is in flight while the backoff waits
         const uint32_t up_ms = (uint32_t)((esp_timer_get_time() - up_us) / 1000);
+#if S2_WIFI_OFF
+        const bool radio_off = why == WHY_RADIO_OFF;
+        if (radio_off) cable_client_say_bye("wifi-sleep");   // before the close: the daemon logs a normal goodbye, not a silence timeout
+#endif
         tls->close(tls);
         post(NET_EV_LINK_DOWN);
         ESP_LOGI(TAG, "link down after %u ms (%s)", (unsigned)up_ms, why);
         log_stacks("at link down");
+#if S2_WIFI_OFF
+        if (radio_off) {
+            radio_off_park();
+            net_backoff_reset(&ladder);
+            continue;
+        }
+#endif
         if (net_backoff_link_earned_reset(up_ms)) net_backoff_reset(&ladder);
         backoff(&ladder, "relink");
     }
@@ -381,6 +452,10 @@ static void net_init_task(void *arg)
             break;
         }
         atomic_store(&s_tls, tls);
+#if S2_WIFI_OFF
+        if (!s_poke) s_poke = xSemaphoreCreateBinary();   // before the task exists: the park reads it
+        if (!s_poke) ESP_LOGW(TAG, "no memory for the radio wake semaphore: the radio comes back at the next poll, not at once");
+#endif
         post(NET_EV_START);
         ram_telemetry_checkpoint("wifi_started");
         // net_link: PSRAM stack, because its call graph (net_link.h) holds no flash operation; falls back to internal by itself if PSRAM is full.
@@ -394,6 +469,10 @@ static void net_init_task(void *arg)
             break;
         }
         b->ok = true;
+#if S2_WIFI_OFF
+        power_sleep_set_wake_cb(net_link_poke);                     // the radio is wanted back: the power code pokes this task
+        cable_client_set_link_waking(net_link_radio_waking);        // and the voice path can ask whether the link is coming
+#endif
     } while (0);
     if (!b->ok) undo(tls, radio);   // the caller (or nobody, if it gave up) falls back to USB mode; nothing of Wi-Fi mode is left running
     zero(&b->cfg, sizeof b->cfg);

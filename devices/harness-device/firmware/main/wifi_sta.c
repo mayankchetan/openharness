@@ -11,6 +11,7 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 // Not "wifi": that is the tag of the closed Wi-Fi driver, whose level nwifi_start() lowers (see LOG LEVELS in wifi_sta.h).
@@ -110,6 +111,51 @@ bool net_power_profile(net_power_t profile)
     if (esp_wifi_get_ps(&now) == ESP_OK) ESP_LOGI(TAG, "power save now %s (profile %s)", ps_name(now), profile == NET_POWER_IDLE ? "idle" : "active");
     return true;
 }
+
+#if S2_WIFI_OFF
+#define RADIO_JOB_STACK 4096   // internal; esp_wifi_stop / esp_wifi_start only (the first-enable PHY calibration is nwifi_start's)
+static struct { bool on; bool ok; } s_job;      // one job at a time: only net_link's task runs them, and it waits for the answer
+static SemaphoreHandle_t s_job_done;
+
+static void radio_job_task(void *arg)
+{
+    (void)arg;
+    const esp_err_t e = s_job.on ? esp_wifi_start() : esp_wifi_stop();
+    s_job.ok = e == ESP_OK;
+    if (!s_job.ok) ESP_LOGW(TAG, "radio %s: %s", s_job.on ? "start" : "stop", esp_err_to_name(e));
+    if (s_job.ok && s_job.on) net_power_profile(NET_POWER_ACTIVE);   // the power-save mode is the driver's to keep; say it again, the S2 profile was MAX_MODEM
+    xSemaphoreGive(s_job_done);
+    vTaskDelete(NULL);
+}
+
+static bool radio_run(bool on)
+{
+    if (!s_job_done) s_job_done = xSemaphoreCreateBinary();
+    if (!s_job_done) return false;
+    xSemaphoreTake(s_job_done, 0);   // a late answer of a job that timed out must not count for this one
+    s_job.on = on;
+    s_job.ok = false;
+    if (xTaskCreate(radio_job_task, "net_radio", RADIO_JOB_STACK, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "radio %s: no internal RAM for the job task; done on the caller's stack", on ? "start" : "stop");
+        const esp_err_t e = on ? esp_wifi_start() : esp_wifi_stop();   // after the first enable this touches no flash; better than a radio that stays off
+        return e == ESP_OK;
+    }
+    if (xSemaphoreTake(s_job_done, pdMS_TO_TICKS(10000)) != pdTRUE) {
+        ESP_LOGE(TAG, "radio %s: the job did not answer in 10 s", on ? "start" : "stop");
+        return false;
+    }
+    return s_job.ok;
+}
+
+bool nwifi_radio_off(void)
+{
+    const bool ok = radio_run(false);
+    if (s_bits) xEventGroupClearBits(s_bits, NWIFI_ASSOCIATED | NWIFI_GOT_IP);   // the events that say so arrive later; the join after the start must not believe them
+    return ok;
+}
+
+bool nwifi_radio_on(void) { return radio_run(true); }
+#endif
 
 bool nwifi_start(const char *ssid, const char *pass, nwifi_event_cb on_event_cb)
 {

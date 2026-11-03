@@ -28,6 +28,7 @@
 #include <stdint.h>
 
 #include "net_state.h"
+#include "s2_switches.h"
 
 // Bits of nwifi_bits().
 #define NWIFI_ASSOCIATED   (1u << 0)   // joined the access point
@@ -53,6 +54,16 @@ void nwifi_stop(void);
 void nwifi_connect(void);
 // Abandon a join or leave the access point.
 void nwifi_disconnect(void);
+
+#if S2_WIFI_OFF
+// RADIO OFF IN S2 (s2_switches.h S2_WIFI_OFF). Stop the driver (esp_wifi_stop: the station leaves the access point and the radio is off, so light sleep is as deep as
+// it goes) and start it again (esp_wifi_start, then the ACTIVE power-save profile). The driver stays initialised, the credentials stay in RAM, the netif stays; starting
+// does NOT connect: net_link.c joins at the top of its loop. Both run the driver call on a short-lived INTERNAL-stack task and wait for it (a PSRAM-stack task must not
+// call anything that could touch flash, wifi_sta.h FLASH SAFETY; esp_wifi_start does that only on the first enable of a boot, which nwifi_start() already did).
+// Only net_link.c calls them, from its own task, with no link up and no join under way. False when the driver refused.
+bool nwifi_radio_off(void);
+bool nwifi_radio_on(void);
+#endif
 
 uint32_t nwifi_bits(void);
 // Wait until any bit of `mask` is set or `ms` pass; returns all bits as they are on return.
