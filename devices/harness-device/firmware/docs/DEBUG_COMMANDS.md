@@ -234,8 +234,7 @@ On failure:
 
 The same sequence as the real triggers (plan 16.1 item 2), in this order: one log line `POWEROFF reason=debug pct=<p> mv=<mv> force=1`, the NVS
 writers stop (`store_gate.h`), a record `{reason, percent, mV, uptime}` is committed to NVS, 100 ms for the flash to settle, the screen wakes if it was off
-and shows `Off - hold PWR` for 1 s, then AXP2101 REG 0x10 bit 0 (Soft PWROFF) is set. The next boot logs the record once (`previous boot ended in a PMIC
-power-off: reason=debug ...`) together with the raw REG 0x20 and REG 0x21 bytes (power-on and power-off source status).
+and shows `Off - hold PWR` for 1 s, then AXP2101 REG 0x10 bit 0 (Soft PWROFF) is set. The next boot logs the record once (`boot: last power-off: debug at up=<s> s (pct=<p> mv=<mv>)`) together with the raw REG 0x20 and REG 0x21 bytes (power-on and power-off source status).
 
 The one difference from the real triggers: this command skips the "not on external power" checks (VBUS good, a USB host), which is the point of it. It
 still refuses during a firmware update, and the NVS writers are stopped as ever. With VBUS present whether the dial really stays off, and what brings it

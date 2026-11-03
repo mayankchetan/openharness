@@ -434,12 +434,13 @@ static void scenario_boot_report(void) {
     assert(power_off_request(PP_OFF_DRAIN, false));                        // writes the record
     clear_events();
     power_off_boot_report();
-    assert(strstr(g_logs, "reason=drain pct=4 mv=3300"));                  // logged once ...
+    assert(strstr(g_logs, "boot: last power-off: drain at up=") && strstr(g_logs, "(pct=4 mv=3300)"));   // logged once (2026-11-02 format) ...
+    { const char *first = strstr(g_logs, "boot: last power-off:"); assert(first && !strstr(first + 1, "boot: last power-off:")); }
     assert(strstr(g_logs, "REG 0x20=0x4 REG 0x21=0x2"));                   // ... with the two source bytes
     assert(in_order("NVSERASE", "NVSCOMMIT") && !store.present);           // ... and erased
     clear_events();
     power_off_boot_report();
-    assert(!strstr(g_logs, "reason=drain") && strstr(g_logs, "REG 0x20"));  // the second boot says nothing about it
+    assert(!strstr(g_logs, "last power-off") && strstr(g_logs, "REG 0x20"));  // the second boot says nothing about it
     // a board without the PMIC never reads its registers (the bus has nothing at that address)
     reset_world();
     the_board.has_pmic = false;
@@ -449,7 +450,7 @@ static void scenario_boot_report(void) {
     reset_world();
     store.present = true; store.len = sizeof(rec_t); memset(store.data, 0xA5, store.len);
     power_off_boot_report();
-    assert(!strstr(g_logs, "previous boot"));
+    assert(!strstr(g_logs, "last power-off"));
 }
 
 static void scenario_gate(void) {

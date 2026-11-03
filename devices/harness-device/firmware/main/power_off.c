@@ -201,8 +201,7 @@ void power_off_boot_report(void)
     nvs_close(h);
     if (e != ESP_OK) return;   // nothing recorded: an ordinary boot
     if (n == sizeof rec && rec.magic == REC_MAGIC)
-        ESP_LOGW(TAG, "previous boot ended in a PMIC power-off: reason=%s pct=%d mv=%u up_s=%u", reason_name(rec.reason), rec.pct, (unsigned)rec.mv,
-                 (unsigned)rec.up_s);
+        ESP_LOGW(TAG, "boot: last power-off: %s at up=%u s (pct=%d mv=%u)", reason_name(rec.reason), (unsigned)rec.up_s, rec.pct, (unsigned)rec.mv);
     erase_record();
 }
 
