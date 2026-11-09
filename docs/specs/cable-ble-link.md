@@ -76,11 +76,17 @@ contract.
 ## 4. Security and admission
 
 - Pairing: LE Secure Connections, numeric comparison. The dial is DisplayYesNo and shows a 6-digit number with Yes and No.
-  Pairing is allowed only inside the window the user opens in Settings (`pair_window_ms` = 120000 ms).
+  Pairing is allowed only inside the window the user opens in Settings (`pair_window_ms` = 120000 ms). A dial has no touch path
+  to Settings, so the dial also opens the same window by itself each time the BLE link comes up (phone mode on) with no bond
+  stored, and shows the Phone screen with the countdown; with a bond stored it does not. The number and the user's Yes on the
+  dial stay required.
 - The channel is accepted only on a link that is encrypted, bonded and AUTHENTICATED (numeric comparison, not Just Works: a phone
   that says "no input, no output" gets an unauthenticated bond and is refused) with a link key of at least `key_size_min` = 16
-  bytes. Otherwise the dial refuses the accept with "insufficient encryption". The dial calls `ble_gap_security_initiate` after connect, for a bonded and an unbonded peer. A
-  link not encrypted `enc_deadline_ms` = 3000 ms after connect is dropped.
+  bytes. Otherwise the dial refuses the accept with "insufficient encryption". The dial calls `ble_gap_security_initiate` after connect only while the
+  pairing window is open or when the peer already has a bond; it sends no Security Request to any other peer (Android answers one
+  with a consent prompt that nobody can answer in time). A link not encrypted `enc_deadline_ms` = 3000 ms after connect is
+  dropped, except that the deadline waits while the pairing window is open (at most `pair_window_ms`) and while a pairing number
+  is on the dial screen (at most 30 s).
 - The phone uses the secure channel call (`createL2capChannel(0x0080)`). Whether Android starts pairing by itself after a refusal
   is [U] until bench B0a; the dial does not rely on it.
 - Bonds. A new bond is made only inside the pairing window (closed unless the user opened it), and never by evicting an old one:

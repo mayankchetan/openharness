@@ -2491,10 +2491,18 @@ static void phone_leave(void)
     if (ble_link_pairing_busy()) ble_link_pairing_window(false);
     memset(&phone_ui, 0, sizeof phone_ui);
 }
-// One read of the link into phone_ui, and the moves that follow from it. Render task, display lock held; the three views only.
+// One read of the link into phone_ui, and the moves that follow from it. Render task, display lock held. Outside the three views it does one thing: when the
+// link has opened the pairing window by itself (no bond stored; ble_link.c), it shows the Phone screen, because no touch path reaches Settings > Phone. The
+// window is open outside the views only in that case ([pair] is the other opener and it lives in the PHONE view), and leaving the views closes the window
+// (phone_leave), so this cannot pull the user back after they leave.
 static void phone_poll(void)
 {
-    if (!phone_view(s.view)) return;
+    if (!phone_view(s.view)) {
+        if (!ble_link_pairing_busy()) return;
+        memset(&phone_ui, 0, sizeof phone_ui);
+        view(PHONE);   // a form, a draft or a live microphone can refuse the move: the next tick asks again
+        if (!phone_view(s.view)) return;
+    }
     const ble_state_t st = ble_link_state();
     const uint32_t left = ble_link_pairing_left_ms();
     const unsigned bonds = ble_link_bond_count();

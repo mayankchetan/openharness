@@ -217,6 +217,22 @@ void ble_set_prompting(ble_t *b, bool prompting)
     if (b) b->prompting = prompting;
 }
 
+bool ble_pair_auto_open_wanted(bool phone_mode_on, unsigned bonds)
+{
+    return phone_mode_on && bonds == 0;
+}
+
+void ble_enc_hold_update(ble_t *b, const ble_pair_window_t *w, uint64_t now_ms, bool number_shown)
+{
+    if (!b || b->state != BLE_ST_SECURING) return;   // the hold is for SECURING only; any other state has no 3 s deadline to hold
+    b->prompting = number_shown || ble_pair_is_open(w, now_ms);
+}
+
+bool ble_security_request_wanted(const ble_pair_window_t *w, uint64_t now_ms, bool peer_bonded)
+{
+    return peer_bonded || ble_pair_is_open(w, now_ms);
+}
+
 ble_numcmp_t ble_numcmp_request(const ble_pair_window_t *w, uint64_t now_ms)
 {
     return ble_pair_is_open(w, now_ms) ? BLE_NUMCMP_SHOW : BLE_NUMCMP_REFUSE;

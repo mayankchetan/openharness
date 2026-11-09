@@ -182,3 +182,18 @@ ble_pair_verdict_t ble_prompt_verdict(const ble_pair_window_t *w, uint64_t shown
 bool ble_bond_unwanted(const ble_sec_t *sec);
 // The glue says the number is on show (true) or gone (false). Only a link in SECURING can hold the deadline; NULL is ignored.
 void ble_set_prompting(ble_t *b, bool prompting);
+
+// ── pairing without a path to Settings (2026-11-09; the three user-approved changes) ──────────────────────────────────────────────────
+// No touch path reaches Settings > Phone > Pair on a real dial, so the window never opened. Three rules, all pure:
+//  - Auto-open: when the link comes up with the phone mode on and NO bond stored, the glue opens the ordinary 120 s window by itself (ble_pair_open). With any bond
+//    stored it does not: a second phone is a tap on [pair]. Numeric comparison and the user's Yes stay required; nothing here weakens them.
+bool ble_pair_auto_open_wanted(bool phone_mode_on, unsigned bonds);
+//  - Hold: while the window is open and the link is SECURING, the 3 s encryption deadline waits (the person must answer the prompt on the phone, or compare the
+//    number on the dial). `number_shown` is the earlier hold (a number on the screen). The glue calls this once a tick, under its lock, before ble_poll. The hold
+//    is bounded from outside: the window ends at 120.0 s (the hold ends with it and the 3 s, long gone, are due at once), and a number is withdrawn after
+//    BLE_PROMPT_MAX_MS. It sets or clears the flag of ble_set_prompting, in SECURING only; any other state, NULL `b`: nothing. NULL `w`: the number alone decides.
+void ble_enc_hold_update(ble_t *b, const ble_pair_window_t *w, uint64_t now_ms, bool number_shown);
+//  - Security Request: the dial asks the phone to encrypt (ble_gap_security_initiate, which makes Android raise a consent prompt that nobody can answer in 3 s)
+//    only while the window is open, or for a peer that already has a bond (it gets its stored key back). Any other peer is left alone, and the 3 s deadline and
+//    the idle cap drop it, as before.
+bool ble_security_request_wanted(const ble_pair_window_t *w, uint64_t now_ms, bool peer_bonded);

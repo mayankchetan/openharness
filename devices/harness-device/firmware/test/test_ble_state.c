@@ -718,6 +718,121 @@ static void test_a_weak_bond_is_unwanted(void)
     CHECK(!ble_bond_unwanted(NULL));
 }
 
+// Pairing fix (2026-11-09, user-approved): the pair window opens by itself when the link comes up with phone mode on and NO bond stored, because no touch path
+// reaches Settings > Phone > Pair on a real dial. With a bond the window stays shut.
+static void test_the_pair_window_opens_by_itself_only_when_unbonded(void)
+{
+    CHECK(ble_pair_auto_open_wanted(true, 0));        // phone mode on, no bond: open
+    CHECK(!ble_pair_auto_open_wanted(true, 1));       // a bond exists: never
+    CHECK(!ble_pair_auto_open_wanted(true, 2));       // the store is full: never
+    CHECK(!ble_pair_auto_open_wanted(false, 0));      // phone mode off: never
+    CHECK(!ble_pair_auto_open_wanted(false, 1));
+    CHECK(!ble_pair_auto_open_wanted(true, 3) && !ble_pair_auto_open_wanted(true, 0xFFFFu));   // any count above zero
+    // what it opens is the ordinary window: 120.0 s, a number may be shown inside it, and it ends by itself
+    ble_pair_window_t w;
+    ble_pair_init(&w);
+    CHECK(!ble_pair_is_open(&w, 100));
+    if (ble_pair_auto_open_wanted(true, 0)) ble_pair_open(&w, 100);
+    CHECK(ble_pair_is_open(&w, 100) && ble_pair_left_ms(&w, 100) == BLE_PAIR_WINDOW_MS && ble_numcmp_request(&w, 100) == BLE_NUMCMP_SHOW);
+    CHECK(!ble_pair_is_open(&w, 100 + BLE_PAIR_WINDOW_MS));
+    // with a bond the glue never calls ble_pair_open: the window stays closed and a number is refused
+    ble_pair_init(&w);
+    if (ble_pair_auto_open_wanted(true, 1)) ble_pair_open(&w, 100);
+    CHECK(!ble_pair_is_open(&w, 100) && ble_numcmp_request(&w, 100) == BLE_NUMCMP_REFUSE);
+}
+
+// Fix A: while the window is open and the link is SECURING, the 3 s encryption deadline waits (a person must answer a consent prompt or compare a number on
+// the phone). It is bounded by the window: at 120.0 s the hold ends and the deadline is due at once.
+static void test_the_encryption_deadline_waits_while_the_window_is_open(void)
+{
+    ble_t b;
+    ble_pair_window_t w;
+    ble_init(&b);
+    ble_pair_init(&w);
+    ble_post(&b, BLE_EV_START, 0);
+    ble_pair_open(&w, 500);
+    ble_post(&b, BLE_EV_LINK_UP, 1000);
+    CHECK(b.state == BLE_ST_SECURING);
+    // window open: the deadline does not fire at 3 s, nor at 30 s, nor 1 ms before the window ends
+    ble_enc_hold_update(&b, &w, 1000, false);
+    CHECK(ble_poll(&b, 1000 + BLE_ENC_DEADLINE_MS - 1) == BLE_EV_NONE);
+    ble_enc_hold_update(&b, &w, 1000 + BLE_ENC_DEADLINE_MS, false);
+    CHECK(ble_poll(&b, 1000 + BLE_ENC_DEADLINE_MS) == BLE_EV_NONE);
+    ble_enc_hold_update(&b, &w, 31000, false);
+    CHECK(ble_poll(&b, 31000) == BLE_EV_NONE);
+    ble_enc_hold_update(&b, &w, 500 + BLE_PAIR_WINDOW_MS - 1, false);
+    CHECK(ble_poll(&b, 500 + BLE_PAIR_WINDOW_MS - 1) == BLE_EV_NONE);
+    // the window ends: the hold ends with it, and the 3 s (long gone) are due at once
+    ble_enc_hold_update(&b, &w, 500 + BLE_PAIR_WINDOW_MS, false);
+    CHECK(ble_poll(&b, 500 + BLE_PAIR_WINDOW_MS) == BLE_EV_ENC_TIMEOUT);
+    // closed by hand (a No, Forget, leaving the screen): due at once as well
+    ble_init(&b);
+    ble_post(&b, BLE_EV_START, 0);
+    ble_pair_open(&w, 2000);
+    ble_post(&b, BLE_EV_LINK_UP, 2100);
+    ble_enc_hold_update(&b, &w, 2200, false);
+    CHECK(ble_poll(&b, 2100 + BLE_ENC_DEADLINE_MS + 5000) == BLE_EV_NONE);
+    ble_pair_close(&w);
+    ble_enc_hold_update(&b, &w, 9000, false);
+    CHECK(ble_poll(&b, 9000) == BLE_EV_ENC_TIMEOUT);
+    // closed from the start: the old rule, 3.000 s and not before (2.999 s)
+    ble_init(&b);
+    ble_pair_init(&w);
+    ble_post(&b, BLE_EV_START, 0);
+    ble_post(&b, BLE_EV_LINK_UP, 1000);
+    ble_enc_hold_update(&b, &w, 1000 + BLE_ENC_DEADLINE_MS - 1, false);
+    CHECK(ble_poll(&b, 1000 + BLE_ENC_DEADLINE_MS - 1) == BLE_EV_NONE);
+    ble_enc_hold_update(&b, &w, 1000 + BLE_ENC_DEADLINE_MS, false);
+    CHECK(ble_poll(&b, 1000 + BLE_ENC_DEADLINE_MS) == BLE_EV_ENC_TIMEOUT);
+    // a number on show still holds it with the window closed (the earlier rule, kept), and drops the hold when the number goes
+    ble_enc_hold_update(&b, &w, 1000 + BLE_ENC_DEADLINE_MS, true);
+    CHECK(ble_poll(&b, 1000 + BLE_ENC_DEADLINE_MS) == BLE_EV_NONE);
+    ble_enc_hold_update(&b, &w, 1000 + BLE_ENC_DEADLINE_MS + 1, false);
+    CHECK(ble_poll(&b, 1000 + BLE_ENC_DEADLINE_MS + 1) == BLE_EV_ENC_TIMEOUT);
+    // the hold is for SECURING only: an untrusted peer in CONNECTED keeps the 10 s idle cap with the window open, and ADVERTISING keeps its 30 s
+    ble_init(&b);
+    ble_pair_open(&w, 0);
+    ble_post(&b, BLE_EV_START, 0);
+    ble_enc_hold_update(&b, &w, 10, false);
+    CHECK(!b.prompting && ble_poll(&b, BLE_ADV_TIMEOUT_MS) == BLE_EV_ADV_TIMEOUT);
+    ble_post(&b, BLE_EV_LINK_UP, 100);
+    ble_post(&b, BLE_EV_ENCRYPTED, 200);
+    CHECK(b.state == BLE_ST_CONNECTED);
+    ble_enc_hold_update(&b, &w, 300, true);
+    CHECK(!b.prompting && ble_poll(&b, 200 + BLE_IDLE_CAP_MS) == BLE_EV_IDLE_TIMEOUT);
+    // a new link starts without a hold, and the next update sets it again
+    ble_init(&b);
+    ble_post(&b, BLE_EV_START, 0);
+    ble_post(&b, BLE_EV_LINK_UP, 10);
+    ble_enc_hold_update(&b, &w, 20, false);
+    CHECK(b.prompting);
+    ble_post(&b, BLE_EV_LINK_DOWN, 30);
+    CHECK(!b.prompting);
+    ble_enc_hold_update(NULL, &w, 20, false);   // no crash
+    ble_post(&b, BLE_EV_LINK_UP, 40);
+    ble_enc_hold_update(&b, NULL, 50, false);   // no window: the number alone decides
+    CHECK(!b.prompting);
+}
+
+// Fix B: the dial sends its Security Request (which makes Android raise a consent prompt) only while the window is open or for a peer that is already bonded.
+static void test_the_security_request_is_gated(void)
+{
+    ble_pair_window_t w;
+    ble_pair_init(&w);
+    CHECK(!ble_security_request_wanted(&w, 1000, false));    // closed, stranger: no request (the existing 3 s / idle rules drop the link)
+    CHECK(ble_security_request_wanted(&w, 1000, true));      // closed, bonded peer: its stored key is asked for
+    ble_pair_open(&w, 2000);
+    CHECK(ble_security_request_wanted(&w, 2000, false));     // open, stranger: the user is pairing
+    CHECK(ble_security_request_wanted(&w, 2000 + BLE_PAIR_WINDOW_MS - 1, false));
+    CHECK(ble_security_request_wanted(&w, 2000, true));
+    CHECK(!ble_security_request_wanted(&w, 2000 + BLE_PAIR_WINDOW_MS, false));   // 120.0 s: over
+    CHECK(ble_security_request_wanted(&w, 2000 + BLE_PAIR_WINDOW_MS, true));
+    CHECK(!ble_security_request_wanted(&w, 1999, false));    // a clock that stepped back from the open: closed
+    ble_pair_close(&w);
+    CHECK(!ble_security_request_wanted(&w, 2500, false) && ble_security_request_wanted(&w, 2500, true));
+    CHECK(!ble_security_request_wanted(NULL, 1000, false) && ble_security_request_wanted(NULL, 1000, true));
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2 && "usage: test_ble_state <vectors/ble_status.txt>");
@@ -739,6 +854,9 @@ int main(int argc, char **argv)
     test_the_window_time_left();
     test_the_number_is_shown_for_a_bounded_time();
     test_a_weak_bond_is_unwanted();
+    test_the_pair_window_opens_by_itself_only_when_unbonded();
+    test_the_encryption_deadline_waits_while_the_window_is_open();
+    test_the_security_request_is_gated();
     printf("test_ble_state: %u checks PASS\n", checks);
     return 0;
 }

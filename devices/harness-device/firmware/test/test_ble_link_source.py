@@ -163,6 +163,30 @@ gap = body(link, 'gap_event')
 assert code('ble_link.c').count('ble_gap_security_initiate(') == 1, 'one security request in the file'
 assert re.search(r'if \(ble_encryption_required\(DEV_UNBONDED\)\) \{[^}]*ble_gap_security_initiate\(s_conn\)', gap, re.S), 'asked for in the connect event, only where a bond is wanted'
 assert gap.index('case BLE_GAP_EVENT_CONNECT:') < gap.index('ble_gap_security_initiate(') < gap.index('case BLE_GAP_EVENT_DISCONNECT:')
+# Fix B (2026-11-09): and only while the pairing window is open or for a peer that is already bonded. A request to a stranger makes Android raise a consent
+# prompt that nobody can answer in 3 s. The question is the pure ble_security_request_wanted, asked under the lock with the window and the peer's bond.
+connect = re.search(r'case BLE_GAP_EVENT_CONNECT:(.*?)case BLE_GAP_EVENT_DISCONNECT:', gap, re.S)[1]
+assert 'const bool bonded_peer = peer_bonded(s_conn);' in connect
+assert re.search(r'state_lock\(\);\s*const bool ask = ble_security_request_wanted\(&s_pair, now_ms\(\), bonded_peer\);\s*state_unlock\(\);', connect), 'the window is read under the lock'
+assert 'ask ? ble_gap_security_initiate(s_conn) : 0' in connect, 'the one security request is behind the gate'
+assert connect.index('peer_bonded(s_conn)') < connect.index('ble_security_request_wanted(') < connect.index('ble_gap_security_initiate(s_conn)')
+pb = body(link, 'peer_bonded')
+assert 'ble_gap_conn_find(conn, &d)' in pb and 'key.peer_addr = d.peer_id_addr;' in pb and 'ble_store_read_our_sec(&key, &val) == 0' in pb, 'bonded = the host store holds our keys for this identity address'
+assert not re.search(r'ble_store_(write|delete|clear)', pb), 'a read, nothing else'
+assert 'ble_security_request_wanted' in text('ble_state.h') and 'ble_security_request_wanted' in code('ble_state.c')
+# Fix A (2026-11-09): the 3 s encryption deadline waits while the window is open and the link is SECURING (and while a number is on show), in the same step as the
+# poll, under the lock. The window (120 s) and the 30 s cap on a shown number bound it.
+task_a = body(link, 'ble_link_task')
+assert re.search(r'ble_enc_hold_update\(&s_ble, &s_pair, now, s_prompt\.active\);\s*const ble_event_t due = ble_poll\(&s_ble, now\);', task_a), 'hold, then poll, under one lock'
+assert task_a.index('state_lock()') < task_a.index('ble_enc_hold_update(') < task_a.index('ble_poll(&s_ble, now)') < task_a.index('state_unlock()')
+assert 'prompt_settle(-1)' in task_a, 'the 30 s cap on a shown number is still asked for every tick'
+# Auto-open (2026-11-09): with phone mode on and NO bond stored, the window opens by itself once the link is started, from ble_init_task (the phone mode runs only
+# after an unplug, so this is each time the BLE link comes up). The pure rule is ble_pair_auto_open_wanted; the window is the ordinary one.
+init_a = body(link, 'ble_init_task')
+assert 'if (ble_pair_auto_open_wanted(s_started, ble_link_bond_count())) {' in init_a and 'ble_link_pairing_window(true);' in init_a
+assert init_a.index('s_started = true;') < init_a.index('ble_pair_auto_open_wanted(') < init_a.index('ble_link_task,'), 'the bond count is read once the link is started (it asks the running host)'
+assert code('ble_link.c').count('ble_pair_auto_open_wanted(') == 1 and code('ble_link.c').count('ble_link_pairing_window(true)') == 1, 'one auto-open site; the UI [pair] is the other opener'
+assert 'ble_pair_auto_open_wanted' in text('ble_state.h') and 'ble_enc_hold_update' in text('ble_state.h')
 uuids = {}
 for line in (fw / 'test/vectors/ble_status.txt').read_text(encoding='utf-8').replace('\r\n', '\n').split('\n'):
     f = line.split('\t')

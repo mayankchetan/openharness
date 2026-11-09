@@ -246,6 +246,21 @@ static void note_security(uint16_t conn)
     if (trusted || (DEV_UNBONDED && sec.encrypted)) post(BLE_EV_ENCRYPTED);
 }
 
+// Does the bond store hold this peer? (Fix B: the dial asks only a bonded peer to encrypt while the pairing window is closed.) A read of the host's own
+// copy of the keys it gave away (the same object type ble_link_bond_count counts); it writes nothing. An address the stack has not resolved to an identity
+// address reads as "not bonded": that peer then starts encryption itself, as a phone with a stored key does.
+static bool peer_bonded(uint16_t conn)
+{
+    struct ble_gap_conn_desc d;
+    if (ble_gap_conn_find(conn, &d) != 0) return false;
+    struct ble_store_key_sec key;
+    struct ble_store_value_sec val;
+    memset(&key, 0, sizeof key);
+    memset(&val, 0, sizeof val);
+    key.peer_addr = d.peer_id_addr;
+    return ble_store_read_our_sec(&key, &val) == 0;
+}
+
 // The bond store is a small fixed list (max_bonds). When it is full, or a write would overflow it, the answer is NO: the stack must not delete the oldest bond to
 // make room (ble_store_util_status_rr does), because that bond is the real phone and the one asking for room is not.
 static int store_status(struct ble_store_status_event *event, void *arg)
@@ -499,12 +514,18 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             s_dle_done = false;
             s_churn_cut = false;
             post(BLE_EV_LINK_UP);
-            // The dial asks for encryption itself (spec section 4) and does not wait for the phone: a bonded phone gets its stored key back, an unbonded one
-            // pairs (with a bond only inside the pairing window). Development build: no bond is asked for, so the link counts as encrypted from the start and
-            // the 3 s deadline never fires.
+            // The dial asks for encryption itself (spec section 4) and does not wait for the phone, but only while the pairing window is open or for a peer
+            // that is already bonded (ble_security_request_wanted): a request to a stranger makes Android raise a consent prompt that nobody can answer. A peer
+            // that is not asked is left alone, and the 3 s deadline and the idle cap drop it. Development build: no bond is asked for, so the link counts as
+            // encrypted from the start and the 3 s deadline never fires.
             if (ble_encryption_required(DEV_UNBONDED)) {
-                const int src = ble_gap_security_initiate(s_conn);
+                const bool bonded_peer = peer_bonded(s_conn);
+                state_lock();
+                const bool ask = ble_security_request_wanted(&s_pair, now_ms(), bonded_peer);
+                state_unlock();
+                const int src = ask ? ble_gap_security_initiate(s_conn) : 0;
                 if (src != 0) ESP_LOGW(TAG, "security request failed (rc=%d)", src);
+                if (!ask) ESP_LOGI(TAG, "no security request: the pairing window is closed and the peer is not bonded");
             } else {
                 post(BLE_EV_ENCRYPTED);
             }
@@ -745,6 +766,7 @@ static void ble_link_task(void *arg)
         // encrypted a moment ago is not dropped, and one that arrived as the advertising timer fired is not lost.
         state_lock();
         const ble_state_t before = s_ble.state;
+        ble_enc_hold_update(&s_ble, &s_pair, now, s_prompt.active);   // Fix A: an open window (or a number on show) holds the 3 s deadline in SECURING
         const ble_event_t due = ble_poll(&s_ble, now);
         const bool changed = (due == BLE_EV_ADV_TIMEOUT || due == BLE_EV_ENC_TIMEOUT || due == BLE_EV_IDLE_TIMEOUT || due == BLE_EV_START) && ble_post(&s_ble, due, now);
         state_unlock();
@@ -973,6 +995,12 @@ static void ble_init_task(void *arg)
         ble_init(&s_ble);
         s_started = true;
         post(BLE_EV_START);
+        // No touch path reaches Settings > Phone > Pair on a real dial, so with no bond stored the window opens by itself each time the link comes up (the phone
+        // mode starts only after an unplug). Numeric comparison and the user's Yes on the dial stay required. With a bond stored it stays shut.
+        if (ble_pair_auto_open_wanted(s_started, ble_link_bond_count())) {
+            ble_link_pairing_window(true);
+            ESP_LOGI(TAG, "no bond stored: the pairing window opened by itself (%u ms)", (unsigned)BLE_PAIR_WINDOW_MS);
+        }
 #if TASK_STACK_PSRAM_NET
         const BaseType_t task_ok = task_create_psram(ble_link_task, "ble_link", BLE_LINK_STACK, NULL, 4, NULL, tskNO_AFFINITY);
 #else
