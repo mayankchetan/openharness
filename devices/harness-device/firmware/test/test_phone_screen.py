@@ -97,6 +97,10 @@ assert len(re.findall(r'\buser_nav = true\b', code('ui/habitat/ui_habitat.c'))) 
 land = body(raw, 'ui_land_after_reload')
 assert 'phone_leave' not in land and 'user_nav' not in land, 'the boot landing is not the user'
 assert 'phone: the user left the Phone screen' in body(raw, 'phone_leave'), 'a close by the user says so in the log (item 4c)'
+# Review M-1(c): the screen is woken when the window opens and when a number appears, once each, never at every tick
+poll_b = body(raw, 'phone_poll')
+assert re.search(r'static bool bumped_window, bumped_prompt;\s*if \(!window\) bumped_window = false;\s*if \(!prompt\) bumped_prompt = false;\s*if \(window && !bumped_window\) \{ bumped_window = true; display_bump_activity\(\); \}\s*if \(prompt && !bumped_prompt\) \{ bumped_prompt = true; display_bump_activity\(\); \}', poll_b), 'one bump per window open and per number'
+assert 'if (window || prompt) display_bump_activity()' not in poll_b, 'no bump at every tick'
 assert 'case FORGET:' in body(raw, 'ui_mode_switch_busy'), 'the question holds the mode switch like the stop question'
 
 # ── 4. the number ───────────────────────────────────────────────────────────────────────────────────

@@ -773,25 +773,64 @@ static void test_the_window_is_rearmed_at_a_connect(void)
 {
     ble_pair_window_t w;
     ble_pair_init(&w);
-    CHECK(ble_pair_rearm_wanted(&w, 1000, true, 0));                                   // never opened
+    CHECK(ble_pair_rearm_wanted(&w, 1000, true, 0, 0));                                // never opened
     ble_pair_open(&w, 1000);
-    CHECK(!ble_pair_rearm_wanted(&w, 1000 + BLE_PAIR_WINDOW_MS - 1, true, 0));         // open: left alone, not extended
-    CHECK(ble_pair_rearm_wanted(&w, 1000 + BLE_PAIR_WINDOW_MS, true, 0));              // expired: opens again
+    CHECK(!ble_pair_rearm_wanted(&w, 1000 + BLE_PAIR_WINDOW_MS - 1, true, 0, 0));      // open: left alone, not extended
+    CHECK(ble_pair_rearm_wanted(&w, 1000 + BLE_PAIR_WINDOW_MS, true, 0, 0));           // expired: opens again
     ble_pair_close(&w);
-    CHECK(ble_pair_rearm_wanted(&w, 5000, true, 0));                                   // closed by hand (a touch): opens again at the next connect
-    CHECK(!ble_pair_rearm_wanted(&w, 5000, true, 1) && !ble_pair_rearm_wanted(&w, 5000, true, 2));   // a bond stored: never
-    CHECK(!ble_pair_rearm_wanted(&w, 5000, false, 0));                                 // phone mode off: never
-    CHECK(!ble_pair_rearm_wanted(NULL, 5000, true, 1) && ble_pair_rearm_wanted(NULL, 5000, true, 0));   // no window object reads as closed
+    CHECK(ble_pair_rearm_wanted(&w, 5000, true, 0, 0));                                // closed by hand (a touch): opens again at the next connect
+    CHECK(!ble_pair_rearm_wanted(&w, 5000, true, 1, 0) && !ble_pair_rearm_wanted(&w, 5000, true, 2, 0));   // a bond stored: never
+    CHECK(!ble_pair_rearm_wanted(&w, 5000, false, 0, 0));                              // phone mode off: never
+    CHECK(!ble_pair_rearm_wanted(NULL, 5000, true, 1, 0) && ble_pair_rearm_wanted(NULL, 5000, true, 0, 0));   // no window object reads as closed
+    // review M-1(b) (2026-11-10): a budget of BLE_REARM_MAX re-arms per start, so a stranger who keeps connecting cannot keep the window open for ever
+    CHECK(BLE_REARM_MAX == 3u);
+    CHECK(ble_pair_rearm_wanted(&w, 5000, true, 0, BLE_REARM_MAX - 1));                // the third is allowed
+    CHECK(!ble_pair_rearm_wanted(&w, 5000, true, 0, BLE_REARM_MAX));                   // the fourth is not
+    CHECK(!ble_pair_rearm_wanted(&w, 5000, true, 0, 1000));
+    {
+        unsigned used = 0, opened = 0;
+        for (int connect = 0; connect < 50; connect++) {                               // fifty connects with the window closed each time
+            if (ble_pair_rearm_wanted(&w, 5000, true, 0, used)) { used++; opened++; }
+        }
+        CHECK(opened == BLE_REARM_MAX && used == BLE_REARM_MAX);
+    }
     // what it opens is the ordinary 120.0 s window, and the per-link hold cap still applies inside it
     ble_t b;
     ble_init(&b);
     ble_post(&b, BLE_EV_START, 0);
     ble_post(&b, BLE_EV_LINK_UP, 200000);
-    if (ble_pair_rearm_wanted(&w, 200000, true, 0)) ble_pair_open(&w, 200000);
+    if (ble_pair_rearm_wanted(&w, 200000, true, 0, 0)) ble_pair_open(&w, 200000);
     ble_enc_hold_update(&b, &w, 200000 + BLE_ENC_HOLD_MAX_MS - 1, false);
     CHECK(b.prompting);
     ble_enc_hold_update(&b, &w, 200000 + BLE_ENC_HOLD_MAX_MS, false);
     CHECK(!b.prompting && ble_poll(&b, 200000 + BLE_ENC_HOLD_MAX_MS) == BLE_EV_ENC_TIMEOUT);
+}
+
+// Review M-1(a): a link dropped at the encryption deadline with no number shown on it earns the same flat cooldown as an idle peer; a link that showed a number
+// (a person was comparing) does not.
+static void test_a_silent_peer_is_not_welcomed_back_at_once(void)
+{
+    CHECK(ble_enc_timeout_cooldown_ms(false) == BLE_COOLDOWN_MS && BLE_COOLDOWN_MS == 10000u);
+    CHECK(ble_enc_timeout_cooldown_ms(true) == 0);
+}
+
+// Review M-2: a stored bond that is not authenticated with a 16-byte key is junk, whether or not the stack calls the link bonded, and it is deleted at the
+// pairing's end or at the link drop, so bonds stays 0 after a Just-Works attempt. Only an ENCRYPTED link that is not good counts (a link that never got
+// encrypted says nothing about the stored bond of a real phone), and a peer the store does not hold has nothing to delete.
+static void test_a_junk_bond_is_found_without_the_bonded_flag(void)
+{
+    const ble_sec_t good = {.encrypted = true, .bonded = true, .authenticated = true, .key_size = 16};
+    const ble_sec_t just_works = {.encrypted = true, .bonded = false, .authenticated = false, .key_size = 16};   // the stack did not call it bonded
+    const ble_sec_t just_works_b = {.encrypted = true, .bonded = true, .authenticated = false, .key_size = 16};
+    const ble_sec_t short_key = {.encrypted = true, .bonded = true, .authenticated = true, .key_size = 7};
+    const ble_sec_t unencrypted = {.encrypted = false, .bonded = false, .authenticated = false, .key_size = 0};
+    CHECK(!ble_bond_junk(&good, true));                  // the real phone, reconnecting: kept
+    CHECK(ble_bond_junk(&just_works, true));             // Just Works, flag says not bonded, the store holds it: deleted
+    CHECK(ble_bond_junk(&just_works_b, true));
+    CHECK(ble_bond_junk(&short_key, true));
+    CHECK(!ble_bond_junk(&just_works, false));           // nothing in the store: nothing to delete
+    CHECK(!ble_bond_junk(&unencrypted, true));           // never encrypted (a dropped link of the real phone): its bond stays
+    CHECK(!ble_bond_junk(NULL, true));
 }
 
 // Item 4a: advertising goes on while the pairing window is open (the 30 s ADV timeout would end it long before the 120 s window), and the timeout is due
@@ -1019,6 +1058,8 @@ int main(int argc, char **argv)
     test_the_encryption_deadline_waits_while_the_window_is_open();
     test_a_no_leaves_the_auto_opened_window_open();
     test_the_window_is_rearmed_at_a_connect();
+    test_a_silent_peer_is_not_welcomed_back_at_once();
+    test_a_junk_bond_is_found_without_the_bonded_flag();
     test_advertising_goes_on_while_the_window_is_open();
     test_a_peer_that_may_hold_a_bond();
     test_the_security_request_is_gated();

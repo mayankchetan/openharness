@@ -178,7 +178,17 @@ sdk = (fw / 'sdkconfig.defaults.ble').read_text()
 assert 'BT_NIMBLE_HS_PVCY=n' not in sdk and 'BT_NIMBLE_SM_SC=y' in sdk, 'privacy (RPA resolving) stays at the IDF default: on'
 assert 'BLE_SM_PAIR_KEY_DIST_ID' in body(link, 'apply_bonding_policy') and body(link, 'apply_bonding_policy').count('BLE_SM_PAIR_KEY_DIST_ID') == 2, 'both sides distribute the ID key when the window is open'
 # Item 4a: the auto-open is asked again at every connect, before the security request is decided, and an open window is not extended
-assert re.search(r'const unsigned bonds = ble_link_bond_count\(\);\s*state_lock\(\);\s*const bool rearm = ble_pair_rearm_wanted\(&s_pair, now_ms\(\), s_started, bonds\);\s*state_unlock\(\);\s*if \(rearm\) window_set\(true, ', connect), 'the re-arm: bond count outside the lock, rule under it'
+assert re.search(r'const unsigned bonds = ble_link_bond_count\(\);\s*state_lock\(\);\s*const bool rearm = ble_pair_rearm_wanted\(&s_pair, now_ms\(\), s_started, bonds, s_rearms\);\s*if \(rearm\) s_rearms\+\+;\s*const unsigned rearms_now = s_rearms;\s*state_unlock\(\);\s*if \(rearm\) window_set\(true, ', connect), 'the re-arm: bond count outside the lock, rule and budget under it'
+# Review M-1(b): the budget is per start (reset in ble_init_task, where the auto-open is not counted), spent at a connect only, and the spending is logged
+assert code('ble_link.c').count('s_rearms++') == 1 and 's_rearms = 0;' in body(link, 'ble_init_task') and 'BLE_REARM_MAX' in text('ble_state.h')
+assert 're-arm budget spent' in raw_link and 'rearms_now == BLE_REARM_MAX' in connect
+assert 's_rearms' not in body(link, 'window_set') and 's_rearms' not in body(link, 'ble_link_pairing_window'), 'neither the auto-open nor the Phone screen spends the budget'
+# Review M-1(a): a link dropped at the encryption deadline with no number shown on it gets the flat cooldown; the flag is set where the number goes up and cleared at a connect
+task_m = body(link, 'ble_link_task')
+assert re.search(r'const bool number_shown_here = s_number_shown_link;\s*state_unlock\(\);', task_m), 'read under the lock, in the step that decided the drop'
+assert re.search(r'const uint32_t cool = ble_enc_timeout_cooldown_ms\(number_shown_here\);.*?terminate_link\(\);\s*if \(cool\) s_adv_not_before_ms = now \+ cool;', task_m, re.S), 'ENC_TIMEOUT: cooldown before advertising again'
+assert 's_number_shown_link = true;' in gap and 's_number_shown_link = false;' in connect and code('ble_link.c').count('s_number_shown_link = true') == 1
+
 assert connect.index('ble_pair_rearm_wanted(') < connect.index('peer_bonded(s_conn') < connect.index('ble_security_request_wanted('), 're-arm, then the peer, then the request decision'
 assert code('ble_link.c').count('ble_pair_rearm_wanted(') == 1 and code('ble_link.c').count('window_set(true') == 2, 'two openers: the start and the connect (the Phone screen is the third, through ble_link_pairing_window)'
 # Item 4c: every open and close of the window has a reason in the log; the expiry is logged by the link task; the bond count is logged at the start; the request says why
@@ -306,8 +316,18 @@ assert 'ble_prompt_verdict(&s_pair, s_prompt.since_ms, now_ms(), answer)' in set
 assert 's_prompt.since_ms = now_ms();' in gapb, 'the time the number went on show'
 assert 'since_ms' in raw_link[raw_link.index('static struct { bool active'):raw_link.index('static struct { bool active') + 160]
 # M2: Just Works must not fill the two bond slots
-assert 'ble_bond_unwanted(&sec)' in enc and 'ble_store_util_delete_peer(&d.peer_id_addr)' in enc, 'a bond that is not authenticated and long-keyed is deleted'
-assert enc.index('ble_bond_unwanted(&sec)') < enc.index('ble_store_util_delete_peer(&d.peer_id_addr)') < enc.index('terminate_link()', enc.index('ble_store_util_delete_peer')) < enc.index('note_security('), 'delete it, end the link, and only otherwise judge the link trusted'
+# Review M-2: the decision is by what the STORE holds (ble_bond_junk), not by the stack's bonded flag; it runs at the pairing's end and at the link drop, in one helper
+junk = body(link, 'junk_bond_cleanup')
+assert 'ble_store_read_our_sec(&key, &val) == 0' in junk and 'ble_bond_junk(&sec, held)' in junk and 'ble_store_util_delete_peer(&d->peer_id_addr)' in junk and 'key.peer_addr = d->peer_id_addr;' in junk
+assert 'junk_bond_cleanup(&d' in enc and 'ble_bond_unwanted' not in enc, 'a bond that is not authenticated and long-keyed is deleted at the pairing end'
+assert enc.index('junk_bond_cleanup(&d') < enc.index('terminate_link()', enc.index('junk_bond_cleanup(&d')) < enc.index('note_security('), 'delete it, end the link, and only otherwise judge the link trusted'
+assert 'junk_bond_cleanup(&event->disconnect.conn' in gapb and gapb.index('junk_bond_cleanup(&event->disconnect.conn') < gapb.index('post(BLE_EV_LINK_DOWN)'), 'and at the link drop'
+assert code('ble_link.c').count('ble_store_util_delete_peer(') == 2, 'junk_bond_cleanup and the repeat pairing inside the window are the only deleters'
+# Review L-2: a good bond made by a pairing on this link (a number was shown) closes the window in the glue
+assert re.search(r'const bool paired_here = s_number_shown_link && ble_pair_is_open\(&s_pair, now_ms\(\)\);\s*state_unlock\(\);\s*if \(paired_here && link_sec\(event->enc_change\.conn_handle, &sec\) && ble_sec_trusted\(&sec\)\) window_set\(false, ', enc), 'bond made: the window ends here'
+assert enc.index('note_security(') < enc.index('paired_here')
+# Review L-3: the "stays open" line is only for a window that is still open
+assert re.search(r'if \(ble_link_pairing_left_ms\(\) > 0\) ESP_LOGI\(TAG, "pairing rejected: no bond is stored', raw_link)
 assert re.search(r'ble_gap_conn_find\(event->enc_change\.conn_handle, &d\) == 0', enc)
 # Low: the window closing in prompt_settle re-applies the bonding switch; a lost link forgets what the phone wrote; the inject result is logged
 assert re.search(r'if \(close_window\) window_set\(false, ', settle) and settle.index('window_set(false') < settle.index('ble_sm_inject_io('), 'a closed window switches bonding off at once (L3: not when it stays open)'

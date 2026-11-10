@@ -246,6 +246,29 @@ static void note_security(uint16_t conn)
     if (trusted || (DEV_UNBONDED && sec.encrypted)) post(BLE_EV_ENCRYPTED);
 }
 
+// Review M-2: the bond the store holds for this peer, if the link that just paired (or just dropped) was encrypted without MITM protection or with a short key: it is
+// deleted, whether or not the stack calls the link bonded, so a Just-Works attempt leaves bonds at 0 (a junk bond would stop the auto-open and block pairing for ever).
+// A link that never got encrypted never deletes anything (the real phone's link can drop before it encrypts). Host task. True when a bond was deleted.
+static bool junk_bond_cleanup(const struct ble_gap_conn_desc *d, const char *when)
+{
+    ble_sec_t sec;
+    memset(&sec, 0, sizeof sec);
+    sec.encrypted = d->sec_state.encrypted;
+    sec.bonded = d->sec_state.bonded;
+    sec.authenticated = d->sec_state.authenticated;
+    sec.key_size = d->sec_state.key_size;
+    struct ble_store_key_sec key;
+    struct ble_store_value_sec val;
+    memset(&key, 0, sizeof key);
+    memset(&val, 0, sizeof val);
+    key.peer_addr = d->peer_id_addr;
+    const bool held = ble_store_read_our_sec(&key, &val) == 0;
+    if (!ble_bond_junk(&sec, held)) return false;
+    ble_store_util_delete_peer(&d->peer_id_addr);
+    ESP_LOGW(TAG, "junk bond deleted at %s (auth=%d key=%u)", when, (int)sec.authenticated, (unsigned)sec.key_size);
+    return true;
+}
+
 // May this peer hold a bond? (Fix B: with the pairing window closed the dial asks only a bonded peer to encrypt; with it open it asks any peer.) A read of the host's
 // own copy of the keys it gave away (the same object type ble_link_bond_count counts); it writes nothing. `d.peer_id_addr` is the IDENTITY address when the
 // controller resolved the rotating address of the phone (the stored identity key is restored to the controller at start and distributed in a pairing: the ID key
@@ -292,6 +315,8 @@ static void apply_bonding_policy(void)
     ble_hs_cfg.sm_their_key_dist = open ? (BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID) : 0;
 }
 
+static bool s_number_shown_link;             // a pairing number was put on the screen on the current link (cleared at each connect); guarded by s_lock
+static unsigned s_rearms;                    // connect re-arms of the pairing window used since this start (BLE_REARM_MAX); guarded by s_lock
 static bool s_window_close_logged = true;   // guarded by s_lock: the last close was logged with its reason (an expiry has none until the link task notices it)
 
 // The one place that opens or closes the window, with the reason in the log (item 4c). Not for the expiry: that closes itself, and the link task logs it.
@@ -455,7 +480,7 @@ static void prompt_settle(int answer)
     bool close_window = v == BLE_PAIR_REJECT;
     if (close_window && ble_pair_stays_open_after_no(s_started, ble_link_bond_count())) {
         close_window = false;
-        ESP_LOGI(TAG, "pairing rejected: no bond is stored, so the window stays open to its end");
+        if (ble_link_pairing_left_ms() > 0) ESP_LOGI(TAG, "pairing rejected: no bond is stored, so the window stays open to its end");   // review L-3: not for one that already ran out
     }
     if (close_window) window_set(false, "answer: No (or the window or the 30 s prompt ran out)");   // bonding is off from now, not at the next tick
     struct ble_sm_io io;
@@ -536,6 +561,9 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             s_conn_ms = now_ms();
             s_dle_done = false;
             s_churn_cut = false;
+            state_lock();
+            s_number_shown_link = false;   // a new link: no number shown on it yet (the encryption-timeout cooldown reads this)
+            state_unlock();
             post(BLE_EV_LINK_UP);
             // The dial asks for encryption itself (spec section 4) and does not wait for the phone, but only while the pairing window is open or for a peer
             // that is already bonded (ble_security_request_wanted): a request to a stranger makes Android raise a consent prompt that nobody can answer. A peer
@@ -546,9 +574,12 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                 // is decided. The bond count is a call into the host, so it is made outside the lock.
                 const unsigned bonds = ble_link_bond_count();
                 state_lock();
-                const bool rearm = ble_pair_rearm_wanted(&s_pair, now_ms(), s_started, bonds);
+                const bool rearm = ble_pair_rearm_wanted(&s_pair, now_ms(), s_started, bonds, s_rearms);
+                if (rearm) s_rearms++;
+                const unsigned rearms_now = s_rearms;
                 state_unlock();
                 if (rearm) window_set(true, "re-armed at a connect: no bond is stored");
+                if (rearm && rearms_now == BLE_REARM_MAX) ESP_LOGW(TAG, "re-arm budget spent (%u per start): the window will not open again at a connect until the next start", (unsigned)BLE_REARM_MAX);
                 bool by_identity = false;
                 const bool bonded_peer = peer_bonded(s_conn, bonds, &by_identity);
                 state_lock();
@@ -579,6 +610,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         state_unlock();
         atomic_store(&s_relay_status, 0);   // and what the phone wrote: the next phone starts from idle, and a stale hint steers nothing
         atomic_store(&s_home_hint, 0);
+        (void)junk_bond_cleanup(&event->disconnect.conn, "link drop");
         post(BLE_EV_LINK_DOWN);
         return 0;
     case BLE_GAP_EVENT_ENC_CHANGE: {
@@ -592,16 +624,21 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             terminate_link();
             return 0;
         }
-        // A bond that is not the product's kind (Just Works, or a short key) is deleted now, so two such pairings cannot fill the two slots.
+        // A bond that is not the product's kind (Just Works, or a short key) is deleted now, so two such pairings cannot fill the two slots, and so that bonds stays
+        // 0 and the auto-open keeps working (review M-2: by what the STORE holds, not by the stack's bonded flag).
         struct ble_gap_conn_desc d;
         ble_sec_t sec;
-        if (link_sec(event->enc_change.conn_handle, &sec) && ble_gap_conn_find(event->enc_change.conn_handle, &d) == 0 && ble_bond_unwanted(&sec)) {
-            ble_store_util_delete_peer(&d.peer_id_addr);
-            ESP_LOGW(TAG, "bond is not authenticated or not long-keyed (auth=%d key=%u): deleted, link ended", (int)sec.authenticated, (unsigned)sec.key_size);
+        if (ble_gap_conn_find(event->enc_change.conn_handle, &d) == 0 && junk_bond_cleanup(&d, "pairing complete")) {
             terminate_link();
             return 0;
         }
         note_security(event->enc_change.conn_handle);
+        // Review L-2: a good bond was just made by a pairing on this link (a number was shown): the window ends here, in the glue, not only when the Phone screen
+        // sees the bond count change (a refused view(PHONE) must not leave it open).
+        state_lock();
+        const bool paired_here = s_number_shown_link && ble_pair_is_open(&s_pair, now_ms());
+        state_unlock();
+        if (paired_here && link_sec(event->enc_change.conn_handle, &sec) && ble_sec_trusted(&sec)) window_set(false, "bond made");
         return 0;
     }
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
@@ -632,6 +669,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             s_prompt.conn = c;
             s_prompt.number = event->passkey.params.numcmp;
             s_prompt.since_ms = now_ms();
+            s_number_shown_link = true;
             ble_set_prompting(&s_ble, true);   // the 3 s encryption deadline waits while the number is on show
         }
         state_unlock();
@@ -804,6 +842,7 @@ static void ble_link_task(void *arg)
         ble_adv_hold_update(&s_ble, &s_pair, now);                    // item 4a: and an open window holds the 30 s advertising timeout in ADVERTISING
         const ble_event_t due = ble_poll(&s_ble, now);
         const bool changed = (due == BLE_EV_ADV_TIMEOUT || due == BLE_EV_ENC_TIMEOUT || due == BLE_EV_IDLE_TIMEOUT || due == BLE_EV_START) && ble_post(&s_ble, due, now);
+        const bool number_shown_here = s_number_shown_link;
         state_unlock();
         if (changed) ESP_LOGI(TAG, "state %s -> %s (deadline)", ble_state_name(before), ble_state_name(current(NULL)));
         if (changed && due == BLE_EV_ADV_TIMEOUT) {
@@ -811,8 +850,11 @@ static void ble_link_task(void *arg)
             s_adv_active = false;
             ESP_LOGI(TAG, "no phone in %u ms: not found", (unsigned)BLE_ADV_TIMEOUT_MS);
         } else if (changed && due == BLE_EV_ENC_TIMEOUT) {
-            ESP_LOGW(TAG, "link not encrypted after %u ms: dropped", (unsigned)BLE_ENC_DEADLINE_MS);
+            // Review M-1(a): a link that showed no number earns the same flat cooldown as an idle peer; a stranger cannot drive a connect, drop, advertise loop.
+            const uint32_t cool = ble_enc_timeout_cooldown_ms(number_shown_here);
+            ESP_LOGW(TAG, "link not encrypted after %u ms: dropped, %u ms cooldown", (unsigned)BLE_ENC_DEADLINE_MS, (unsigned)cool);
             terminate_link();
+            if (cool) s_adv_not_before_ms = now + cool;
         } else if (changed && due == BLE_EV_IDLE_TIMEOUT) {
             // a peer that is not authenticated-bonded holds the one link slot with no channel: drop it, and stay quiet for a while
             ESP_LOGW(TAG, "peer idle for %u ms without a channel: dropped, %u ms cooldown", (unsigned)BLE_IDLE_CAP_MS, (unsigned)BLE_COOLDOWN_MS);
@@ -1036,6 +1078,8 @@ static void ble_init_task(void *arg)
             break;
         }
         ble_init(&s_ble);
+        s_rearms = 0;   // a new start (a new unplug) has a new budget; the auto-open below is not counted
+        s_number_shown_link = false;
         s_started = true;
         post(BLE_EV_START);
         // No touch path reaches Settings > Phone > Pair on a real dial, so with no bond stored the window opens by itself when the phone mode starts (it starts

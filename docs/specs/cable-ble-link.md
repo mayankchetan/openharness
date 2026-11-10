@@ -78,8 +78,10 @@ contract.
 - Pairing: LE Secure Connections, numeric comparison. The dial is DisplayYesNo and shows a 6-digit number with Yes and No.
   Pairing is allowed only inside the window the user opens in Settings (`pair_window_ms` = 120000 ms). A dial has no touch path
   to Settings, so the dial also opens the same window by itself when the phone mode starts (after an unplug) with no bond
-  stored, and shows the Phone screen with the countdown, and again at every connect while the window is closed (expired, or closed
-  by a touch) and no bond is stored; with a bond stored it does not. An open window is not extended by a connect. While the window
+  stored, and shows the Phone screen with the countdown, and again at a connect while the window is closed (expired, or closed
+  by a touch) and no bond is stored, at most `rearm_max` = 3 times per start (a new unplug is a new start; the opening at the
+  start is not counted; the dial logs when the budget is spent); with a bond stored it does not. An open window is not extended
+  by a connect. The screen is woken once when the window opens and once when a number appears, not at every tick. While the window
   is open the dial keeps advertising (the 30 s advertising timeout waits, and is due at once when the window ends). Only the user
   closes an auto-opened window early: a touch that leaves the Phone screen, Forget, or a No with a bond stored. A boot landing,
   a refresh or a desktop message that moves the view does not. The security request of the dial (below) is the only trigger of a
@@ -92,8 +94,11 @@ contract.
 - The channel is accepted only on a link that is encrypted, bonded and AUTHENTICATED (numeric comparison, not Just Works: a phone
   that says "no input, no output" gets an unauthenticated bond and is refused) with a link key of at least `key_size_min` = 16
   bytes. Otherwise the dial refuses the accept with "insufficient encryption". The dial calls `ble_gap_security_initiate` after connect only while the
-  pairing window is open or when the peer already has a bond; it sends no Security Request to any other peer (Android answers one
-  with a consent prompt that nobody can answer in time). A link not encrypted `enc_deadline_ms` = 3000 ms after connect is
+  pairing window is open, or when the peer already has a bond (found by its identity address), or, with a bond stored, when the
+  peer shows a resolvable private address the stack did not resolve (`ble_peer_may_hold_bond`: it may be the bonded phone with a
+  fresh address); it sends no Security Request to any other peer (Android answers one with a consent prompt that nobody can
+  answer in time). A central can send a Pairing Request of its own at any time: with the window closed the dial refuses it at the
+  number (no number is shown and no bond is made), so the closed window is the protection, not the absence of a request. A link not encrypted `enc_deadline_ms` = 3000 ms after connect is
   dropped, except that the deadline waits (a) while the pairing window is open, for at most 30 s from the connect of that link
   and never past the end of the window, so a silent peer cannot hold the one link for the whole window, and (b) while a pairing
   number is on the dial screen (at most 30 s from the moment it was shown, in or out of the window).
@@ -106,7 +111,11 @@ contract.
   `cooldown_ms` = 10000 ms before it advertises again. A peer that is not authenticated-bonded (any peer on a development build)
   may stay connected without a channel for `idle_cap_ms` = 10000 ms, then the link is dropped. After three TLS alerts in a row the
   wait is the flat `cooldown_ms` for such a peer; only an authenticated-bonded peer gets the escalating refused ladder (30 s to
-  5 min), so an attacker cannot walk the ladder up against the real phone.
+  5 min), so an attacker cannot walk the ladder up against the real phone. A link dropped at the encryption deadline with no
+  pairing number shown on it earns the same flat `cooldown_ms` before the dial advertises again. A bond the store holds for a
+  peer whose link is encrypted but not authenticated (Just Works) or has a key under 16 bytes is deleted when the pairing ends
+  and again when the link drops, whether or not the stack calls the link bonded, so a failed attempt leaves no bond; a link that
+  never got encrypted never deletes a bond. When a good bond is made by a pairing inside the window, the window ends at once.
 - Development flag: a build with `BLE_DEV_ALLOW_UNBONDED=1` accepts the channel without a bond, because TLS-PSK still
   authenticates both ends. It is off in every product config (a source test fails the build if it is on in the shipped
   overlay).

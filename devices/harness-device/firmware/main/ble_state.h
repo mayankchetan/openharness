@@ -36,6 +36,7 @@
 #define BLE_KEY_SIZE_MIN     16u       // bytes of the link key
 #define BLE_PAIR_WINDOW_MS   120000u   // the window the user opens to pair a phone (B5 opens it)
 #define BLE_TLS_DEADLINE_MS  5000u
+#define BLE_REARM_MAX        3u        // review M-1(b): connect re-arms of the pairing window per start (a new unplug is a new start); the auto-open at the start is not counted
 #define BLE_ENC_HOLD_MAX_MS  30000u    // review M1 (2026-11-10): an open pairing window holds the 3 s encryption deadline for this long per link, then no more
 
 typedef enum {
@@ -204,8 +205,16 @@ void ble_enc_hold_update(ble_t *b, const ble_pair_window_t *w, uint64_t now_ms, 
 bool ble_pair_stays_open_after_no(bool phone_mode_on, unsigned bonds);
 //  - Item 4a (2026-11-10): the auto-open is not a one-shot boot event. At each connect the glue asks again: phone mode on, no bond stored and the window NOT open
 //    (never opened, expired, closed by a touch) opens the ordinary 120 s window now. An open window is left alone (a connect does not extend it). Nothing else
-//    changes: the number and the user's Yes stay required, and the per-link hold above caps what a connected peer can hold.
-bool ble_pair_rearm_wanted(const ble_pair_window_t *w, uint64_t now_ms, bool phone_mode_on, unsigned bonds);
+//    changes: the number and the user's Yes stay required, and the per-link hold above caps what a connected peer can hold. Review M-1(b): at most BLE_REARM_MAX
+//    re-arms per start (`rearms` = how many were used), so a stranger who keeps connecting cannot keep a window open for ever.
+bool ble_pair_rearm_wanted(const ble_pair_window_t *w, uint64_t now_ms, bool phone_mode_on, unsigned bonds, unsigned rearms);
+//  - Review M-1(a): the cooldown (ms) before advertising again after a link was dropped at the encryption deadline: the flat BLE_COOLDOWN_MS unless a pairing number
+//    was shown on that link (a person was comparing it), then none.
+uint32_t ble_enc_timeout_cooldown_ms(bool number_was_shown);
+//  - Review M-2: is the bond the store holds for this peer junk? True for an ENCRYPTED link that is not authenticated or has a key under BLE_KEY_SIZE_MIN, when
+//    the store holds the peer (`store_has_peer`), whether or not the stack calls the link bonded. The glue deletes it at the pairing's end and at the link drop. A
+//    link that never got encrypted says nothing about a stored bond, so it is never junk. NULL: false.
+bool ble_bond_junk(const ble_sec_t *sec, bool store_has_peer);
 //  - Item 4a: advertising goes on while the window is open. The 30 s advertising timeout (BLE_ADV_TIMEOUT_MS) would end it long before the 120 s window, so a phone
 //    that starts scanning late would find a closed radio and a window nobody can use. In ADVERTISING only, the timeout waits while the window is open; when the
 //    window ends the timeout is due at once. The glue calls this once a tick under its lock, before ble_poll. NULL `b` or `w`: no hold.

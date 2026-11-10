@@ -2524,7 +2524,13 @@ static void phone_poll(void)
     phone_ui.bonds = bonds;
     phone_ui.left_s = (left + 999) / 1000;
     phone_ui.code = prompt ? code % 1000000 : 0;
-    if (window || prompt) display_bump_activity();   // the screen stays up while the user pairs (the window is 120 s at most)
+    // Review M-1(c): wake a dimmed screen when the window opens and when a number appears, once each, not at every tick (a stranger's connects must not hold the
+    // screen up for the whole window). The marks reset when the window or the number is gone.
+    static bool bumped_window, bumped_prompt;
+    if (!window) bumped_window = false;
+    if (!prompt) bumped_prompt = false;
+    if (window && !bumped_window) { bumped_window = true; display_bump_activity(); }
+    if (prompt && !bumped_prompt) { bumped_prompt = true; display_bump_activity(); }
     if (prompt && s.view == PHONE) view(PASSKEY);
     else if (!prompt && s.view == PASSKEY) view(PHONE);   // answered, the window ended, or the link went
     if (memcmp(&before, &phone_ui, sizeof phone_ui)) change();

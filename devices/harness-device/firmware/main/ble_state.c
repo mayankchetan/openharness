@@ -224,9 +224,19 @@ bool ble_pair_auto_open_wanted(bool phone_mode_on, unsigned bonds)
     return phone_mode_on && bonds == 0;
 }
 
-bool ble_pair_rearm_wanted(const ble_pair_window_t *w, uint64_t now_ms, bool phone_mode_on, unsigned bonds)
+bool ble_pair_rearm_wanted(const ble_pair_window_t *w, uint64_t now_ms, bool phone_mode_on, unsigned bonds, unsigned rearms)
 {
-    return ble_pair_auto_open_wanted(phone_mode_on, bonds) && !ble_pair_is_open(w, now_ms);
+    return rearms < BLE_REARM_MAX && ble_pair_auto_open_wanted(phone_mode_on, bonds) && !ble_pair_is_open(w, now_ms);
+}
+
+uint32_t ble_enc_timeout_cooldown_ms(bool number_was_shown)
+{
+    return number_was_shown ? 0 : BLE_COOLDOWN_MS;
+}
+
+bool ble_bond_junk(const ble_sec_t *sec, bool store_has_peer)
+{
+    return sec && store_has_peer && sec->encrypted && (!sec->authenticated || sec->key_size < BLE_KEY_SIZE_MIN);
 }
 
 void ble_adv_hold_update(ble_t *b, const ble_pair_window_t *w, uint64_t now_ms)
