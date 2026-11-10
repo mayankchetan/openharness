@@ -36,6 +36,7 @@
 #define BLE_KEY_SIZE_MIN     16u       // bytes of the link key
 #define BLE_PAIR_WINDOW_MS   120000u   // the window the user opens to pair a phone (B5 opens it)
 #define BLE_TLS_DEADLINE_MS  5000u
+#define BLE_ENC_HOLD_MAX_MS  30000u    // review M1 (2026-11-10): an open pairing window holds the 3 s encryption deadline for this long per link, then no more
 
 typedef enum {
     BLE_ST_OFF = 0,
@@ -189,10 +190,17 @@ void ble_set_prompting(ble_t *b, bool prompting);
 //    stored it does not: a second phone is a tap on [pair]. Numeric comparison and the user's Yes stay required; nothing here weakens them.
 bool ble_pair_auto_open_wanted(bool phone_mode_on, unsigned bonds);
 //  - Hold: while the window is open and the link is SECURING, the 3 s encryption deadline waits (the person must answer the prompt on the phone, or compare the
-//    number on the dial). `number_shown` is the earlier hold (a number on the screen). The glue calls this once a tick, under its lock, before ble_poll. The hold
-//    is bounded from outside: the window ends at 120.0 s (the hold ends with it and the 3 s, long gone, are due at once), and a number is withdrawn after
-//    BLE_PROMPT_MAX_MS. It sets or clears the flag of ble_set_prompting, in SECURING only; any other state, NULL `b`: nothing. NULL `w`: the number alone decides.
+//    number on the dial). `number_shown` is the earlier hold (a number on the screen). The glue calls this once a tick, under its lock, before ble_poll. Review M1
+//    (2026-11-10): a peer that connects and then says nothing must not keep the one link for the whole window, so the window's hold ends BLE_ENC_HOLD_MAX_MS
+//    (30.000 s) after the connect (this link's SECURING started then), or at the end of the window if that comes first; the 3 s, long gone, are then due at once.
+//    A number on the screen holds past that (it has its own bound: BLE_PROMPT_MAX_MS, then the prompt is withdrawn). It sets or clears the flag of
+//    ble_set_prompting, in SECURING only; any other state, NULL `b`: nothing. NULL `w`: the number alone decides.
 void ble_enc_hold_update(ble_t *b, const ble_pair_window_t *w, uint64_t now_ms, bool number_shown);
+//  - Review L3 (2026-11-10): after a No (or a prompt that timed out) the window used to close, and with no bond stored nothing opened it again until the next
+//    replug. With phone mode on and no bond stored it now stays open to its original end (120.0 s from the open: it is not extended and not reopened, so
+//    there is no loop), and the phone may try again; a No also ends the link, as before. With a bond stored (a second phone, opened by [pair]) a No closes it.
+//    It is the same condition as the auto-open, kept as its own name so the glue says what it means.
+bool ble_pair_stays_open_after_no(bool phone_mode_on, unsigned bonds);
 //  - Security Request: the dial asks the phone to encrypt (ble_gap_security_initiate, which makes Android raise a consent prompt that nobody can answer in 3 s)
 //    only while the window is open, or for a peer that already has a bond (it gets its stored key back). Any other peer is left alone, and the 3 s deadline and
 //    the idle cap drop it, as before.

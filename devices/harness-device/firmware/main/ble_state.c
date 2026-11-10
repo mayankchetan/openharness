@@ -222,10 +222,18 @@ bool ble_pair_auto_open_wanted(bool phone_mode_on, unsigned bonds)
     return phone_mode_on && bonds == 0;
 }
 
+bool ble_pair_stays_open_after_no(bool phone_mode_on, unsigned bonds)
+{
+    return ble_pair_auto_open_wanted(phone_mode_on, bonds);
+}
+
 void ble_enc_hold_update(ble_t *b, const ble_pair_window_t *w, uint64_t now_ms, bool number_shown)
 {
     if (!b || b->state != BLE_ST_SECURING) return;   // the hold is for SECURING only; any other state has no 3 s deadline to hold
-    b->prompting = number_shown || ble_pair_is_open(w, now_ms);
+    // The window holds the deadline for BLE_ENC_HOLD_MAX_MS of this link (since_ms is when SECURING began, which is the connect), and no longer; a number
+    // on the screen holds on its own bound.
+    const uint64_t age = now_ms >= b->since_ms ? now_ms - b->since_ms : 0;
+    b->prompting = number_shown || (ble_pair_is_open(w, now_ms) && age < BLE_ENC_HOLD_MAX_MS);
 }
 
 bool ble_security_request_wanted(const ble_pair_window_t *w, uint64_t now_ms, bool peer_bonded)

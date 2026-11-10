@@ -179,6 +179,8 @@ assert 'ble_security_request_wanted' in text('ble_state.h') and 'ble_security_re
 task_a = body(link, 'ble_link_task')
 assert re.search(r'ble_enc_hold_update\(&s_ble, &s_pair, now, s_prompt\.active\);\s*const ble_event_t due = ble_poll\(&s_ble, now\);', task_a), 'hold, then poll, under one lock'
 assert task_a.index('state_lock()') < task_a.index('ble_enc_hold_update(') < task_a.index('ble_poll(&s_ble, now)') < task_a.index('state_unlock()')
+# Review M1 (2026-11-10): the window's hold is capped per link in the pure module (BLE_ENC_HOLD_MAX_MS, 30 s from the connect); the glue passes the number-on-screen flag only.
+assert 'BLE_ENC_HOLD_MAX_MS' in text('ble_state.h') and 'age < BLE_ENC_HOLD_MAX_MS' in code('ble_state.c'), 'the hold of an open window is capped'
 assert 'prompt_settle(-1)' in task_a, 'the 30 s cap on a shown number is still asked for every tick'
 # Auto-open (2026-11-09): with phone mode on and NO bond stored, the window opens by itself once the link is started, from ble_init_task (the phone mode runs only
 # after an unplug, so this is each time the BLE link comes up). The pure rule is ble_pair_auto_open_wanted; the window is the ordinary one.
@@ -228,7 +230,15 @@ settle = body(link, 'prompt_settle')
 assert 'ble_sm_inject_io(' in settle and link.count('ble_sm_inject_io(') == 2, 'one answer path, one refusal at the request'
 assert 'io.numcmp_accept = 0' in pk, 'a refused request is answered No'
 assert 'ble_prompt_verdict(&s_pair, s_prompt.since_ms, now_ms(), answer)' in settle and 'ble_set_prompting(&s_ble, false)' in settle   # ble_prompt_verdict = ble_numcmp_verdict + the 30 s bound (review M1)
-assert re.search(r'if \(v == BLE_PAIR_REJECT\) ble_pair_close\(&s_pair\);', settle), 'No (or the end of the window) closes the window'
+# Review L3 (2026-11-10): a No closes the window EXCEPT with phone mode on and no bond stored (ble_pair_stays_open_after_no, the auto-open's own rule): then it stays
+# open to its original end. The bond count is read outside the lock (a call into the host), only after a REJECT (not on the 20 ms tick), and the close that remains is the old one.
+assert 'ble_pair_stays_open_after_no(s_started, ble_link_bond_count())' in settle, 'one rule decides whether a No closes the window'
+assert re.search(r'if \(close_window\) \{\s*state_lock\(\);\s*ble_pair_close\(&s_pair\);\s*state_unlock\(\);\s*apply_bonding_policy\(\);', settle), 'a No with a bond stored (or the end of the window) still closes the window and the bonding switch'
+assert re.search(r'bool close_window = v == BLE_PAIR_REJECT;\s*if \(close_window && ble_pair_stays_open_after_no\(', settle), 'the count is asked only for a rejection'
+assert settle.index('ble_pair_stays_open_after_no(') > settle.index('state_unlock()'), 'the host call is made outside the lock'
+assert settle.index('close_window') < settle.index('ble_sm_inject_io('), 'the window is settled before the answer goes to the stack'
+assert 'ble_pair_open(' not in settle and 'ble_link_pairing_window(true)' not in settle, 'a No never opens or extends a window: no loop'
+assert code('ble_link.c').count('ble_link_pairing_window(true)') == 1, 'still one auto-open site'
 assert 'terminate_link()' in settle, 'a rejected pairing ends the link'
 assert 'prompt_settle(-1)' in body(link, 'ble_link_task'), 'the window ending under the number is noticed by the link task'
 assert 'prompt_settle(yes ? 1 : 0)' in body(link, 'ble_link_pair_answer')
@@ -280,7 +290,7 @@ assert 'ble_bond_unwanted(&sec)' in enc and 'ble_store_util_delete_peer(&d.peer_
 assert enc.index('ble_bond_unwanted(&sec)') < enc.index('ble_store_util_delete_peer(&d.peer_id_addr)') < enc.index('terminate_link()', enc.index('ble_store_util_delete_peer')) < enc.index('note_security('), 'delete it, end the link, and only otherwise judge the link trusted'
 assert re.search(r'ble_gap_conn_find\(event->enc_change\.conn_handle, &d\) == 0', enc)
 # Low: the window closing in prompt_settle re-applies the bonding switch; a lost link forgets what the phone wrote; the inject result is logged
-assert re.search(r'if \(v == BLE_PAIR_REJECT\) \{?\s*ble_pair_close\(&s_pair\);', settle) and settle.index('state_unlock()') < settle.index('apply_bonding_policy()'), 'a closed window switches bonding off at once'
+assert re.search(r'if \(close_window\) \{\s*state_lock\(\);\s*ble_pair_close\(&s_pair\);\s*state_unlock\(\);\s*apply_bonding_policy\(\);', settle), 'a closed window switches bonding off at once (L3: not when it stays open)'
 disc = re.search(r'case BLE_GAP_EVENT_DISCONNECT:(.*?)\n    case BLE_GAP_EVENT_ENC_CHANGE', gapb, re.S)[1]
 assert 'atomic_store(&s_relay_status, 0);' in disc and 'atomic_store(&s_home_hint, 0);' in disc, 'what the phone wrote is forgotten with the link'
 assert 'const int irc = ble_sm_inject_io(conn, &io);' in settle and re.search(r'ESP_LOG[IW]\(TAG, "pairing [^"]*rc=%d', raw_link[raw_link.index('static void prompt_settle'):raw_link.index('bool ble_link_pair_prompt')]), 'the stack\'s answer is logged'

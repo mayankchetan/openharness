@@ -39,7 +39,10 @@ Pairing starts on the dial, not on the phone. You do it once.
 1. On the dial open Settings > Phone > Pair. The dial shows "Waiting for phone" and a countdown of 2 minutes.
 2. The bridge must be running on the phone (Start bridge). Android asks to pair with the dial.
 3. The dial shows "Phone code" and a 6-digit number, and asks "Same on the phone?". Android shows a number too.
-4. If the two numbers match, tap [yes] on the dial and accept on the phone. If they differ, tap [no] and start again.
+4. If the two numbers match, tap [yes] on the dial and accept on the phone. If they differ, or your phone shows no number, tap [no]. The dial says
+   "Press No unless your phone shows this number" under the number, because a dial with no paired phone opens the pairing window by itself when it
+   starts the phone mode, and a number can come from a phone that is not yours. After a [no] the window stays open to the end of its 2 minutes, so you
+   can start again from the phone.
 5. The dial now shows "Paired". When the phone has the link it shows "Connected".
 
 To remove the pairing, open Settings > Phone on the dial and use Forget.

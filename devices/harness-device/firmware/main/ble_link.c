@@ -246,7 +246,7 @@ static void note_security(uint16_t conn)
     if (trusted || (DEV_UNBONDED && sec.encrypted)) post(BLE_EV_ENCRYPTED);
 }
 
-// Does the bond store hold this peer? (Fix B: the dial asks only a bonded peer to encrypt while the pairing window is closed.) A read of the host's own
+// Does the bond store hold this peer? (Fix B: with the pairing window closed the dial asks only a bonded peer to encrypt; with it open it asks any peer.) A read of the host's own
 // copy of the keys it gave away (the same object type ble_link_bond_count counts); it writes nothing. An address the stack has not resolved to an identity
 // address reads as "not bonded": that peer then starts encryption itself, as a phone with a stored key does.
 static bool peer_bonded(uint16_t conn)
@@ -412,7 +412,8 @@ static void terminate_link(void)
 // ── the number on the screen (B5) ───────────────────────────────────────────────────────────────────
 
 // Ends the offer when it has a verdict: `answer` is 1 Yes, 0 No, -1 none (the link task asks with -1 every tick, so the end of the window is noticed). Yes
-// accepts the pairing; No, or a window that has closed, rejects it, closes the window, and ends the link. The pure rules are ble_numcmp_verdict.
+// accepts the pairing; No, or a window that has closed, rejects it and ends the link, and closes the window unless phone mode is on with no bond stored (review
+// L3: ble_pair_stays_open_after_no; then the window runs to its original end). The pure rules are ble_numcmp_verdict.
 static void prompt_settle(int answer)
 {
     state_lock();
@@ -429,9 +430,21 @@ static void prompt_settle(int answer)
     s_prompt.active = false;
     s_prompt.number = 0;
     ble_set_prompting(&s_ble, false);
-    if (v == BLE_PAIR_REJECT) ble_pair_close(&s_pair);
     state_unlock();
-    if (v == BLE_PAIR_REJECT) apply_bonding_policy();   // the window just closed: bonding is off from now, not at the next tick
+    // Review L3 (2026-11-10): a No used to close the only window until the next replug. With phone mode on and no bond stored the window now stays open to its
+    // original end (never extended, never reopened here: no loop), so the phone can try again; with a bond stored (a second phone, opened by [pair]) it closes as
+    // before. The bond count is a call into the host, so it is made outside the lock, and only after a rejection.
+    bool close_window = v == BLE_PAIR_REJECT;
+    if (close_window && ble_pair_stays_open_after_no(s_started, ble_link_bond_count())) {
+        close_window = false;
+        ESP_LOGI(TAG, "pairing rejected: no bond is stored, so the window stays open to its end");
+    }
+    if (close_window) {
+        state_lock();
+        ble_pair_close(&s_pair);
+        state_unlock();
+        apply_bonding_policy();   // the window just closed: bonding is off from now, not at the next tick
+    }
     struct ble_sm_io io;
     memset(&io, 0, sizeof io);
     io.action = BLE_SM_IOACT_NUMCMP;
@@ -766,7 +779,7 @@ static void ble_link_task(void *arg)
         // encrypted a moment ago is not dropped, and one that arrived as the advertising timer fired is not lost.
         state_lock();
         const ble_state_t before = s_ble.state;
-        ble_enc_hold_update(&s_ble, &s_pair, now, s_prompt.active);   // Fix A: an open window (or a number on show) holds the 3 s deadline in SECURING
+        ble_enc_hold_update(&s_ble, &s_pair, now, s_prompt.active);   // Fix A: a number on show, or an open window for its first 30 s of this link (review M1), holds the 3 s deadline in SECURING
         const ble_event_t due = ble_poll(&s_ble, now);
         const bool changed = (due == BLE_EV_ADV_TIMEOUT || due == BLE_EV_ENC_TIMEOUT || due == BLE_EV_IDLE_TIMEOUT || due == BLE_EV_START) && ble_post(&s_ble, due, now);
         state_unlock();
@@ -995,8 +1008,9 @@ static void ble_init_task(void *arg)
         ble_init(&s_ble);
         s_started = true;
         post(BLE_EV_START);
-        // No touch path reaches Settings > Phone > Pair on a real dial, so with no bond stored the window opens by itself each time the link comes up (the phone
-        // mode starts only after an unplug). Numeric comparison and the user's Yes on the dial stay required. With a bond stored it stays shut.
+        // No touch path reaches Settings > Phone > Pair on a real dial, so with no bond stored the window opens by itself, once, when the phone mode starts (it starts
+        // only after an unplug: a replug and an unplug make a new window). It is not opened again at each connect; a No leaves it open to its end (review L3).
+        // Numeric comparison and the user's Yes on the dial stay required. With a bond stored it stays shut.
         if (ble_pair_auto_open_wanted(s_started, ble_link_bond_count())) {
             ble_link_pairing_window(true);
             ESP_LOGI(TAG, "no bond stored: the pairing window opened by itself (%u ms)", (unsigned)BLE_PAIR_WINDOW_MS);
