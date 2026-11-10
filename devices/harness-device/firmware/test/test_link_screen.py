@@ -3,11 +3,12 @@
 The screen has two controls that matter more than their size: the Link row, and the Keep Wi-Fi toggle (stay_wl). A dial in Wi-Fi with stay_wl on never
 looks at the cable, so the toggle is the ONLY way back, and it has to be reachable with no daemon at all. The rules, each checked on the source:
 
-  1. The edge swipe (link_swipe) is a pure function, compiled and run here: bottom band, 55 px up, more up than sideways; never from above the band,
-     never down, never a sideways stroke, never a short one. It opens the screen from the brand screen (no daemon needed) and from the home face
-     (HOME and AGENT), ahead of the footer and face branches, and a stroke that starts in the band is not reported as a terminal scroll.
-  2. The screen opens with no cable session: A_LINK is dispatched from the touch handler on `surface` only, the view's only way out is the same
-     stroke (the generic bottom-edge swipe), the back arrow and a sideways swipe.
+  1. NO WAY IN FROM THE DIAL (user decision 2026-11-10): the edge swipe is gone. link_swipe, LINK_EDGE_Y and LINK_SWIPE_PX do not exist, nothing dispatches A_LINK,
+     and view(LINK) is called nowhere in the firmware but the visual-only UI gallery (DEVICE_UI_GALLERY). The way in on the computer is `harness dial wifi on|off`.
+     The scroll of a drag that starts in the bottom band is reported again (that exclusion belonged to the swipe).
+  2. The screen, kept for a later entry point: A_LINK still opens it with no cable session, the view's way out is the generic edge stroke, the back arrow and a
+     sideways swipe. In the phone mode (wl_mode 2) the Link row says "Link: Phone", is not a hit target, and link_work never writes mode 1 from mode 2; every
+     write from the screen logs the old and the new value.
   3. NVS is touched by the worker alone (link_work), never by the render task or by dispatch; the screen's copy is written under the display lock.
   4. stay_wl: config_save_stay_wl is called exactly once in the whole firmware outside config_store.c, in link_work, as a TOGGLE (it can write false
      as well as true), only behind a whole Wi-Fi configuration, and the mode switch is told afterwards (mode_glue_settings_changed).
@@ -53,56 +54,21 @@ UI = 'ui/habitat/ui_habitat.c'
 raw = text(UI)
 ui = code(UI)
 
-# ── 1. the stroke ───────────────────────────────────────────────────────────────────────────────────
-edge_y = int(re.search(r'#define LINK_EDGE_Y (\d+)', raw)[1])
-swipe_px = int(re.search(r'#define LINK_SWIPE_PX (\d+)', raw)[1])
-assert edge_y == 400, 'the band is the one the generic close stroke uses (start_y >= 400)'
-assert swipe_px >= 40, 'a thumb that slips is not a stroke'
-assert re.search(r'else if \(s\.start_y >= 400 && dy < 0\)\s*view\(HOME\)', ui), 'the stroke that closes every other screen starts at y >= 400'
-
-fn = re.search(r'static bool link_swipe\(int start_y, int dx, int dy\)\n\{.*?\n\}', raw, re.S)
-assert fn, 'link_swipe'
-driver = f'''
-#include <assert.h>
-#include <stdbool.h>
-#include <stdlib.h>
-#define LINK_EDGE_Y {edge_y}
-#define LINK_SWIPE_PX {swipe_px}
-{fn[0]}
-int main(void)
-{{
-    assert(link_swipe(LINK_EDGE_Y, 0, -LINK_SWIPE_PX - 1));                  /* the lowest edge of the band, straight up */
-    assert(link_swipe(450, 30, -120));                                       /* from the rim, a little sideways */
-    assert(link_swipe(LINK_EDGE_Y, 59, -60));                                /* more up than sideways */
-    assert(!link_swipe(LINK_EDGE_Y - 1, 0, -200));                           /* one pixel above the band: a face drag, a scroll */
-    assert(!link_swipe(300, 0, -200));
-    assert(!link_swipe(LINK_EDGE_Y, 0, -LINK_SWIPE_PX + 1));                 /* too short */
-    assert(!link_swipe(LINK_EDGE_Y, 0, 0));                                  /* a tap */
-    assert(!link_swipe(LINK_EDGE_Y, 0, 200));                                /* downwards */
-    assert(!link_swipe(LINK_EDGE_Y, 90, -80));                               /* more sideways than up: the next agent */
-    assert(!link_swipe(LINK_EDGE_Y, -80, -80));                              /* a tie is not "more up" */
-    assert(!link_swipe(LINK_EDGE_Y, -200, -70));
-    assert(!link_swipe(466, 0, -LINK_SWIPE_PX + 1));
-    return 0;
-}}
-'''
-with tempfile.TemporaryDirectory() as tmp:
-    src_path = Path(tmp) / 'link_swipe.c'
-    src_path.write_text(driver)
-    subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g', '-fsanitize=undefined,bounds', '-o', str(Path(tmp) / 'ls'), str(src_path)], check=True)
-    subprocess.run([str(Path(tmp) / 'ls')], check=True)
-
+# ── 1. no way in from the dial ───────────────────────────────────────────────────────────────────────────────────
+for gone in ('link_swipe', 'LINK_EDGE_Y', 'LINK_SWIPE_PX'):
+    assert gone not in raw, f'{gone} is back: the edge swipe to the Link screen was removed (user decision 2026-11-10)'
 touch = body(ui, 'habitat_touch')
-# opened from the surface (HOME or AGENT), ahead of the footer and face branches
-branch = re.search(r'else if \(surface && link_swipe\(s\.start_y, dx, dy\)\) \{(.*?)\n        \} else if', touch, re.S)
-assert branch, 'the edge swipe branch'
-assert 'dispatch((action_t){.kind = A_LINK})' in branch[1]
-i_link = touch.index('link_swipe(s.start_y')
-for later in ('pressed_action.kind==A_TABS', 'home_footer(pressed_action.kind))', 'pressed_action.kind == A_READER', 'pressed_action.kind == A_PET', 'HT_TOUCH_HOLD'):
-    assert i_link < touch.index(later, touch.index('result == HT_TOUCH_TAP && s.touch_brake')), later
-assert touch.count('link_swipe(') == 1 and re.findall(r'.kind = A_LINK}', ui) == ['.kind = A_LINK}'], 'one place opens the screen'
-# a stroke that starts in the band is never a terminal scroll
-assert re.search(r'if \(surface && \(home_footer\(pressed_action\.kind\) \|\| y >= LINK_EDGE_Y\)\)', touch), 'no scroll from the band'
+assert 'A_LINK' not in touch.replace('A_LINK_', ''), 'the touch handler opens no Link screen'
+assert not re.search(r'\bA_LINK\b', re.sub(r'case A_LINK:', '', re.sub(r'^\s*A_LINK,', '', ui, flags=re.M))), 'nothing dispatches A_LINK (the enum value and its case remain)'
+assert not re.search(r'\.kind\s*=\s*A_LINK\b(?!_)', ui) and not re.search(r'queue\(\(action_t\)\{\.kind\s*=\s*A_LINK\b(?!_)', ui)
+# view(LINK) is called nowhere on the dial: ui_habitat.c has none, and the one other place is the gallery build
+assert 'view(LINK)' in code('ui/habitat/ui_habitat.c'), 'dispatch(A_LINK) still draws the screen for a later entry point'
+callers = [str(q.relative_to(main)).replace('\\', '/') for q in main.rglob('*') if q.suffix in ('.c', '.h', '.inc') and 'view(LINK)' in code(str(q.relative_to(main)).replace('\\', '/'))]
+assert sorted(callers) == ['ui/habitat/ui_gallery.inc', 'ui/habitat/ui_habitat.c'], callers
+assert re.search(r'case A_LINK:\s*//[^\n]*\n[^\n]*\n\s*link_ui\.loaded = false;\s*view\(LINK\);', raw), 'the one view(LINK) in the UI is the A_LINK case'
+assert '#ifdef DEVICE_UI_GALLERY\n#include "ui_gallery.inc"' in raw, 'the gallery draws the screen only in the visual-only build'
+# the exclusion that belonged to the swipe is gone: a drag that starts in the bottom band is a terminal scroll again
+assert re.search(r'if \(surface && home_footer\(pressed_action\.kind\)\) \{', touch), 'only the footer is excluded from the scroll'
 
 # ── 2. reachable with no daemon ─────────────────────────────────────────────────────────────────────
 dispatch = body(ui, 'dispatch')
@@ -156,11 +122,19 @@ assert 'config_save_stay_wl(true)' not in ui and 'config_save_stay_wl(1)' not in
 assert re.search(r'if \(kind != A_LINK_SYNC\) mode_glue_settings_changed\(\);', work)
 assert '#include "mode_glue.h"' in raw
 # USB while Wi-Fi runs: the same flip, and the glue (mode_switch.c H12) does the rest through the busy gate
-assert 'config_net_set_mode(info.mode == 1 ? 0 : 1)' in work and 'info.saved && kind == A_LINK_MODE' in work
+assert 'info.saved && kind == A_LINK_MODE' in work and 'const int next = info.mode == 1 ? 0 : 1;' in work and 'config_net_set_mode(next)' in work
+# the phone mode (wl_mode 2) is never turned into Wi-Fi from here, and every write says what it did (review of 2026-11-10)
+assert re.search(r'if \(info\.mode == 2\) \{\s*ESP_LOGW\("habitat", "link: wl_mode 2 \(phone\) is not changed from the Link screen"\);\s*\} else \{', rawwork), 'mode 2 is left alone and says so'
+assert rawwork.index('info.mode == 2') < rawwork.index('config_net_set_mode(next)'), 'the phone check comes before the write'
+assert 'config_net_set_mode(info.mode == 1 ? 0 : 1)' not in rawwork, 'the old flip (2 -> 1) is gone'
+assert re.search(r'ESP_LOGI\("habitat", "link: wl_mode %d -> %d from the Link screen: %s", \(int\)info\.mode, next, ok \? "ok" : "FAILED"\);', rawwork), 'every wl_mode write from the screen logs old, new and the result'
+assert rawwork.count('config_net_set_mode(') == 1 and rawwork.index('config_net_set_mode(next)') < rawwork.index('link: wl_mode %d -> %d')
+assert 'link_ui.phone = info.saved && info.mode == 2;' in rawwork
+assert re.search(r'!\(mode && link_ui\.phone\)\};', rawrender), 'the Link row is not a hit target in the phone mode'
 
 # ── 5. what the screen says ─────────────────────────────────────────────────────────────────────────
 labels = re.findall(r'"((?:Link|Keep Wi-Fi)[^"]*)"', rawrender)
-assert sorted(set(labels)) == ['Keep Wi-Fi: off', 'Keep Wi-Fi: on', 'Link: USB only', 'Link: Wi-Fi'], labels
+assert sorted(set(labels)) == ['Keep Wi-Fi: off', 'Keep Wi-Fi: on', 'Link: Phone', 'Link: USB only', 'Link: Wi-Fi'], labels
 assert all(len(label) <= 17 for label in labels), 'a row of the mono skin is 17 cells'
 assert 'net_state_line(net_link_state())' in rawrender
 for banned in ('ssid', 'pass', 'psk', 'key', 'host'):
@@ -176,5 +150,5 @@ assert 'config_net_set_mode(' not in code('cable_debug.c') and 'config_net_set_m
 # ── 7. the build and the run know the new test ──────────────────────────────────────────────────────
 assert 'test_link_screen.py' in (fw / 'test/run.sh').read_text()
 
-print('link screen: edge swipe table, the stroke ahead of every other branch, no scroll from the band, no session needed, NVS on the worker only, '
-      'stay_wl one toggling writer behind a whole configuration, labels, no credential, no cable path PASS')
+print('link screen: no edge swipe and nothing dispatches it, view(LINK) only in the gallery build, no scroll exclusion left, no session needed, NVS on the worker only, '
+      'phone mode never turned into Wi-Fi and every write logged, stay_wl one toggling writer behind a whole configuration, labels, no credential, no cable path PASS')

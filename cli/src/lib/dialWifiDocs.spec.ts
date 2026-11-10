@@ -81,24 +81,26 @@ describe('docs for the dial on Wi-Fi (W16)', () => {
     for (const caption of captions) expect(note, caption).toContain(`| ${caption} |`)
   })
 
-  it('the Link screen rows and state lines in the note are the ones the firmware draws', () => {
+  it('says there is no on-dial Link screen (user decision 2026-11-10) and names the computer commands that choose the link', () => {
+    // The firmware keeps the Link screen's code, but no gesture opens it: the note must not tell anyone to swipe, and the swipe must really be gone.
+    const note = read(NOTE)
+    expect(note).not.toMatch(/swipe up from the very bottom/i)
+    expect(note).toMatch(/no screen for this/i)
+    expect(note).toContain('`harness dial wifi on`')
+    expect(note).toContain('`harness dial wifi off`')
     const ui = read(UI_HABITAT_C)
+    expect(ui).not.toMatch(/link_swipe|LINK_SWIPE_PX|LINK_EDGE_Y/)
+    expect(ui).not.toMatch(/\.kind\s*=\s*A_LINK\b(?!_)/)
+    // The labels the screen still draws (the gallery build): the note does not promise them.
     const render = ui.slice(ui.indexOf('static void render_link('), ui.indexOf('WHAT THE APP ASKED FOR'))
     const labels = [...render.matchAll(/"((?:Link|Keep Wi-Fi)[^"]*)"/g)].map((m) => m[1])
-    expect(labels.sort()).toEqual(['Keep Wi-Fi: off', 'Keep Wi-Fi: on', 'Link: USB only', 'Link: Wi-Fi'])
-    const note = read(NOTE)
-    for (const label of labels) expect(note, label).toContain(label)
+    expect(labels.sort()).toEqual(['Keep Wi-Fi: off', 'Keep Wi-Fi: on', 'Link: Phone', 'Link: USB only', 'Link: Wi-Fi'])
     const state = read(NET_STATE_C)
-    const lines = [...state.slice(state.indexOf('const char *net_state_line')).matchAll(/return "(Wi-Fi: [^"]+)";/g)].map((m) => m[1])
-    expect(lines).toHaveLength(6)
-    const sentence = note.split('\n').find((line) => line.startsWith('Under the rows it shows one line of link state:'))
-    expect(sentence).toBeTruthy()
-    for (const line of lines) expect(sentence, line).toContain(line.replace(/^Wi-Fi: /, ''))
+    expect([...state.slice(state.indexOf('const char *net_state_line')).matchAll(/return "(Wi-Fi: [^"]+)";/g)]).toHaveLength(6)
   })
 
-  it('says how to leave Keep Wi-Fi, and names no internal flag, network, password or key', () => {
+  it('names no internal flag, network, password or key', () => {
     const note = read(NOTE)
-    expect(note).toMatch(/turn it off/i)
     expect(note).not.toMatch(/stay_wl|wl_mode/i)
     expect(note).not.toMatch(/psk|passphrase/i)
   })

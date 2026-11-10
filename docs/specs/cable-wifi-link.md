@@ -324,7 +324,10 @@ the daemon (section 3).
 
 `stay_wl` is on no wire path. No message of this protocol and no CLI verb sets or reads it (`dialWifiHelp.spec.ts` checks the help and the usage
 text). It lives in the dial's NVS (section 6) and has one writer: the Keep Wi-Fi toggle on the dial's Link screen (below), which turns it off as well
-as on. That is deliberate: a dial in Wi-Fi with `stay_wl` on never looks at the cable, so the only way back to USB is the toggle on the dial.
+as on. That is deliberate: a dial in Wi-Fi with `stay_wl` on never looks at the cable, so the only way back to USB is the toggle on the dial. Since
+2026-11-10 nothing on the dial opens the Link screen (user decision, v1: no on-dial path), so `stay_wl` can no longer be turned on or off by anyone; a dial
+that already holds it set leaves it only through the BOOT-hold factory reset (`net.clear` also clears it, but it needs a cable session, and a dial with
+`stay_wl` on does not start one).
 
 Link-state text. While the dial is not connected it shows the wordmark and, in Wi-Fi mode, one dim line under it from `net_state_caption`
 (`net_state.c`, task W11; drawn by `render_brand` in `ui_habitat.c`): `Joining Wi-Fi` (JOINING), `Wi-Fi: no address` (NO_IP), `Daemon not reachable`
@@ -336,11 +339,12 @@ only (the help and the output of `set`). There is no `stay_wl` verb. The user no
 The Link screen (user decisions 2026-10-31 and 2026-11-01). One screen on the dial (`LINK` in `ui_habitat.c`), two rows, shown only when the Wi-Fi
 settings are whole: `Link: Wi-Fi` or `Link: USB only` (tap flips `wl_mode`, `config_net_set_mode`) and `Keep Wi-Fi: on` or `off` (tap flips `stay_wl`).
 Under them a hint and one line of link state (`net_state_line`: `Wi-Fi: off`, `joining`, `no address`, `daemon not reachable`, `key refused`,
-`connected`). A dial with no Wi-Fi set up shows one sentence that says how to set it up. The screen opens with the EDGE SWIPE: a drag that starts
-in the bottom band of the glass (y >= 400) and goes 55 px or more up, more up than sideways. It works from the brand screen, so a dial that cannot
-reach its daemon can still be reached, and from the home face. The same stroke, a sideways swipe and the back arrow close it. A drag that starts in the
-band is not reported as a terminal scroll. The worker task (not the render or touch task) reads and writes NVS and then calls
-`mode_glue_settings_changed()`, so the running mode switch re-reads `wl_mode` and `stay_wl`.
+`connected`). A dial with no Wi-Fi set up shows one sentence that says how to set it up. NOT REACHABLE IN v1 (user decision 2026-11-10): the EDGE SWIPE
+that opened it (a drag up from the bottom band, y >= 400) was removed, nothing else dispatches `A_LINK`, and the screen is drawn only by the UI gallery
+build. The controls of the screen are the CLI's: `harness dial wifi on|off`. The code stays so that a later entry point needs one dispatch.
+In the phone mode (`wl_mode` 2) the first row reads `Link: Phone`, is not a tap target, and the screen never writes mode 1 over mode 2; every write it
+makes logs the old value, the new value and the result (`link: wl_mode 0 -> 1 from the Link screen: ok`). The worker task (not the render or touch task)
+reads and writes NVS and then calls `mode_glue_settings_changed()`, so the running mode switch re-reads `wl_mode` and `stay_wl`.
 
 Picking USB while Wi-Fi runs. `wl_mode` unset while a wireless mode runs is the user's pick of USB: `ms_step` (`mode_switch.c`, test H12) reboots into
 USB through the same busy gate and glue sequence as an automatic switch (log reason, seal, `boot_usb` = USB, restart; a refused restart is undone). It

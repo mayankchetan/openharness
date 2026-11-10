@@ -141,7 +141,7 @@ typedef enum {
     A_NAP,
     A_SETTINGS_SAVE,
     A_SETTINGS,
-    A_LINK,        // open the Link screen (the edge swipe)
+    A_LINK,        // open the Link screen (no caller in v1: the edge swipe was removed 2026-11-10)
     A_LINK_SYNC,   // to the worker: read wl_mode and stay_wl into link_ui
     A_LINK_MODE,   // to the worker: the Link row, USB <-> Wi-Fi
     A_LINK_STAY,   // to the worker: the Keep Wi-Fi toggle (stay_wl)
@@ -2416,32 +2416,25 @@ static void render_settings(ht_scene_t *f)
  *
  * Two controls, both local to the dial, and both reachable WITHOUT a daemon: the Link row (the dial joins Wi-Fi when the cable is out, or stays
  * on USB) and Keep Wi-Fi (stay_wl: the dial stays in Wi-Fi even with the cable in). Keep Wi-Fi has no exit from the wireless side except this
- * screen, because a dial in Wi-Fi with stay_wl on never looks at the cable; that is why it opens from the brand screen, which is all a dial with
+ * screen, because a dial in Wi-Fi with stay_wl on never looks at the cable; that is why it opened from the brand screen, which is all a dial with
  * no daemon shows, as well as from the home face.
  *
- * Opened by the EDGE SWIPE (link_swipe): a drag that starts in the bottom band of the glass (y >= LINK_EDGE_Y) and goes at least LINK_SWIPE_PX up,
- * more up than sideways. It is the same stroke that closes every other screen (a swipe up from y >= 400 goes home), so the way in and the way
- * out are one gesture. What it does not collide with on HOME or AGENT: a tap on the face talks, a tap on the recap card opens the reader, a hold
- * opens the tabs, a sideways swipe moves to the next agent, a pull down with unread opens the inbox, and a vertical drag scrolls the desktop
- * terminal; the scroll of a drag that STARTS in the band is not reported (nothing was scrolled from a thumb's rest at the bottom rim before this
- * either: the footer controls there never sent a scroll).
+ * NOT REACHABLE ON THE DIAL IN v1 (user decision 2026-11-10: no on-dial path to the Link screen; the computer's `harness dial wifi on|off` is the control).
+ * The edge swipe that opened it (a drag up from the bottom band) was removed, and nothing else dispatches A_LINK. The screen, A_LINK_SYNC/MODE/STAY and
+ * link_work stay as they were, so a later entry point (a Settings row) needs one dispatch and no new code; the UI gallery draws it with view(LINK). While
+ * it is unreachable, stay_wl cannot be turned on or off from the dial either (net.clear and the factory reset still clear it).
  *
  * link_ui is read by the render task and written by the worker, under the display lock. The worker alone touches NVS (the same worker and the
  * same kind of write as A_SETTINGS_SAVE). Nothing here can show the network name, the password or the key: the screen reads two flags, the
  * mode and net_link_state().
  */
-#define LINK_EDGE_Y 400
-#define LINK_SWIPE_PX 55
 static struct {
     bool loaded;        // the worker has read NVS since the screen opened
     bool provisioned;   // the Wi-Fi settings are whole (config_net_info().saved)
     bool wifi;          // wl_mode is 1: the dial joins Wi-Fi when the cable is out
+    bool phone;         // wl_mode is 2: the dial is the phone bridge when the cable is out; this screen does not change it
     bool stay;          // stay_wl
 } link_ui;
-static bool link_swipe(int start_y, int dx, int dy)
-{
-    return start_y >= LINK_EDGE_Y && dy <= -LINK_SWIPE_PX && -dy > abs(dx);
-}
 static void render_link(ht_scene_t *f)
 {
     heading(f, "link");
@@ -2452,9 +2445,10 @@ static void render_link(ht_scene_t *f)
     }
     for (int row = 0; row < 2; row++) {
         const bool mode = row == 0;
-        const char *label = mode ? (link_ui.wifi ? "Link: Wi-Fi" : "Link: USB only") : (link_ui.stay ? "Keep Wi-Fi: on" : "Keep Wi-Fi: off");
+        const char *label = mode ? (link_ui.phone ? "Link: Phone" : link_ui.wifi ? "Link: Wi-Fi" : "Link: USB only") : (link_ui.stay ? "Keep Wi-Fi: on" : "Keep Wi-Fi: off");
         int y = TAB_TOP + row * TAB_ROW_HEIGHT, hit = s.hit_count++;
-        s.hits[hit] = (hit_t){{LIST_HIT_X, y, LIST_HIT_W, TAB_ROW_HEIGHT}, mode ? A_LINK_MODE : A_LINK_STAY, 0, true};
+        // The phone mode is not a choice of this row (a tap used to turn it into Wi-Fi, review of 2026-11-10): the row shows it and does nothing.
+        s.hits[hit] = (hit_t){{LIST_HIT_X, y, LIST_HIT_W, TAB_ROW_HEIGHT}, mode ? A_LINK_MODE : A_LINK_STAY, 0, !(mode && link_ui.phone)};
         if (focus_skin()) {   // Inter, centred in the row it is tapped in
             const ht_font_t *font = focus_face_for(UI_FONT);
             focus_put(f, LIST_HIT_X, y + 14 + (UI_FONT->height - font->height) / 2, LIST_HIT_W, font,
@@ -2549,11 +2543,13 @@ static void render_passkey(ht_scene_t *f)
 {
     char code[16];
     phone_code_text(phone_ui.code, code, sizeof code);
-    center(f, 96, "Phone code", DIM);
+    center(f, 84, "Phone code", DIM);
     const ht_font_t *big = &ht_lv_inter_44.base;   // already in the image (the tab names); the pixel face would add 45 KB to an image with no BLE
     const int w = ht_measure(big, code);
-    ht_text(f, (HT_WIDTH - w) / 2, 168, w, big, FG, BG, code);
-    center(f, 236, "Same on the phone?", DIM);
+    ht_text(f, (HT_WIDTH - w) / 2, 150, w, big, FG, BG, code);
+    center(f, 214, "Same on the phone?", DIM);
+    // Review M2 (2026-11-10): the window opens by itself, so a number can appear that the user did not start. It is only theirs if the phone shows the same one.
+    ui_wrap(f, FACE_CX(336), 256, 336, 2, 0, &ht_mono_20, DIM, "Press No unless your phone shows this number");
     control(f, 83, 340, 130, "[yes]", A_PHONE_YES, 0, true);
     control(f, 253, 340, 130, "[no]", A_PHONE_NO, 0, true);
 }
@@ -3352,7 +3348,7 @@ static void dispatch(action_t a)
         view(SETTINGS);
         break;
     case A_LINK:
-        // The edge swipe, from the brand screen and the home face only (the touch handler checks the view). The screen opens at once with its
+        // No caller in v1 (the edge swipe was removed 2026-11-10; test_link_screen.py pins that nothing dispatches this). The screen opens at once with its
         // title; the rows appear when the worker has read NVS (a few milliseconds), so the render task never reads flash.
         link_ui.loaded = false;
         view(LINK);
@@ -3466,15 +3462,24 @@ static void dispatch(action_t a)
 }
 // The Link screen's NVS side, on the worker (PSRAM stack; NVS writes from it are the A_SETTINGS_SAVE pattern, task_util.h). One read or one write,
 // then the screen's copy is refreshed from what NVS HOLDS, and the mode switch is told so it re-reads wl_mode and stay_wl (mode_glue.h).
-// A_LINK_MODE flips wl_mode (config_net_set_mode needs a whole Wi-Fi configuration: it refuses otherwise and the screen shows no rows then);
-// picking USB while Wi-Fi runs makes the glue reboot into USB through the busy gate (mode_switch.c, H12). A_LINK_STAY flips stay_wl, and turning it
-// OFF is what lets a dial in Wi-Fi look at the cable again.
+// A_LINK_MODE flips wl_mode between USB (0) and Wi-Fi (1) (config_net_set_mode needs a whole Wi-Fi configuration: it refuses otherwise and the screen shows no
+// rows then); picking USB while Wi-Fi runs makes the glue reboot into USB through the busy gate (mode_switch.c, H12). The phone mode (2) is never changed from
+// here: it used to become Wi-Fi with no log line (review of 2026-11-10). Every write from this screen logs the old and the new value and the result.
+// A_LINK_STAY flips stay_wl, and turning it OFF is what lets a dial in Wi-Fi look at the cable again.
 static void link_work(action_kind_t kind)
 {
     config_net_info_t info;
     config_net_info(&info);
     bool ok = true;
-    if (info.saved && kind == A_LINK_MODE) ok = config_net_set_mode(info.mode == 1 ? 0 : 1) == CFG_NET_OK;
+    if (info.saved && kind == A_LINK_MODE) {
+        if (info.mode == 2) {
+            ESP_LOGW("habitat", "link: wl_mode 2 (phone) is not changed from the Link screen");
+        } else {
+            const int next = info.mode == 1 ? 0 : 1;
+            ok = config_net_set_mode(next) == CFG_NET_OK;
+            ESP_LOGI("habitat", "link: wl_mode %d -> %d from the Link screen: %s", (int)info.mode, next, ok ? "ok" : "FAILED");
+        }
+    }
     if (info.saved && kind == A_LINK_STAY) ok = config_save_stay_wl(!config_load_stay_wl());
     config_net_info(&info);
     const bool stay = config_load_stay_wl();
@@ -3482,6 +3487,7 @@ static void link_work(action_kind_t kind)
     link_ui.loaded = true;
     link_ui.provisioned = info.saved;
     link_ui.wifi = info.saved && info.mode == 1;
+    link_ui.phone = info.saved && info.mode == 2;
     link_ui.stay = info.saved && stay;
     change();
     display_unlock();
@@ -3725,10 +3731,8 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
             pressed_action.kind != A_DRAFT_APPEND && pressed_action.kind != A_DRAFT_UNDO) gesture.guarded = false; // Discard is always immediate.
         if (s.pressed >= 0 && ((!surface && s.view != VOICE) || home_footer(pressed_action.kind))) change();
         if (ui_scroll_reportable()) {
-            if (surface && (home_footer(pressed_action.kind) || y >= LINK_EDGE_Y)) {
-                // Footer choices send no terminal scroll, and neither does a contact that starts in the bottom band: that is where the edge
-                // swipe to the Link screen begins (link_swipe). A contact
-                // that stops an existing fling still has to reach the app.
+            if (surface && home_footer(pressed_action.kind)) {
+                // Footer choices send no terminal scroll. A contact that stops an existing fling still has to reach the app.
                 if (s.touch_brake) {
                     ht_scroll_begin(&scroll,x,y,now,scroll_reversed,scroll_emit,NULL);
                     ht_scroll_cancel(&scroll);
@@ -3816,11 +3820,6 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
             change();
         } else if (result == HT_TOUCH_TAP && s.touch_brake) {
             // DOWN already stopped desktop inertia. This entire tap is only a brake.
-        } else if (surface && link_swipe(s.start_y, dx, dy)) {
-            // The edge swipe: the Link screen, from the brand screen (no daemon needed) and the home face. Ahead of the footer and
-            // face branches so a stroke that started on the bell or the face's lowest rim is still this stroke, not a cancelled press.
-            ht_gesture_guard(&gesture, now);
-            dispatch((action_t){.kind = A_LINK});
         } else if (surface && pressed_action.kind==A_TABS) {
             bool cancelled=workspace.cancelled || (workspace.touching && now-workspace.began>=5000);
             int chosen=ht_workspace_release(&workspace,x,y,gesture.axis,now);

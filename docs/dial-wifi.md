@@ -40,25 +40,20 @@ While the dial has no link to this computer it shows the word "Harness". On Wi-F
 | Wi-Fi: no address | It joined the network but the router gave it no address. | Check the router. |
 | Daemon not reachable | It has an address, but this computer did not answer. | Is Harness running here? Is the firewall rule in place? Did this computer's address change? |
 | Plug in USB | This computer refused the dial's key: it does not know this dial, or holds a different key. Keep Wi-Fi is off. | Plug the cable in. The dial restarts on USB after about 5 seconds, once it has run for a minute. Run `harness dial wifi set` again. |
-| Open Link screen | The same, with Keep Wi-Fi on: the dial does not look at the cable. | Open the Link screen on the dial and turn Keep Wi-Fi off, then plug the cable in and run `harness dial wifi set` again. |
+| Open Link screen | The same, with Keep Wi-Fi on: the dial does not look at the cable. | This version has no on-dial control for Keep Wi-Fi, so this line shows only on a dial that an earlier test build set to Keep Wi-Fi on. Hold BOOT while the dial starts, until it says "Settings reset" (this erases its Wi-Fi settings), then plug the cable in and run `harness dial wifi set` again. |
 
 When the link is up the line goes away.
 
-## The Link screen on the dial
+## Choosing Wi-Fi or USB
 
-Swipe up from the very bottom of the glass (start on the lowest part of the circle and drag up a thumb's width) to open the Link screen. It works on
-the "Harness" screen as well as on the agent face, so you can reach it even when the dial cannot find this computer. The same swipe, a sideways
-swipe or the arrow at the top closes it. It shows two rows when the dial has a Wi-Fi network:
+The dial has no screen for this in this version, and no gesture on the glass opens one (an earlier build opened a Link screen with a swipe up from the
+bottom edge; that was removed). Choose from this computer, with the dial plugged in:
 
-| Row | Tap | Meaning |
-|---|---|---|
-| Link: Wi-Fi, Link: USB only | Switch | Wi-Fi: the dial joins the network when the cable is unplugged. USB only: it never leaves USB. If the dial is on Wi-Fi when you pick USB only, it restarts into USB (it waits while you are in the middle of something). |
-| Keep Wi-Fi: on, Keep Wi-Fi: off | Switch | On: the dial stays on Wi-Fi even with the cable plugged in (the cable then only charges it). Off: plugging in the cable brings it back to USB. |
+- `harness dial wifi on`: the dial joins the network when you unplug the cable.
+- `harness dial wifi off`: the dial stays on USB, whatever the cable does.
 
-Under the rows it shows one line of link state: Wi-Fi: off, joining, no address, daemon not reachable, key refused, or connected. A dial with no
-Wi-Fi network shows how to set one up instead of the rows.
-
-If you turned Keep Wi-Fi on and want USB back, open the Link screen and turn it off. The dial does not look at the cable while Keep Wi-Fi is on.
+A dial set up for the phone (`harness dial phone on`) is in the phone mode, not in Wi-Fi mode: only one of
+them is on at a time, and `harness dial wifi on` or a new `harness dial wifi set` turns the phone mode off.
 
 ## Long idle on the battery
 

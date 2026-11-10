@@ -156,8 +156,13 @@ for fn in ('render_phone', 'render_passkey', 'render_forget'):
         assert inside(233 - n * MONO28[0] // 2, y, 233 + n * MONO28[0] // 2, y + MONO28[1]), f'{fn} {label}: leaves the circle'
     for x, y, w, rows in re.findall(r'ui_wrap\(f, FACE_CX\((\d+)\), (\d+), (\d+), (\d+),', b):
         assert inside(233 - int(w) // 2, int(y), 233 + int(w) // 2, int(y) + 28 * int(rows)), f'{fn}: a wrapped block leaves the circle'
-assert inside(233 - 140, 168, 233 + 140, 168 + 59), 'the number: seven glyphs of Inter 44 are under 280 px (digits are about 27 px), 59 px tall'
-assert re.search(r'ht_text\(f, \(HT_WIDTH - w\) / 2, 168, w, big, FG, BG, code\)', passkey) and 'ht_measure(big, code)' in passkey
+assert inside(233 - 140, 150, 233 + 140, 150 + 59), 'the number: seven glyphs of Inter 44 are under 280 px (digits are about 27 px), 59 px tall'
+assert re.search(r'ht_text\(f, \(HT_WIDTH - w\) / 2, 150, w, big, FG, BG, code\)', passkey) and 'ht_measure(big, code)' in passkey
+# Review M2 (2026-11-10): the auto-opened window can show a number the user did not start; the screen says when it is theirs. Two rows of the 12 x 28 mono face, between the question and the buttons.
+assert 'ui_wrap(f, FACE_CX(336), 256, 336, 2, 0, &ht_mono_20, DIM, "Press No unless your phone shows this number");' in passkey
+assert len("Press No unless your phone shows this number") <= 2 * (336 // 12), 'two rows of 28 cells'
+assert 256 + 2 * 28 <= 340 - 14 + 2, 'the text ends where the hit rects of [yes] and [no] begin'
+assert 214 + 38 <= 256 and 150 + 59 <= 214, 'no overlap with the question or the number'
 
 # ── the text helpers, compiled ──────────────────────────────────────────────────────────────────────
 helpers = body(raw, 'phone_code_text'), body(raw, 'phone_left_text')
