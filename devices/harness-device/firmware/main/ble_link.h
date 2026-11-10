@@ -16,7 +16,7 @@
 //   advertise (50 ms interval, name and UUID of the spec) while ADVERTISING; stop after 30 s with nobody (NOT_FOUND, "Phone not found", no restart by
 //   itself); ask for DLE 251 one second after a connect and NEVER for the 2M PHY (finding FB1); drop a link that is not encrypted after 3 s (the deadline waits while
 //   a number is on show, and while the pairing window is open for at most 30 s from the connect: ble_enc_hold_update); ask a peer to encrypt only while the window is open or for a bonded peer; open the pairing window by
-//   itself when the link starts with no bond stored; accept the L2CAP channel only from an encrypted, bonded peer (ble_accept_check) unless this build has BLE_DEV_ALLOW_UNBONDED; run the TLS handshake when the
+//   itself when the link starts with no bond stored (and at each connect while it is closed and no bond is stored); keep advertising while it is open; accept the L2CAP channel only from an encrypted, bonded peer (ble_accept_check) unless this build has BLE_DEV_ALLOW_UNBONDED; run the TLS handshake when the
 //   channel opens (5 s); on three alerts in a row close the link and wait out the refused back-off before advertising again.
 //
 // BLE_DEV_ALLOW_UNBONDED=1 is a build flag for the walking skeleton (plan question QQ5): TLS-PSK still authenticates both ends, and the link is
@@ -39,8 +39,8 @@ const cable_xport_t *ble_link_xport(void);
 // The link state, for the Link screen and the logs. BLE_ST_OFF when not started. Cheap; any task.
 ble_state_t ble_link_state(void);
 // Open (true) or close (false) the pairing window: new bonds are made only inside it, for BLE_PAIR_WINDOW_MS (120 s). Closed by default; the link
-// opens it by itself ONCE, when the phone mode starts with no bond stored (not at every connect), and the Phone screen's [pair] button opens it. No-op when the
-// phone mode is not running. Any task.
+// opens it by itself when the phone mode starts with no bond stored, and again at every connect while it is closed and no bond is stored (item 4a), and the Phone
+// screen's [pair] button opens it. While it is open the dial keeps advertising. No-op when the phone mode is not running. Any task.
 void ble_link_pairing_window(bool open);
 // The pairing screen's three calls (B5; the screen itself is a separate task). The number: true while a pairing by numeric comparison is waiting for Yes or
 // No, with the 6 digits to show (the window is open, spec section 4). The answer: Yes accepts, No rejects and ends the link, and closes the window unless the phone mode is on with no bond stored (then the window runs to its

@@ -246,11 +246,15 @@ static void note_security(uint16_t conn)
     if (trusted || (DEV_UNBONDED && sec.encrypted)) post(BLE_EV_ENCRYPTED);
 }
 
-// Does the bond store hold this peer? (Fix B: with the pairing window closed the dial asks only a bonded peer to encrypt; with it open it asks any peer.) A read of the host's own
-// copy of the keys it gave away (the same object type ble_link_bond_count counts); it writes nothing. An address the stack has not resolved to an identity
-// address reads as "not bonded": that peer then starts encryption itself, as a phone with a stored key does.
-static bool peer_bonded(uint16_t conn)
+// May this peer hold a bond? (Fix B: with the pairing window closed the dial asks only a bonded peer to encrypt; with it open it asks any peer.) A read of the host's
+// own copy of the keys it gave away (the same object type ble_link_bond_count counts); it writes nothing. `d.peer_id_addr` is the IDENTITY address when the
+// controller resolved the rotating address of the phone (the stored identity key is restored to the controller at start and distributed in a pairing: the ID key
+// bits of sm_our/their_key_dist, and CONFIG_BT_NIMBLE_HS_PVCY=y, the IDF default), so a bonded phone that reconnects with a fresh private address is found by it
+// (*by_identity). When it is not found, a stored bond and a peer that still shows a resolvable private address (ble_peer_may_hold_bond, item 4d) read as "may
+// be bonded": the dial asks, and the request of a stranger is refused at the number while the window is closed.
+static bool peer_bonded(uint16_t conn, unsigned bonds, bool *by_identity)
 {
+    *by_identity = false;
     struct ble_gap_conn_desc d;
     if (ble_gap_conn_find(conn, &d) != 0) return false;
     struct ble_store_key_sec key;
@@ -258,7 +262,8 @@ static bool peer_bonded(uint16_t conn)
     memset(&key, 0, sizeof key);
     memset(&val, 0, sizeof val);
     key.peer_addr = d.peer_id_addr;
-    return ble_store_read_our_sec(&key, &val) == 0;
+    *by_identity = ble_store_read_our_sec(&key, &val) == 0;
+    return ble_peer_may_hold_bond(*by_identity, bonds, d.peer_ota_addr.type, d.peer_ota_addr.val);
 }
 
 // The bond store is a small fixed list (max_bonds). When it is full, or a write would overflow it, the answer is NO: the stack must not delete the oldest bond to
@@ -287,15 +292,28 @@ static void apply_bonding_policy(void)
     ble_hs_cfg.sm_their_key_dist = open ? (BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID) : 0;
 }
 
+static bool s_window_close_logged = true;   // guarded by s_lock: the last close was logged with its reason (an expiry has none until the link task notices it)
+
+// The one place that opens or closes the window, with the reason in the log (item 4c). Not for the expiry: that closes itself, and the link task logs it.
+static void window_set(bool open, const char *why)
+{
+    state_lock();
+    if (open) {
+        ble_pair_open(&s_pair, now_ms());
+        s_window_close_logged = false;
+    } else {
+        ble_pair_close(&s_pair);
+        s_window_close_logged = true;
+    }
+    state_unlock();
+    apply_bonding_policy();
+    ESP_LOGI(TAG, "pairing window %s: %s", open ? "open" : "closed", why);
+}
+
 void ble_link_pairing_window(bool open)
 {
     if (!s_started) return;
-    state_lock();
-    if (open) ble_pair_open(&s_pair, now_ms());
-    else ble_pair_close(&s_pair);
-    state_unlock();
-    apply_bonding_policy();
-    ESP_LOGI(TAG, "pairing window %s", open ? "open" : "closed");
+    window_set(open, "asked by the Phone screen");
 }
 
 // ── the GATT table (spec sections 1 and 5; B4c) ─────────────────────────────────────────────────────
@@ -439,12 +457,7 @@ static void prompt_settle(int answer)
         close_window = false;
         ESP_LOGI(TAG, "pairing rejected: no bond is stored, so the window stays open to its end");
     }
-    if (close_window) {
-        state_lock();
-        ble_pair_close(&s_pair);
-        state_unlock();
-        apply_bonding_policy();   // the window just closed: bonding is off from now, not at the next tick
-    }
+    if (close_window) window_set(false, "answer: No (or the window or the 30 s prompt ran out)");   // bonding is off from now, not at the next tick
     struct ble_sm_io io;
     memset(&io, 0, sizeof io);
     io.action = BLE_SM_IOACT_NUMCMP;
@@ -499,10 +512,7 @@ unsigned ble_link_bond_count(void)
 static void forget_run(struct ble_npl_event *ev)
 {
     (void)ev;
-    state_lock();
-    ble_pair_close(&s_pair);
-    state_unlock();
-    apply_bonding_policy();
+    window_set(false, "forget");
     prompt_settle(-1);                 // a number on show is rejected: the window is closed
     const int rc = ble_store_clear();  // every bond, once (the store never evicts by itself)
     ESP_LOGI(TAG, "forget: bonds cleared (rc=%d)", rc);
@@ -532,13 +542,23 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             // that is not asked is left alone, and the 3 s deadline and the idle cap drop it. Development build: no bond is asked for, so the link counts as
             // encrypted from the start and the 3 s deadline never fires.
             if (ble_encryption_required(DEV_UNBONDED)) {
-                const bool bonded_peer = peer_bonded(s_conn);
+                // Item 4a: the auto-open is checked again at every connect (the boot-time open may have expired, or a touch may have closed it), before the request
+                // is decided. The bond count is a call into the host, so it is made outside the lock.
+                const unsigned bonds = ble_link_bond_count();
                 state_lock();
+                const bool rearm = ble_pair_rearm_wanted(&s_pair, now_ms(), s_started, bonds);
+                state_unlock();
+                if (rearm) window_set(true, "re-armed at a connect: no bond is stored");
+                bool by_identity = false;
+                const bool bonded_peer = peer_bonded(s_conn, bonds, &by_identity);
+                state_lock();
+                const bool window_open = ble_pair_is_open(&s_pair, now_ms());
                 const bool ask = ble_security_request_wanted(&s_pair, now_ms(), bonded_peer);
                 state_unlock();
                 const int src = ask ? ble_gap_security_initiate(s_conn) : 0;
                 if (src != 0) ESP_LOGW(TAG, "security request failed (rc=%d)", src);
-                if (!ask) ESP_LOGI(TAG, "no security request: the pairing window is closed and the peer is not bonded");
+                ESP_LOGI(TAG, "security request %s: window %s, peer %s (%u bond%s stored)", ask ? "sent" : "NOT sent", window_open ? "open" : "closed",
+                         by_identity ? "bonded (identity match)" : bonded_peer ? "may be bonded (unresolved private address)" : "not bonded", bonds, bonds == 1 ? "" : "s");
             } else {
                 post(BLE_EV_ENCRYPTED);
             }
@@ -769,6 +789,7 @@ static void ble_link_task(void *arg)
     bool refused_seen = false; // AUTH_FAILED already acted on
     uint64_t up_ms = 0;
     uint32_t seen_wake = display_wake_seq();   // the screen's wake counter: a touch or the PWR button moves it
+    bool window_was_open = false;              // for the expiry log line
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(TICK_MS));
         const uint64_t now = now_ms();
@@ -780,6 +801,7 @@ static void ble_link_task(void *arg)
         state_lock();
         const ble_state_t before = s_ble.state;
         ble_enc_hold_update(&s_ble, &s_pair, now, s_prompt.active);   // Fix A: a number on show, or an open window for its first 30 s of this link (review M1), holds the 3 s deadline in SECURING
+        ble_adv_hold_update(&s_ble, &s_pair, now);                    // item 4a: and an open window holds the 30 s advertising timeout in ADVERTISING
         const ble_event_t due = ble_poll(&s_ble, now);
         const bool changed = (due == BLE_EV_ADV_TIMEOUT || due == BLE_EV_ENC_TIMEOUT || due == BLE_EV_IDLE_TIMEOUT || due == BLE_EV_START) && ble_post(&s_ble, due, now);
         state_unlock();
@@ -819,6 +841,14 @@ static void ble_link_task(void *arg)
             s_adv_not_before_ms = now + BLE_COOLDOWN_MS;
         }
 
+        // Item 4c: a window that ran out by itself is logged here (every other close logs its own reason in window_set).
+        state_lock();
+        const bool window_now = ble_pair_is_open(&s_pair, now);
+        const bool window_expired = window_was_open && !window_now && !s_window_close_logged;
+        if (window_expired) s_window_close_logged = true;
+        state_unlock();
+        window_was_open = window_now;
+        if (window_expired) ESP_LOGI(TAG, "pairing window closed: expired (%u ms)", (unsigned)BLE_PAIR_WINDOW_MS);
         apply_bonding_policy();   // the pairing window opens and closes the bonding switch
         prompt_settle(-1);        // the window ending under a number on the screen rejects the pairing
 
@@ -1008,12 +1038,13 @@ static void ble_init_task(void *arg)
         ble_init(&s_ble);
         s_started = true;
         post(BLE_EV_START);
-        // No touch path reaches Settings > Phone > Pair on a real dial, so with no bond stored the window opens by itself, once, when the phone mode starts (it starts
-        // only after an unplug: a replug and an unplug make a new window). It is not opened again at each connect; a No leaves it open to its end (review L3).
-        // Numeric comparison and the user's Yes on the dial stay required. With a bond stored it stays shut.
-        if (ble_pair_auto_open_wanted(s_started, ble_link_bond_count())) {
-            ble_link_pairing_window(true);
-            ESP_LOGI(TAG, "no bond stored: the pairing window opened by itself (%u ms)", (unsigned)BLE_PAIR_WINDOW_MS);
+        // No touch path reaches Settings > Phone > Pair on a real dial, so with no bond stored the window opens by itself when the phone mode starts (it starts
+        // only after an unplug), and again at every connect while it is closed and no bond is stored (item 4a, in gap_event). A No leaves it open to its end
+        // (review L3). Numeric comparison and the user's Yes on the dial stay required. With a bond stored it stays shut.
+        const unsigned bonds_at_start = ble_link_bond_count();
+        ESP_LOGI(TAG, "BLE start: %u bond%s stored", bonds_at_start, bonds_at_start == 1 ? "" : "s");   // item 4c: the count was never logged
+        if (ble_pair_auto_open_wanted(s_started, bonds_at_start)) {
+            window_set(true, "auto at start: no bond is stored");
         }
 #if TASK_STACK_PSRAM_NET
         const BaseType_t task_ok = task_create_psram(ble_link_task, "ble_link", BLE_LINK_STACK, NULL, 4, NULL, tskNO_AFFINITY);

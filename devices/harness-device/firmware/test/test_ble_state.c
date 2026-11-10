@@ -767,6 +767,101 @@ static void test_a_no_leaves_the_auto_opened_window_open(void)
     CHECK(ble_numcmp_request(&w, 1000 + BLE_PAIR_WINDOW_MS) == BLE_NUMCMP_REFUSE);   // and the original 120.0 s still ends it
 }
 
+// Item 4a (2026-11-10): the auto-open is not a one-shot boot event. At each connect with phone mode on, no bond stored and the window closed (never opened, expired,
+// closed by a touch) it opens again; with the window already open it is left alone (a connect does not extend it); with a bond stored it never does.
+static void test_the_window_is_rearmed_at_a_connect(void)
+{
+    ble_pair_window_t w;
+    ble_pair_init(&w);
+    CHECK(ble_pair_rearm_wanted(&w, 1000, true, 0));                                   // never opened
+    ble_pair_open(&w, 1000);
+    CHECK(!ble_pair_rearm_wanted(&w, 1000 + BLE_PAIR_WINDOW_MS - 1, true, 0));         // open: left alone, not extended
+    CHECK(ble_pair_rearm_wanted(&w, 1000 + BLE_PAIR_WINDOW_MS, true, 0));              // expired: opens again
+    ble_pair_close(&w);
+    CHECK(ble_pair_rearm_wanted(&w, 5000, true, 0));                                   // closed by hand (a touch): opens again at the next connect
+    CHECK(!ble_pair_rearm_wanted(&w, 5000, true, 1) && !ble_pair_rearm_wanted(&w, 5000, true, 2));   // a bond stored: never
+    CHECK(!ble_pair_rearm_wanted(&w, 5000, false, 0));                                 // phone mode off: never
+    CHECK(!ble_pair_rearm_wanted(NULL, 5000, true, 1) && ble_pair_rearm_wanted(NULL, 5000, true, 0));   // no window object reads as closed
+    // what it opens is the ordinary 120.0 s window, and the per-link hold cap still applies inside it
+    ble_t b;
+    ble_init(&b);
+    ble_post(&b, BLE_EV_START, 0);
+    ble_post(&b, BLE_EV_LINK_UP, 200000);
+    if (ble_pair_rearm_wanted(&w, 200000, true, 0)) ble_pair_open(&w, 200000);
+    ble_enc_hold_update(&b, &w, 200000 + BLE_ENC_HOLD_MAX_MS - 1, false);
+    CHECK(b.prompting);
+    ble_enc_hold_update(&b, &w, 200000 + BLE_ENC_HOLD_MAX_MS, false);
+    CHECK(!b.prompting && ble_poll(&b, 200000 + BLE_ENC_HOLD_MAX_MS) == BLE_EV_ENC_TIMEOUT);
+}
+
+// Item 4a: advertising goes on while the pairing window is open (the 30 s ADV timeout would end it long before the 120 s window), and the timeout is due
+// at once when the window closes.
+static void test_advertising_goes_on_while_the_window_is_open(void)
+{
+    ble_t b;
+    ble_pair_window_t w;
+    ble_init(&b);
+    ble_pair_init(&w);
+    ble_post(&b, BLE_EV_START, 0);
+    ble_pair_open(&w, 0);
+    ble_adv_hold_update(&b, &w, 1000);
+    CHECK(b.adv_hold && ble_poll(&b, BLE_ADV_TIMEOUT_MS) == BLE_EV_NONE);              // 30 s: still on the air
+    ble_adv_hold_update(&b, &w, BLE_PAIR_WINDOW_MS - 1);
+    CHECK(b.adv_hold && ble_poll(&b, BLE_PAIR_WINDOW_MS - 1) == BLE_EV_NONE);
+    ble_adv_hold_update(&b, &w, BLE_PAIR_WINDOW_MS);                                   // the window ends: the timeout is due
+    CHECK(!b.adv_hold && ble_poll(&b, BLE_PAIR_WINDOW_MS) == BLE_EV_ADV_TIMEOUT);
+    // closed by hand: due at once
+    ble_init(&b);
+    ble_post(&b, BLE_EV_START, 0);
+    ble_pair_open(&w, 0);
+    ble_adv_hold_update(&b, &w, 40000);
+    CHECK(ble_poll(&b, 40000) == BLE_EV_NONE);
+    ble_pair_close(&w);
+    ble_adv_hold_update(&b, &w, 41000);
+    CHECK(ble_poll(&b, 41000) == BLE_EV_ADV_TIMEOUT);
+    // no window: the old 30 s rule exactly
+    ble_init(&b);
+    ble_pair_init(&w);
+    ble_post(&b, BLE_EV_START, 0);
+    ble_adv_hold_update(&b, &w, BLE_ADV_TIMEOUT_MS - 1);
+    CHECK(ble_poll(&b, BLE_ADV_TIMEOUT_MS - 1) == BLE_EV_NONE && ble_poll(&b, BLE_ADV_TIMEOUT_MS) == BLE_EV_ADV_TIMEOUT);
+    // the hold is for ADVERTISING only, and a change of state clears it; NULL is ignored
+    ble_init(&b);
+    ble_pair_open(&w, 0);
+    ble_adv_hold_update(&b, &w, 10);
+    CHECK(!b.adv_hold);                                                                // OFF
+    ble_post(&b, BLE_EV_START, 0);
+    ble_adv_hold_update(&b, &w, 10);
+    CHECK(b.adv_hold);
+    ble_post(&b, BLE_EV_LINK_UP, 20);
+    CHECK(!b.adv_hold);                                                                // SECURING: no advertising hold
+    ble_adv_hold_update(&b, &w, 30);
+    CHECK(!b.adv_hold);
+    ble_adv_hold_update(NULL, &w, 30);
+    ble_adv_hold_update(&b, NULL, 30);
+    CHECK(!b.adv_hold);
+}
+
+// Item 4d: whether a connecting peer may hold a bond. The stack resolves a bonded phone's rotating address through the stored identity key and the lookup by
+// identity address finds the bond (found = true). When it does not (found = false) and the peer shows a resolvable private address (random type, top two bits
+// 01) while a bond is stored, the dial asks anyway: a bonded phone whose address the stack could not resolve then encrypts with its stored key; a stranger gets
+// a request that the closed window refuses at the number. No bond stored: nothing to match, no request.
+static void test_a_peer_that_may_hold_a_bond(void)
+{
+    const uint8_t rpa[6] = {1, 2, 3, 4, 5, 0x6A};         // little endian: the last byte is the top byte; 0x6A = 01...... : resolvable private
+    const uint8_t stat[6] = {1, 2, 3, 4, 5, 0xC1};        // 11......: static random
+    const uint8_t nrpa[6] = {1, 2, 3, 4, 5, 0x3F};        // 00......: non-resolvable private
+    CHECK(ble_peer_may_hold_bond(true, 1, 1, stat));      // found: yes, whatever it looks like
+    CHECK(ble_peer_may_hold_bond(true, 0, 0, NULL));
+    CHECK(ble_peer_may_hold_bond(false, 1, 1, rpa));      // not found, RPA, a bond stored: possibly
+    CHECK(ble_peer_may_hold_bond(false, 2, 1, rpa));
+    CHECK(!ble_peer_may_hold_bond(false, 0, 1, rpa));     // no bond stored
+    CHECK(!ble_peer_may_hold_bond(false, 1, 0, rpa));     // public address type: an address is an address, no resolving
+    CHECK(!ble_peer_may_hold_bond(false, 1, 1, stat) && !ble_peer_may_hold_bond(false, 1, 1, nrpa));
+    CHECK(!ble_peer_may_hold_bond(false, 1, 1, NULL));
+    CHECK(!ble_peer_may_hold_bond(false, 1, 2, rpa) && !ble_peer_may_hold_bond(false, 1, 3, rpa));   // the identity types are already identities
+}
+
 // Fix A: while the window is open and the link is SECURING, the 3 s encryption deadline waits (a person must answer a consent prompt or compare a number on
 // the phone). Review M1 (2026-11-10): the wait is capped at BLE_ENC_HOLD_MAX_MS (30 s) from the connect, per link, unless a number is on the screen: a silent
 // peer cannot hold the one link for the whole 120 s window.
@@ -923,6 +1018,9 @@ int main(int argc, char **argv)
     test_the_pair_window_opens_by_itself_only_when_unbonded();
     test_the_encryption_deadline_waits_while_the_window_is_open();
     test_a_no_leaves_the_auto_opened_window_open();
+    test_the_window_is_rearmed_at_a_connect();
+    test_advertising_goes_on_while_the_window_is_open();
+    test_a_peer_that_may_hold_a_bond();
     test_the_security_request_is_gated();
     printf("test_ble_state: %u checks PASS\n", checks);
     return 0;

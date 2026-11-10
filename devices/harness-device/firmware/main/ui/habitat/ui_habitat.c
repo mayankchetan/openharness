@@ -601,6 +601,7 @@ static void input_cancel(void)
     if (s.touch_down) s.touch_cancelled = true;
     s.pressed = -1;
 }
+static bool user_nav;   // display lock: true only while habitat_touch runs, so a view change that is a finger's doing can be told from a boot, refresh or desktop one
 static void view(view_t v)
 {
     // A swipe, desktop refresh or late reply must not hide a live microphone. Only an
@@ -616,7 +617,12 @@ static void view(view_t v)
     if (s.view == INBOX && v != INBOX) s.opening_notice[0] = 0;
     input_cancel();
     s.voice_retry_until = 0;
-    if (phone_view(s.view) && !phone_view(v)) phone_leave();   // back, a swipe or a close: the window ends, an unanswered number is a No
+    // Item 4b (2026-11-10): only the user's touch ends the pairing window, and answers No to a number on show. A boot landing (ui_land_after_reload), a refresh or a
+    // desktop message that moves the view off the Phone screen leaves the window and the offer alone: phone_poll brings the Phone screen back while they last.
+    if (phone_view(s.view) && !phone_view(v)) {
+        if (user_nav) phone_leave();   // back, a swipe or a close
+        else ESP_LOGI("habitat", "phone: the view moved off the Phone screen without a touch; the pairing window is left as it is");
+    }
     s.view = v;
     s.error_until = 0;   // a timed error view belongs to ui_turn_error alone; any move off or onto MESSAGE ends it
     s.offset = 0;
@@ -2481,6 +2487,7 @@ static void phone_left_text(uint32_t seconds, char *out, size_t cap)
 }
 static void phone_leave(void)
 {
+    ESP_LOGI("habitat", "phone: the user left the Phone screen; the pairing window ends and an unanswered number is a No");
     if (s.view == PASSKEY) ble_link_pair_answer(false);   // an unanswered number is a No (it also closes the window and ends the link)
     if (ble_link_pairing_busy()) ble_link_pairing_window(false);
     memset(&phone_ui, 0, sizeof phone_ui);
@@ -2505,6 +2512,7 @@ static void phone_poll(void)
     bool window = left > 0;
     // The bond the user opened the window for is made: the window ends (a second phone is another tap on Pair).
     if (window && phone_ui.known && bonds > phone_ui.bonds) {
+        ESP_LOGI("habitat", "phone: a bond was made; the pairing window ends");
         ble_link_pairing_window(false);
         window = false;
     }
@@ -3676,6 +3684,7 @@ static void worker(void *unused)
         }
     }
 }
+static void user_nav_end(bool *scope) { (void)scope; user_nav = false; }
 void habitat_touch(bool down, int x, int y, uint32_t now)
 {
 #ifdef DEVICE_CREATURE_GALLERY
@@ -3687,6 +3696,8 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
 #endif
     if (!s.ready)
         return;
+    // The caller holds the display lock (touch_habitat.c): every view() until this function returns, by any of its returns, is the user's (item 4b).
+    bool user_nav_scope __attribute__((cleanup(user_nav_end))) = user_nav = true;
     bool surface = s.view == HOME || s.view == AGENT;
     if (s.touch_down && !s.touch_cancelled) {
         // Classify this sample before the hold deadline. A delayed MOVE/UP

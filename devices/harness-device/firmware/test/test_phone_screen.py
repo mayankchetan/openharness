@@ -85,7 +85,18 @@ leave = body(raw, 'phone_leave')
 assert 'if (s.view == PASSKEY) ble_link_pair_answer(false);' in leave and 'ble_link_pairing_window(false)' in leave and 'memset(&phone_ui, 0, sizeof phone_ui)' in leave
 assert leave.index('ble_link_pair_answer(false)') < leave.index('ble_link_pairing_window(false)') < leave.index('memset'), 'No first (it needs the view), then the window, then forget the number'
 view_fn = body(raw, 'view')
-assert re.search(r'if \(phone_view\(s\.view\) && !phone_view\(v\)\) phone_leave\(\);[^\n]*\n\s*s\.view = v;', view_fn), 'every way out of the three views closes the window'
+# Item 4b (2026-11-10): only a TOUCH ends the window. user_nav is true exactly while habitat_touch runs (a cleanup-scoped flag, so every return clears it); a boot
+# landing (ui_land_after_reload), a refresh or a desktop message that moves the view leaves the window and the offer alone, and phone_poll brings the screen back.
+assert re.search(r'if \(phone_view\(s\.view\) && !phone_view\(v\)\) \{\s*if \(user_nav\) phone_leave\(\);[^\n]*\n\s*else ESP_LOGI\("habitat", "phone: the view moved off the Phone screen without a touch;[^\n]*\n\s*\}\s*s\.view = v;', view_fn), 'only a touch closes the window'
+assert 'phone_leave()' not in view_fn.replace('if (user_nav) phone_leave();', ''), 'view() has no other path to phone_leave'
+assert len(re.findall(r'\bphone_leave\(', code('ui/habitat/ui_habitat.c'))) == 3, 'declaration, definition and the one call in view()'
+touch_fn = body(raw, 'habitat_touch')
+assert re.search(r'bool user_nav_scope __attribute__\(\(cleanup\(user_nav_end\)\)\) = user_nav = true;', touch_fn), 'the flag is set in habitat_touch and cleared by the cleanup at every return'
+assert 'static void user_nav_end(bool *scope) { (void)scope; user_nav = false; }' in raw and 'static bool user_nav;' in raw
+assert len(re.findall(r'\buser_nav = true\b', code('ui/habitat/ui_habitat.c'))) == 1, 'nothing but habitat_touch sets it'
+land = body(raw, 'ui_land_after_reload')
+assert 'phone_leave' not in land and 'user_nav' not in land, 'the boot landing is not the user'
+assert 'phone: the user left the Phone screen' in body(raw, 'phone_leave'), 'a close by the user says so in the log (item 4c)'
 assert 'case FORGET:' in body(raw, 'ui_mode_switch_busy'), 'the question holds the mode switch like the stop question'
 
 # ── 4. the number ───────────────────────────────────────────────────────────────────────────────────

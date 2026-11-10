@@ -77,12 +77,18 @@ contract.
 
 - Pairing: LE Secure Connections, numeric comparison. The dial is DisplayYesNo and shows a 6-digit number with Yes and No.
   Pairing is allowed only inside the window the user opens in Settings (`pair_window_ms` = 120000 ms). A dial has no touch path
-  to Settings, so the dial also opens the same window by itself, once, when the phone mode starts (after an unplug) with no bond
-  stored, and shows the Phone screen with the countdown; with a bond stored it does not. It is not opened again at each connect.
-  The number and the user's Yes on the dial stay required. The number screen says "Press No unless your phone shows this
+  to Settings, so the dial also opens the same window by itself when the phone mode starts (after an unplug) with no bond
+  stored, and shows the Phone screen with the countdown, and again at every connect while the window is closed (expired, or closed
+  by a touch) and no bond is stored; with a bond stored it does not. An open window is not extended by a connect. While the window
+  is open the dial keeps advertising (the 30 s advertising timeout waits, and is due at once when the window ends). Only the user
+  closes an auto-opened window early: a touch that leaves the Phone screen, Forget, or a No with a bond stored. A boot landing,
+  a refresh or a desktop message that moves the view does not. The security request of the dial (below) is the only trigger of a
+  pairing from the phone, so a closed window means no request. The number and the user's Yes on the dial stay required. The number screen says "Press No unless your phone shows this
   number", because an auto-opened window can show a number nobody started. A No (or a pairing the phone ends) ends that link;
   with the phone mode on and no bond stored the window stays open to its original end, so the phone can try again, and with a
-  bond stored (a second phone, opened by hand) a No closes it. Nothing reopens or extends a window.
+  bond stored (a second phone, opened by hand) a No closes it. A No does not reopen or extend a window. The dial logs the bond
+  count at the start, every window open and close with its reason (auto at start, re-armed at a connect, Phone screen, user left
+  the screen, answer, forget, expired), and every security request with the reason it was sent or not.
 - The channel is accepted only on a link that is encrypted, bonded and AUTHENTICATED (numeric comparison, not Just Works: a phone
   that says "no input, no output" gets an unauthenticated bond and is refused) with a link key of at least `key_size_min` = 16
   bytes. Otherwise the dial refuses the accept with "insufficient encryption". The dial calls `ble_gap_security_initiate` after connect only while the

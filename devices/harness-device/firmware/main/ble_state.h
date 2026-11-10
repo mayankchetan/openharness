@@ -82,6 +82,7 @@ typedef struct {
     bool          trusted;    // this link is authenticated, bonded and long-keyed (ble_sec_trusted); set by the glue, cleared at every new link
     uint8_t       churn;      // channels of this link that ended without reaching TLS_UP (saturates); cleared by TLS_UP and by a new link
     bool          prompting;  // the pairing number is on the screen (ble_set_prompting): the encryption deadline waits; cleared on any state change and on a new link
+    bool          adv_hold;   // ADVERTISING while the pairing window is open (ble_adv_hold_update): the 30 s advertising timeout waits; cleared on any state change
 } ble_t;
 
 void ble_init(ble_t *b);   // OFF, zeroed
@@ -201,6 +202,19 @@ void ble_enc_hold_update(ble_t *b, const ble_pair_window_t *w, uint64_t now_ms, 
 //    there is no loop), and the phone may try again; a No also ends the link, as before. With a bond stored (a second phone, opened by [pair]) a No closes it.
 //    It is the same condition as the auto-open, kept as its own name so the glue says what it means.
 bool ble_pair_stays_open_after_no(bool phone_mode_on, unsigned bonds);
+//  - Item 4a (2026-11-10): the auto-open is not a one-shot boot event. At each connect the glue asks again: phone mode on, no bond stored and the window NOT open
+//    (never opened, expired, closed by a touch) opens the ordinary 120 s window now. An open window is left alone (a connect does not extend it). Nothing else
+//    changes: the number and the user's Yes stay required, and the per-link hold above caps what a connected peer can hold.
+bool ble_pair_rearm_wanted(const ble_pair_window_t *w, uint64_t now_ms, bool phone_mode_on, unsigned bonds);
+//  - Item 4a: advertising goes on while the window is open. The 30 s advertising timeout (BLE_ADV_TIMEOUT_MS) would end it long before the 120 s window, so a phone
+//    that starts scanning late would find a closed radio and a window nobody can use. In ADVERTISING only, the timeout waits while the window is open; when the
+//    window ends the timeout is due at once. The glue calls this once a tick under its lock, before ble_poll. NULL `b` or `w`: no hold.
+void ble_adv_hold_update(ble_t *b, const ble_pair_window_t *w, uint64_t now_ms);
+//  - Item 4d: may this connecting peer hold a bond? `found` = the stack's lookup by the connection's identity address found one. Otherwise, with a bond stored
+//    (`bonds` > 0) and an address that looks like a resolvable private address (`addr_type` 1 = random, `addr_le` little endian, top two bits of the last byte 01),
+//    the stack may simply not have resolved it: yes, so the dial asks the peer to encrypt with its stored key. Identity types (2, 3), public, static random and
+//    non-resolvable addresses are what they are: no. No bond stored: no.
+bool ble_peer_may_hold_bond(bool found, unsigned bonds, uint8_t addr_type, const uint8_t addr_le[6]);
 //  - Security Request: the dial asks the phone to encrypt (ble_gap_security_initiate, which makes Android raise a consent prompt that nobody can answer in 3 s)
 //    only while the window is open, or for a peer that already has a bond (it gets its stored key back). Any other peer is left alone, and the 3 s deadline and
 //    the idle cap drop it, as before.

@@ -75,6 +75,7 @@ bool ble_post(ble_t *b, ble_event_t event, uint64_t now_ms)
     if (event == BLE_EV_TLS_UP) b->churn = 0;                                                // proven: the peer holds the key
     if (b->state == BLE_ST_CHANNEL_UP && (event == BLE_EV_CHANNEL_CLOSED || event == BLE_EV_TLS_FAIL || event == BLE_EV_TLS_REFUSED) && b->churn < 255) b->churn++;
     b->prompting = false;   // any change of state ends the wait for the number
+    b->adv_hold = false;    // and the advertising hold
     b->state = next;
     b->since_ms = now_ms;
     return true;
@@ -102,6 +103,7 @@ ble_event_t ble_poll(const ble_t *b, uint64_t now_ms)
     uint32_t limit = ble_deadline_ms(b->state);
     if (b->state == BLE_ST_CONNECTED && !b->trusted) limit = BLE_IDLE_CAP_MS;   // only a trusted peer may wait for ever
     if (b->state == BLE_ST_SECURING && b->prompting) return BLE_EV_NONE;          // the number is on the screen: the person is comparing it (B5)
+    if (b->state == BLE_ST_ADVERTISING && b->adv_hold) return BLE_EV_NONE;        // the pairing window is open: stay on the air (item 4a)
     if (limit == 0 || now_ms < b->since_ms || now_ms - b->since_ms < limit) return BLE_EV_NONE;
     switch (b->state) {
     case BLE_ST_ADVERTISING: return BLE_EV_ADV_TIMEOUT;
@@ -220,6 +222,24 @@ void ble_set_prompting(ble_t *b, bool prompting)
 bool ble_pair_auto_open_wanted(bool phone_mode_on, unsigned bonds)
 {
     return phone_mode_on && bonds == 0;
+}
+
+bool ble_pair_rearm_wanted(const ble_pair_window_t *w, uint64_t now_ms, bool phone_mode_on, unsigned bonds)
+{
+    return ble_pair_auto_open_wanted(phone_mode_on, bonds) && !ble_pair_is_open(w, now_ms);
+}
+
+void ble_adv_hold_update(ble_t *b, const ble_pair_window_t *w, uint64_t now_ms)
+{
+    if (!b || b->state != BLE_ST_ADVERTISING) return;
+    b->adv_hold = ble_pair_is_open(w, now_ms);
+}
+
+bool ble_peer_may_hold_bond(bool found, unsigned bonds, uint8_t addr_type, const uint8_t addr_le[6])
+{
+    if (found) return true;
+    if (bonds == 0 || addr_type != 1 || !addr_le) return false;
+    return (addr_le[5] & 0xC0) == 0x40;
 }
 
 bool ble_pair_stays_open_after_no(bool phone_mode_on, unsigned bonds)
