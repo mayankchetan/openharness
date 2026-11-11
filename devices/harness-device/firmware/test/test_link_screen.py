@@ -124,18 +124,25 @@ assert '#include "mode_glue.h"' in raw
 # USB while Wi-Fi runs: the same flip, and the glue (mode_switch.c H12) does the rest through the busy gate
 assert 'info.saved && kind == A_LINK_MODE' in work and 'const int next = info.mode == 1 ? 0 : 1;' in work and 'config_net_set_mode(next)' in work
 # the phone mode (wl_mode 2) is never turned into Wi-Fi from here, and every write says what it did (review of 2026-11-10)
-assert re.search(r'if \(info\.mode == 2\) \{\s*ESP_LOGW\("habitat", "link: wl_mode 2 \(phone\) is not changed from the Link screen"\);\s*\} else \{', rawwork), 'mode 2 is left alone and says so'
-assert rawwork.index('info.mode == 2') < rawwork.index('config_net_set_mode(next)'), 'the phone check comes before the write'
+assert re.search(r'if \(info\.mode == 2 \|\| info\.mode == 3\) \{[^\n]*\n\s*ESP_LOGW\("habitat", "link: wl_mode %d \(%s\) is not changed from the Link screen", \(int\)info\.mode, info\.mode == 2 \? "phone" : "auto"\);\s*\} else \{', rawwork), 'mode 2 (phone) and mode 3 (auto) are left alone and say so'
+assert rawwork.index('info.mode == 2 || info.mode == 3') < rawwork.index('config_net_set_mode(next)'), 'the phone check comes before the write'
 assert 'config_net_set_mode(info.mode == 1 ? 0 : 1)' not in rawwork, 'the old flip (2 -> 1) is gone'
 assert re.search(r'ESP_LOGI\("habitat", "link: wl_mode %d -> %d from the Link screen: %s", \(int\)info\.mode, next, ok \? "ok" : "FAILED"\);', rawwork), 'every wl_mode write from the screen logs old, new and the result'
 assert rawwork.count('config_net_set_mode(') == 1 and rawwork.index('config_net_set_mode(next)') < rawwork.index('link: wl_mode %d -> %d')
-assert 'link_ui.phone = info.saved && info.mode == 2;' in rawwork
-assert re.search(r'!\(mode && link_ui\.phone\)\};', rawrender), 'the Link row is not a hit target in the phone mode'
+assert 'link_ui.phone = info.saved && info.mode == 2;' in rawwork and 'link_ui.auto_on = info.saved && info.mode == 3;' in rawwork
+assert re.search(r'!\(mode && \(link_ui\.phone \|\| link_ui\.auto_on\)\)\};', rawrender), 'the Link row is not a hit target in the phone mode or in auto'
 
 # ── 5. what the screen says ─────────────────────────────────────────────────────────────────────────
 labels = re.findall(r'"((?:Link|Keep Wi-Fi)[^"]*)"', rawrender)
-assert sorted(set(labels)) == ['Keep Wi-Fi: off', 'Keep Wi-Fi: on', 'Link: Phone', 'Link: USB only', 'Link: Wi-Fi'], labels
+assert sorted(set(labels)) == ['Keep Wi-Fi: off', 'Keep Wi-Fi: on'], labels
 assert all(len(label) <= 17 for label in labels), 'a row of the mono skin is 17 cells'
+# the mode row comes from net_state_link_label (net_state.c, host-tested in test_net_state.c). Wifi-first work: auto shows the radio that runs, "Link: Auto - Wi-Fi" or
+# "Link: Auto - Phone" (18 characters, the spec's wording; the Focus face sets it in Inter, and the Link screen has no entry point on the dial in v1). The other
+# rows keep the 17-cell limit of the mono skin.
+mode_labels = re.findall(r'"(Link:[^"]*)"', text('net_state.c'))
+assert sorted(set(mode_labels)) == ['Link: Auto - Phone', 'Link: Auto - Wi-Fi', 'Link: Phone', 'Link: USB only', 'Link: Wi-Fi'], mode_labels
+assert all(len(label) <= 17 or label.startswith('Link: Auto - ') for label in mode_labels) and all(len(label) <= 28 for label in mode_labels)
+assert 'net_state_link_label(link_ui.wifi, link_ui.phone, link_ui.auto_on, ble_link_state() != BLE_ST_OFF)' in rawrender
 assert 'net_state_line(net_link_state())' in rawrender
 for banned in ('ssid', 'pass', 'psk', 'key', 'host'):
     assert not re.search(r'\b' + banned, render, re.I), f'render_link mentions {banned}'

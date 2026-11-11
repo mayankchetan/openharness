@@ -246,6 +246,13 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
    "$here/test_battery_rim.c" "$here/../main/battery.c" "$here/../main/ui/habitat/battery_rim.c" \
    "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" -lm
 "$out/test_battery_rim"
+# Wifi-first work (T5): the permanent link icon (4:30 on the glass): run counts, the skip rule, colours, footprint, no pixel shared with the battery rim (every
+# percent, with the number), the notice line or the lower-arc status lines the dial shows; and the wiring and the "no tap to talk" rule as source tests.
+cc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Wno-format-truncation -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" -o "$out/test_link_icon" \
+   "$here/test_link_icon.c" "$here/../main/battery.c" "$here/../main/ui/habitat/battery_rim.c" "$here/../main/ui/habitat/link_icon.c" \
+   "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" "$here/../main/ui/habitat/focus_faces.c" "$here/../main/ui/habitat/lvgl_fonts.c" -lm
+"$out/test_link_icon"
+python3 "$here/test_link_icon_source.py"
 python3 "$here/test_alive_line.py"
 # The battery sleep policy (DEVICE_BATTERY_SLEEP): S0/S1/S2 state machine, PMIC read schedule, poller table, battery screen levels.
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" -o "$out/test_power_policy" \

@@ -101,6 +101,26 @@ static void test_link_screen_line(void)
     CHECK(net_state_line((net_state_t)99) && !strcmp(net_state_line((net_state_t)99), ""));
 }
 
+// Wifi-first work (T5): the Link screen's mode row and the brand screen's phone line. The row is one line of 28 cells (text_in, 336 px of ht_mono_20), the
+// brand screen's dim line at most 24 characters (the caption rule above). Neither says "tap to talk": voice starts with the BOOT button only.
+static void test_link_label_and_phone_caption(void)
+{
+    // (wifi, phone, auto_on, running_phone) -> the row
+    CHECK(!strcmp(net_state_link_label(false, false, true, false), "Link: Auto - Wi-Fi"));
+    CHECK(!strcmp(net_state_link_label(false, false, true, true), "Link: Auto - Phone"));
+    CHECK(!strcmp(net_state_link_label(true, false, true, false), "Link: Auto - Wi-Fi"));   // auto wins over the older flags
+    CHECK(!strcmp(net_state_link_label(false, true, false, true), "Link: Phone"));
+    CHECK(!strcmp(net_state_link_label(true, false, false, false), "Link: Wi-Fi"));
+    CHECK(!strcmp(net_state_link_label(false, false, false, false), "Link: USB only"));
+    for (int bits = 0; bits < 16; bits++) {
+        const char *l = net_state_link_label(bits & 1, bits & 2, bits & 4, bits & 8);
+        CHECK(l && l[0] && strlen(l) <= 28);
+        CHECK(!strstr(l, "ap to talk") && !strstr(l, "ap to speak"));
+    }
+    CHECK(!strcmp(net_state_phone_caption(), "Using phone") && strlen(net_state_phone_caption()) <= 24);
+    CHECK(!strstr(net_state_phone_caption(), "ap to talk"));
+}
+
 static void test_ladder(void)
 {
     static const uint32_t normal[] = { 1000, 2000, 4000, 8000, 16000, 30000, 60000 };
@@ -199,6 +219,7 @@ int main(void)
     test_table();
     test_names_and_captions();
     test_link_screen_line();
+    test_link_label_and_phone_caption();
     test_ladder();
     test_jitter();
     test_sequence();

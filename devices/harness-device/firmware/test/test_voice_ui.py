@@ -63,7 +63,7 @@ static struct {
     int pet_pose, view, voice_return, offset, pressed, active, pane_pos;
     uint32_t error_until;
     uint32_t pet_until, nap_until, voice_retry_until, voice_started, voice_wait_until, voice_generation, voice_question_revision, voice_draft_revision;
-    int voice_question_index, battery_rim_seen;
+    int voice_question_index, battery_rim_seen, link_icon_seen;
     uint32_t battery_wake_seen, battery_pct_until;
     char title[80], message[256], voice_target[64], voice_engine[12], pending_focus[64], pending_machine[64], opening_notice[48];
     struct { bool valid, supported, loading, pending, uncertain; uint32_t revision, deadline; int index; char error[120],speech_error[96],agent[64],token[48]; struct { bool can_text; } item[4]; } q;
@@ -72,6 +72,8 @@ static struct {
 } s;
 static int rim_pct = -1, rim_changes;   // battery_rim_pct(): -1 = hidden (external power); habitat_tick marks the scene dirty when it moves
 static int battery_rim_pct(void) { return rim_pct; }
+static int icon_state;   // link_icon_state(): 0 = no link icon (USB mode), else kind * 2 + session up + 1; habitat_tick marks the scene dirty when it changes (wifi-first work)
+static int link_icon_state(void) { return icon_state; }
 static uint32_t wake_seq;   // display_wake_seq(): moves on every wake from off and every dimmed screen coming back
 uint32_t display_wake_seq(void) { return wake_seq; }
 static uint32_t now;
@@ -284,6 +286,15 @@ int main(void) {
     rim_pct = 79; habitat_tick(); assert(rim_changes == 2 && s.battery_rim_seen == 80);
     rim_pct = -1; habitat_tick(); assert(rim_changes == 3 && s.battery_rim_seen == 0);   // plugged in: the rim goes
     habitat_tick(); assert(rim_changes == 3);
+
+    // The link icon: the tick marks the scene dirty when its kind or the session state changes, and not otherwise.
+    reset(); rim_pct = -1; icon_state = 0; rim_changes = 0; habitat_tick(); assert(rim_changes == 0 && s.link_icon_seen == 0);   // USB mode: nothing
+    icon_state = 3; habitat_tick(); assert(rim_changes == 1 && s.link_icon_seen == 3);       // the Wi-Fi link runs, the session is not up
+    habitat_tick(); habitat_tick(); assert(rim_changes == 1);                                // the same state: no redraw
+    icon_state = 4; habitat_tick(); assert(rim_changes == 2 && s.link_icon_seen == 4);       // the session comes up: the ink changes
+    icon_state = 5; habitat_tick(); assert(rim_changes == 3 && s.link_icon_seen == 5);       // the phone link (after a fallback reboot, a new boot, but the same tick logic)
+    icon_state = 0; habitat_tick(); assert(rim_changes == 4 && s.link_icon_seen == 0);
+    habitat_tick(); assert(rim_changes == 4);
 
     // The percent number: 3 s after each screen wake (from off or back from dim) while on the battery, then gone; every start and end
     // marks the scene dirty (so ht_damage repaints its box), and nothing else does.

@@ -117,3 +117,14 @@ const char *net_state_line(net_state_t state)
     }
     return "";
 }
+
+// The Link screen's mode row (ui_habitat.c render_link): the stored mode and, for auto, which radio runs. 18 characters at most (the row holds 28).
+const char *net_state_link_label(bool wifi, bool phone, bool auto_on, bool running_phone)
+{
+    if (auto_on) return running_phone ? "Link: Auto - Phone" : "Link: Auto - Wi-Fi";   // Wi-Fi first: a dial on the cable shows its next target, Wi-Fi
+    if (phone) return "Link: Phone";
+    return wifi ? "Link: Wi-Fi" : "Link: USB only";
+}
+
+// The brand screen's dim line in a phone boot while the session is not up ("Joining Wi-Fi" is the Wi-Fi equivalent, net_state_caption).
+const char *net_state_phone_caption(void) { return "Using phone"; }

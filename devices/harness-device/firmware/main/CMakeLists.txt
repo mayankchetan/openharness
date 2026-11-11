@@ -95,6 +95,7 @@ set(BOARD_SRCS
     "ui/habitat/lvgl_icons.c"
     "ui/habitat/focus_marks.c"
     "ui/habitat/battery_rim.c"
+    "ui/habitat/link_icon.c"
     "ui/habitat/focus_faces.c"
     "ui/habitat/pets.c"
 )

@@ -16,6 +16,7 @@
 #include "command_face.h"
 #include "theme.h"
 #include "battery_rim.h"
+#include "link_icon.h"
 #include "../../battery.h"
 #include "focus_faces.h"
 #ifdef DEVICE_CREATURE_GALLERY
@@ -280,6 +281,7 @@ static EXT_RAM_BSS_ATTR struct {
     uint32_t character_activity;
     uint8_t status_phase;
     int battery_rim_seen;     // the percent last seen for the rim arc, plus 1; 0 = hidden (habitat_tick marks the scene dirty on a change)
+    int link_icon_seen;       // the link icon as last seen (kind * 2 + up, plus 1; 0 = none): habitat_tick marks the scene dirty on a change
     uint32_t battery_wake_seen;   // display_wake_seq() as habitat_tick last saw it
     uint32_t battery_pct_until;   // ms() when the rim's percent number goes away again; 0 = not shown (3 s after each wake, on battery)
     unsigned bell_unread;     // the bell's count at the last home render, to see a notice arrive
@@ -1081,6 +1083,8 @@ static void center(ht_scene_t *f, int y, const char *t, uint16_t c)
 static void render_brand(ht_scene_t *f)
 {
     const char *net = net_link_status_text();
+    // A phone boot says so while its session is not up ("Joining Wi-Fi" is the Wi-Fi line, net_link_status_text).
+    if (!net && !s.connected && ble_link_state() != BLE_ST_OFF) net = net_state_phone_caption();
     if (character.id == HT_CHARACTER_FOCUS) {
         // The wordmark in Inter Bold 48 on a 50 px line at y 208 (design 2026-10-06, focus-project.html "Connecting").
         const ht_font_t *font = &ht_lv_inter_bold_48.base;
@@ -2442,6 +2446,7 @@ static struct {
     bool provisioned;   // the Wi-Fi settings are whole (config_net_info().saved)
     bool wifi;          // wl_mode is 1: the dial joins Wi-Fi when the cable is out
     bool phone;         // wl_mode is 2: the dial is the phone bridge when the cable is out; this screen does not change it
+    bool auto_on;       // wl_mode is 3: Wi-Fi first, then the phone (harness dial net auto); like 2, this screen does not change it
     bool stay;          // stay_wl
 } link_ui;
 static void render_link(ht_scene_t *f)
@@ -2454,10 +2459,12 @@ static void render_link(ht_scene_t *f)
     }
     for (int row = 0; row < 2; row++) {
         const bool mode = row == 0;
-        const char *label = mode ? (link_ui.phone ? "Link: Phone" : link_ui.wifi ? "Link: Wi-Fi" : "Link: USB only") : (link_ui.stay ? "Keep Wi-Fi: on" : "Keep Wi-Fi: off");
+        // Auto (3) shows the radio that runs (net_state_link_label, 18 characters at most; its words are pinned in net_state.c).
+        const char *label = mode ? net_state_link_label(link_ui.wifi, link_ui.phone, link_ui.auto_on, ble_link_state() != BLE_ST_OFF)
+                                 : (link_ui.stay ? "Keep Wi-Fi: on" : "Keep Wi-Fi: off");
         int y = TAB_TOP + row * TAB_ROW_HEIGHT, hit = s.hit_count++;
         // The phone mode is not a choice of this row (a tap used to turn it into Wi-Fi, review of 2026-11-10): the row shows it and does nothing.
-        s.hits[hit] = (hit_t){{LIST_HIT_X, y, LIST_HIT_W, TAB_ROW_HEIGHT}, mode ? A_LINK_MODE : A_LINK_STAY, 0, !(mode && link_ui.phone)};
+        s.hits[hit] = (hit_t){{LIST_HIT_X, y, LIST_HIT_W, TAB_ROW_HEIGHT}, mode ? A_LINK_MODE : A_LINK_STAY, 0, !(mode && (link_ui.phone || link_ui.auto_on))};
         if (focus_skin()) {   // Inter, centred in the row it is tapped in
             const ht_font_t *font = focus_face_for(UI_FONT);
             focus_put(f, LIST_HIT_X, y + 14 + (UI_FONT->height - font->height) / 2, LIST_HIT_W, font,
@@ -2602,6 +2609,28 @@ static void render_battery_rim(ht_scene_t *f)
                                       color(HT_THEME_RIM_TEXT_BG)};
     ht_battery_rim(f, battery_rim_pct(), s.battery_pct_until != 0, &ink);
 }
+/*
+ * THE LINK ICON, last on every screen after the rim (link_icon.h; wifi-first work): a Wi-Fi glyph while the Wi-Fi link runs, a phone glyph while the phone link
+ * runs, nothing in USB mode. Normal ink while the session is up, amber (WARN) while not. The kind is which link task runs (net_link_state() is NET_OFF
+ * unless Wi-Fi mode started; ble_link_state() is BLE_ST_OFF unless the phone mode did), `up` is the session (ui_set_connected). It is a mark, not a control:
+ * no hit area, no text. habitat_tick marks the scene dirty when kind or state changes, so ht_damage repaints its 20 px box only.
+ */
+static ht_link_kind_t link_icon_kind(void)
+{
+    if (net_link_state() != NET_OFF) return HT_LINK_WIFI;
+    if (ble_link_state() != BLE_ST_OFF) return HT_LINK_PHONE;
+    return HT_LINK_NONE;
+}
+static int link_icon_state(void)
+{
+    const ht_link_kind_t kind = link_icon_kind();
+    return kind == HT_LINK_NONE ? 0 : (int)kind * 2 + (s.connected ? 1 : 0) + 1;
+}
+static void render_link_icon(ht_scene_t *f)
+{
+    const ht_link_icon_ink_t ink = {DIM, color(HT_THEME_WARN), color(HT_THEME_RIM_TEXT_BG)};
+    ht_link_icon(f, link_icon_kind(), s.connected, &ink);
+}
 // The automatic mode switch is due and something the user is doing holds it (ui_mode_switch_busy). A dim line low on the glass over any view; it is not a view,
 // so it is not in the busy mask and the switch never waits for its own notice.
 static void render_mode_notice(ht_scene_t *f)
@@ -2729,6 +2758,7 @@ bool habitat_scene_take(ht_scene_t *f)
     }
     if (s.mode_notice) render_mode_notice(f);
     render_battery_rim(f);
+    render_link_icon(f);
     return true;
 }
 
@@ -3488,8 +3518,8 @@ static void link_work(action_kind_t kind)
     config_net_info(&info);
     bool ok = true;
     if (info.saved && kind == A_LINK_MODE) {
-        if (info.mode == 2) {
-            ESP_LOGW("habitat", "link: wl_mode 2 (phone) is not changed from the Link screen");
+        if (info.mode == 2 || info.mode == 3) {   // 3 is auto (Wi-Fi first, then the phone): like the phone mode, set by the computer only
+            ESP_LOGW("habitat", "link: wl_mode %d (%s) is not changed from the Link screen", (int)info.mode, info.mode == 2 ? "phone" : "auto");
         } else {
             const int next = info.mode == 1 ? 0 : 1;
             ok = config_net_set_mode(next) == CFG_NET_OK;
@@ -3504,6 +3534,7 @@ static void link_work(action_kind_t kind)
     link_ui.provisioned = info.saved;
     link_ui.wifi = info.saved && info.mode == 1;
     link_ui.phone = info.saved && info.mode == 2;
+    link_ui.auto_on = info.saved && info.mode == 3;
     link_ui.stay = info.saved && stay;
     change();
     display_unlock();
@@ -4064,6 +4095,8 @@ void habitat_tick(void)
     {   // the battery rim: redraw only when what it shows changes (it appears, goes, or the percent moves)
         const int rim = battery_rim_pct() + 1;
         if (rim != s.battery_rim_seen) { s.battery_rim_seen = rim; change(); }
+        const int icon = link_icon_state();   // the link icon: it appears with the link task, changes colour with the session, never goes before a reboot
+        if (icon != s.link_icon_seen) { s.link_icon_seen = icon; change(); }
         // The percent number: for 3 s after each screen wake (from off, or back from dim) while on the battery. It goes when the time
         // is up or the dial is plugged in; either way the scene is marked dirty so ht_damage repaints the number's box only.
         const uint32_t wakes = display_wake_seq();
