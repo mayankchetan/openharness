@@ -169,6 +169,10 @@ static int test_wifi_attempt(void)
     CHECK(o.target == LA_TARGET_PHONE && o.why == LA_WHY_NO_AP && o.waited_ms == 4000);
     CHECK(la_noap_reason(201) && la_noap_reason(210) && la_noap_reason(211) && la_noap_reason(212));
     CHECK(!la_noap_reason(200) && !la_noap_reason(202) && !la_noap_reason(205) && !la_noap_reason(0) && !la_noap_reason(-1) && !la_noap_reason(213));
+    // the scan count wifi_sta.c keeps: one more for each "no AP" disconnect, back to zero for any other reason, held at 255
+    CHECK(la_noap_next(0, 201) == 1 && la_noap_next(1, 210) == 2 && la_noap_next(2, 211) == 3 && la_noap_next(3, 212) == 4);
+    CHECK(la_noap_next(2, 202) == 0 && la_noap_next(1, 200) == 0 && la_noap_next(1, 4) == 0 && la_noap_next(1, -1) == 0);   // a wrong password, a beacon timeout: not a scan miss
+    CHECK(la_noap_next(255, 201) == 255 && la_noap_next(254, 201) == 255);
     // more scans than the limit still fire (a counter that jumped)
     start(&a, LA_TARGET_WIFI, false, 0, 0, 0);
     o = step(&a, 5000, false, 9, false);

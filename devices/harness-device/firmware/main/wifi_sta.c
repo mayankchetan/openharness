@@ -1,5 +1,6 @@
 #include "wifi_sta.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -13,6 +14,7 @@
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "link_auto.h"
 
 // Not "wifi": that is the tag of the closed Wi-Fi driver, whose level nwifi_start() lowers (see LOG LEVELS in wifi_sta.h).
 static const char *TAG = "nwifi";
@@ -21,6 +23,19 @@ static EventGroupHandle_t s_bits;
 static nwifi_event_cb s_cb;
 static esp_netif_t *s_netif;
 static int64_t s_connect_us;   // when the last nwifi_connect() ran, for ms_to_ip
+
+// "Wi-Fi first, else phone" (link_auto.h): why the last disconnect happened, and how many scans in a row found no access point. Written on the event task only,
+// read by any task (the mode switch's glue); a join zeroes the count.
+static atomic_int s_last_reason = -1;
+static atomic_uint s_noap_scans;
+// The reasons the pure module calls "no access point" are the IDF's (compile fails here if the SDK renames or renumbers one).
+_Static_assert(LA_REASON_NO_AP_FOUND == WIFI_REASON_NO_AP_FOUND, "WIFI_REASON_NO_AP_FOUND");
+_Static_assert(LA_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY == WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY, "WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY");
+_Static_assert(LA_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD == WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD, "WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD");
+_Static_assert(LA_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD == WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD, "WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD");
+
+int nwifi_last_reason(void) { return atomic_load(&s_last_reason); }
+unsigned nwifi_noap_scans(void) { return atomic_load(&s_noap_scans); }
 
 // Runs on the system event task (internal stack, 2,304 B): bits, one log line, one callback. Never the SSID, the password or the AP's address.
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -31,11 +46,15 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             const wifi_event_sta_connected_t *e = data;
             xEventGroupClearBits(s_bits, NWIFI_DISCONNECTED);
             xEventGroupSetBits(s_bits, NWIFI_ASSOCIATED);
+            atomic_store(&s_noap_scans, 0);   // the access point was found
             ESP_LOGI(TAG, "associated channel=%u authmode=%d", (unsigned)e->channel, (int)e->authmode);
         } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
             const wifi_event_sta_disconnected_t *e = data;
             xEventGroupClearBits(s_bits, NWIFI_ASSOCIATED | NWIFI_GOT_IP);
             xEventGroupSetBits(s_bits, NWIFI_DISCONNECTED);
+            // The reason is kept (it was only logged before) and the scans that found no access point are counted in a row; this task is the only writer.
+            atomic_store(&s_last_reason, (int)e->reason);
+            atomic_store(&s_noap_scans, la_noap_next((uint8_t)atomic_load(&s_noap_scans), (int)e->reason));
             ESP_LOGI(TAG, "disconnected reason=%d", (int)e->reason);
             if (s_cb) s_cb(NET_EV_WIFI_DOWN);
         }

@@ -128,6 +128,9 @@ uint32_t la_drop_wait_ms(uint8_t retries);
 // An IDF Wi-Fi disconnect reason that means "no access point found" (WIFI_REASON_NO_AP_FOUND and the three _W_COMPATIBLE_SECURITY, _IN_AUTHMODE_THRESHOLD,
 // _IN_RSSI_THRESHOLD reasons; wifi_sta.c asserts the numbers against the IDF enum).
 bool la_noap_reason(int reason);
+// The count of scans in a row that found no access point after one more Wi-Fi disconnect with `reason`: one more for a "no AP" reason (held at 255), zero
+// for any other reason. wifi_sta.c keeps the count (event task only) and zeroes it at a join.
+uint8_t la_noap_next(uint8_t count, int reason);
 #define LA_REASON_NO_AP_FOUND                       201
 #define LA_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY 210
 #define LA_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD 211

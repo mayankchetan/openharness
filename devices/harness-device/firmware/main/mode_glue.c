@@ -354,7 +354,14 @@ static void sample(mg_world_t *w, uint64_t now)
         w->have_welcome = usb_probe_last_welcome(&w->last_welcome_ms);
         // The link facts of link_auto.h, only while its rules are on. Works = the session is up (the daemon's welcome came); over Wi-Fi the link must be up too
         // (net_state NET_UP: the same test as serve() in net_link.c). Association or an address alone is not enough.
-        if (s_mg.auto_on) w->link_up = cable_client_is_connected() && (s_running != MS_MODE_WIFI || net_link_state() == NET_UP);
+        if (s_mg.auto_on) {
+            w->link_up = cable_client_is_connected() && (s_running != MS_MODE_WIFI || net_link_state() == NET_UP);
+            if (s_running == MS_MODE_WIFI) {   // scans that found no access point, and a TLS alert seen (sticky): Wi-Fi only
+                const unsigned scans = net_link_noap_scans();
+                w->noap_scans = scans > 255u ? 255u : (uint8_t)scans;
+                w->alert_seen = net_link_alert_seen();
+            }
+        }
     }
     w->busy = mode_switch_busy();
     w->asleep = display_is_asleep();

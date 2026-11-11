@@ -65,6 +65,11 @@ bool nwifi_radio_off(void);
 bool nwifi_radio_on(void);
 #endif
 
+// "Wi-Fi first, else phone" (link_auto.h): the reason of the last disconnect (the IDF's wifi_err_reason_t number; -1 before the first), and how many scans in
+// a row found no access point (WIFI_REASON_NO_AP_FOUND and its three security / threshold variants; zeroed by a join, held at 255). Any task; cheap.
+int nwifi_last_reason(void);
+unsigned nwifi_noap_scans(void);
+
 uint32_t nwifi_bits(void);
 // Wait until any bit of `mask` is set or `ms` pass; returns all bits as they are on return.
 uint32_t nwifi_wait(uint32_t mask, uint32_t ms);

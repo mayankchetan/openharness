@@ -55,3 +55,9 @@ bool net_link_radio_waking(void);
 
 // The link state itself (net_state.h), for the Link screen. NET_OFF in USB mode. Cheap; any task.
 net_state_t net_link_state(void);
+
+// "Wi-Fi first, else phone" (link_auto.h; read only by mode_glue.c). net_link_alert_seen(): the daemon has answered a handshake with a TLS alert at least once
+// in this boot (sticky: a wrong key, or a dial the daemon does not know; the state is DAEMON_UNREACHABLE between two refusals, so the state is no test of it).
+// net_link_noap_scans(): scans in a row that found no access point (wifi_sta.h nwifi_noap_scans). Any task; cheap; false / 0 in USB mode.
+bool net_link_alert_seen(void);
+unsigned net_link_noap_scans(void);

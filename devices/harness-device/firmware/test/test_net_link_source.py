@@ -283,5 +283,22 @@ cmake = text('CMakeLists.txt')
 for source in ('cable_xport_tcp.c', 'net_state.c', 'log_ring.c', 'wifi_sta.c', 'net_link.c'):
     assert f'"{source}"' in cmake, source
 
+# ── 8. wifi-first work (T4): the facts the mode switch's glue reads ────────────────────────────────────
+# A TLS alert seen is STICKY for the boot (set in note_open_failure only where the handshake was answered with an alert, never cleared), because the state is
+# DAEMON_UNREACHABLE between two refusals. The no-AP scan count is wifi_sta.c's, counted on the event task, zeroed at a join; the reasons are the IDF's.
+fail = body(net, 'note_open_failure')
+assert 'atomic_store(&s_alert_seen, true)' in fail and fail.index('net_hs_refused(') < fail.index('atomic_store(&s_alert_seen, true)')
+assert len(re.findall(r'atomic_store\(&s_alert_seen', net)) == 1, 's_alert_seen is only ever set'
+assert 'atomic_load(&s_alert_seen)' in body(net, 'net_link_alert_seen') and 'nwifi_noap_scans()' in body(net, 'net_link_noap_scans')
+for name in ('net_link_alert_seen', 'net_link_noap_scans'):
+    assert not FLASH.search(body(net, name)), f'{name} names a flash operation'
+for reason in ('WIFI_REASON_NO_AP_FOUND', 'WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY', 'WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD',
+               'WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD'):
+    assert f'== {reason},' in text('wifi_sta.c'), f'the pure reason number is checked against {reason}'
+handler = body(sta, 'on_event')
+assert 'la_noap_next(' in handler and 'atomic_store(&s_last_reason' in handler and 'atomic_store(&s_noap_scans, 0)' in handler, 'the count is kept, and a join zeroes it'
+assert handler.index('atomic_store(&s_noap_scans, 0)') < handler.index('la_noap_next('), 'the association branch comes before the disconnect branch'
+assert 'esp_wifi_' not in body(sta, 'nwifi_noap_scans') + body(sta, 'nwifi_last_reason'), 'the accessors read two atomics'
+
 print('Wi-Fi mode source rules: log hook queues only, radio code reachable only from net_link_start, '
       'net_init internal / net_link PSRAM with no flash call, W0 radio config, firmware refused off USB PASS')

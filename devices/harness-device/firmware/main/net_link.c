@@ -51,6 +51,7 @@ static const char WHY_RADIO_OFF[] = "wifi off (sleep)";   // serve()'s return va
 #endif
 static unsigned s_links;                   // links established since boot (net_link task only)
 static net_refusal_t s_refusals;           // handshakes in a row that the daemon answered with an alert (net_link task only)
+static atomic_bool s_alert_seen;           // STICKY for this boot: the daemon answered a handshake with an alert at least once (set by note_open_failure, never cleared)
 
 // The only writer of s_state. Safe from the event task and from net_link: a compare-and-swap loop over the pure table.
 static void post(net_event_t event)
@@ -69,6 +70,9 @@ static void post(net_event_t event)
 
 const char *net_link_status_text(void) { return net_state_caption((net_state_t)atomic_load(&s_state), mode_glue_keep_wifi()); }
 net_state_t net_link_state(void) { return (net_state_t)atomic_load(&s_state); }
+// "Wi-Fi first, else phone" (link_auto.h): the facts the mode switch's glue reads. Two atomic loads; no lock, no flash.
+bool net_link_alert_seen(void) { return atomic_load(&s_alert_seen); }
+unsigned net_link_noap_scans(void) { return nwifi_noap_scans(); }
 
 // Tell the screen when the caption changed. net_link calls this between its waits; the event task only sets the flag.
 static void ui_flush(void)
@@ -232,6 +236,7 @@ static void note_open_failure(const cable_xport_t *tls)
     // timeout is an ordinary failed handshake on the 1..60 s ladder.
     const int err = cable_xport_tls_last_error(tls);
     const bool alert = net_hs_refused(err);
+    if (alert) atomic_store(&s_alert_seen, true);   // proof that the daemon is reachable and says no: the phone has the same key, so the mode switch holds Wi-Fi
     const net_event_t ev = net_handshake_event(&s_refusals, alert);
     if (alert) {
         ESP_LOGW(TAG, "handshake answered with an alert (mbedTLS -0x%04X), %u in a row", (unsigned)-err, (unsigned)s_refusals.refusals);

@@ -16,6 +16,12 @@ bool la_noap_reason(int reason)
         || reason == LA_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD || reason == LA_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD;
 }
 
+uint8_t la_noap_next(uint8_t count, int reason)
+{
+    if (!la_noap_reason(reason)) return 0;
+    return count < 255u ? (uint8_t)(count + 1u) : (uint8_t)255u;
+}
+
 const char *la_target_name(la_target_t t)
 {
     switch (t) {
