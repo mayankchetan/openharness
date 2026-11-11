@@ -70,6 +70,11 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main"    -o "$out/test_ble_state" "$here/test_ble_state.c" "$here/../main/ble_state.c" "$here/../main/net_state.c"
 "$out/test_ble_state" "$here/vectors/ble_status.txt"
 python3 "$here/test_ble_state_source.py"
+# Wifi-first work (T1): "Wi-Fi first, else phone" as pure logic: the RTC record (an untrusted reset zeroes it), the Wi-Fi attempt, the phone drop and
+# never-connected waits (0-based retries, guard before the table), the bounds, and a seeded simulation (at most 7 reboots per wake, no stretch over 120 s).
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" -o "$out/test_link_auto" "$here/test_link_auto.c" "$here/../main/link_auto.c"
+"$out/test_link_auto"
+python3 "$here/test_link_auto_source.py"
 # B4b: the BLE transport (ring, credits, all-or-nothing write) against a fake port, under the address and undefined-behaviour sanitizers; the source rules of the link
 cc -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -O1 -g -pthread -fsanitize=address,undefined -DCABLE_XPORT_BLE_WRITE_CAP_MS=300 -I "$here/host_tls" -I "$here/../main" -o "$out/test_cable_xport_ble" "$here/test_cable_xport_ble.c" "$here/../main/cable_xport_ble.c"
 ASAN_OPTIONS=detect_leaks=0 "$out/test_cable_xport_ble"

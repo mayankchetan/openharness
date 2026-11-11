@@ -33,6 +33,7 @@ set(BOARD_SRCS
     "ble_state.c"
     "mode_switch.c"
     "mode_record.c"
+    "link_auto.c"
     "mode_glue_core.c"
     "mode_glue.c"
     "usb_probe_core.c"
