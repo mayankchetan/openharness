@@ -611,7 +611,7 @@ static void focus_face(void)
         // of an agent say the same), and picked afresh when the face comes back.
         f.activity = ""; f.elapsed = 0;
         static const char *const resting[] = {"Let's build it", "Do anything", "What's next?",
-            "Ready when you are", "Tap to talk", "Say the word", "Make it happen", "Start something",
+            "Ready when you are", "Hold the button to talk", "Say the word", "Make it happen", "Start something",
             "Hold to switch tabs", "Tap the name to switch panes"};
         char first[64] = "";
         const char *names[] = {"Payments refactor", "Landing page", "Deploy firmware", "Docs sweep",
@@ -683,11 +683,11 @@ static void focus_face(void)
                 assert(!strcmp(again, said));
             }
             assert(kinds >= 5);
-            // The teaching lines come up more (owner, 2026-10-03): today's "Tap to talk" is listed 10 times of 27,
-            // "Hold to switch tabs" 5, "Tap the name to switch panes" 5, the rest once; the relaxing list "Tap to talk"
+            // The teaching lines come up more (owner, 2026-10-03): today's "Hold the button to talk" (was "Tap to talk" until 2026-11-11) is listed 10 times of 27,
+            // "Hold to switch tabs" 5, "Tap the name to switch panes" 5, the rest once; the relaxing list "Hold the button to talk"
             // 10 of 24, "Hold for tabs" 5, "Tap name for panes" 5, "What's next?", "Your move", "Say the word", "Ask away"
             // once — never twice running.
-            static const char *const relax_lines[] = {"Taptotalk", "Holdfortabs", "Tapnameforpanes", "What'snext?",
+            static const char *const relax_lines[] = {"Holdthebuttontotalk", "Holdfortabs", "Tapnameforpanes", "What'snext?",
                                                       "Yourmove", "Saytheword", "Askaway"};
             int talk = 0, tabs = 0, name = 0, other = 0, each[7] = {0};
             for (int visit = 0; visit < 900; visit++) {
@@ -701,7 +701,7 @@ static void focus_face(void)
                 SAID(scene, said);
                 assert(strcmp(said, last));
                 snprintf(last, sizeof last, "%s", said);
-                if (!strcmp(said, "Taptotalk")) talk++;
+                if (!strcmp(said, "Holdthebuttontotalk")) talk++;
                 else if (!strcmp(said, relaxing ? "Holdfortabs" : "Holdtoswitchtabs")) tabs++;
                 else if (!strcmp(said, relaxing ? "Tapnameforpanes" : "Tapthenametoswitchpanes")) name++;
                 else other++;
@@ -1676,7 +1676,7 @@ static void focus_relaxing(void)
 {
     ht_character_t c = {0};
     assert(ht_character_select(&c, HT_CHARACTER_FOCUS));
-    static const char *const lines[] = {"Tap to talk", "Hold for tabs", "Tap name for panes", "What's next?",
+    static const char *const lines[] = {"Hold the button to talk", "Hold for tabs", "Tap name for panes", "What's next?",
                                         "Your move", "Say the word", "Ask away"};
     static const struct { const char *engine; unsigned shapes, step_ms; bool overlay; } want[] = {
         {"claude", 6, 55, false}, {"codex", 0, 120, true}, {"muse", 8, 100, false}};
@@ -1817,7 +1817,7 @@ static void focus_relaxing(void)
         snprintf(said, sizeof said, "%s%s", sc.runs[8].text, sc.runs[9].text);
         squeeze(said);
         static const char *const today[] = {"Let'sbuildit", "Doanything", "What'snext?", "Readywhenyouare", "Saytheword",
-            "Makeithappen", "Startsomething", "Taptotalk", "Holdtoswitchtabs", "Tapthenametoswitchpanes"};
+            "Makeithappen", "Startsomething", "Holdthebuttontotalk", "Holdtoswitchtabs", "Tapthenametoswitchpanes"};
         bool known = false;
         for (unsigned r = 0; r < 10; r++) known |= !strcmp(said, today[r]);
         assert(known);

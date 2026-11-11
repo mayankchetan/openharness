@@ -5,7 +5,7 @@
 // Plan section 16 (user decisions D1, D3) and 16.1 item 3:
 //   * A TAP (released before BK_HOLD_MS) interrupts the running turn, as the key always did, but now on the RELEASE, because until the key
 //     is up nobody knows whether it is a tap or the start of a hold.
-//   * A HOLD (down for BK_HOLD_MS) starts a voice capture, the same entry the touch gesture uses (ui_voice_start); the RELEASE sends it
+//   * A HOLD (down for BK_HOLD_MS) starts a voice capture (ui_voice_start; touch never starts one, owner 2026-11-11); the RELEASE sends it
 //     (ui_voice_stop). If no capture can start (a turn is running, no link, not a talk screen) the hold is denied and its release is a tap.
 //   * The screen toggle on a BOOT hold is gone WHERE THERE IS A PWR KEY (the dial: the PMIC board). A board without one keeps it (toggle mode,
 //     bk_init_ex): a hold of BK_TOGGLE_MS gives BK_LONG once, the release after it is nothing, and there is no hold-to-talk.

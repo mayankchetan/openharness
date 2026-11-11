@@ -23,8 +23,8 @@
  * ends in "…". The block is centred vertically in a fixed area (y 176..376), so the mark never moves
  * with its length. A question takes the recap's place and look. With no recap, the working line or a
  * resting line ("Let's build it", …) is centred on the glass. The mark stands halfway between the
- * name and what is under it — the recap area's top, or the line. There is no tab pill and no microphone: a tap anywhere
- * on the face talks to the agent, a hold opens the tabs, a tap on the name opens the panes
+ * name and what is under it — the recap area's top, or the line. There is no tab pill and no microphone: voice starts from
+ * the BOOT hold only (owner, 2026-11-11), a hold on the face opens the tabs, a tap on the name opens the panes
  * (ui_habitat.c).
  *
  * Every word is Inter (focus_faces.c, owner 2026-10-02: one font), laid out by ht_lv_label — LVGL's own wrap,
@@ -69,30 +69,30 @@ enum { MARK_SIZE = 56, TITLE_BOTTOM = HT_ARC_Y + HT_ARC_CELL_HEIGHT, COL_X = 41,
  * after a turn, on another agent, back from voice — and never the same line twice running (owner,
  * 2026-10-02). It holds while that face stays up, so a redraw never swaps it. Each fits two lines of
  * inter_36 at EMPTY_W. The lines that teach the dial come up more often (owner, 2026-10-03): a line
- * listed k times is k times as likely — "Tap to talk" 10, "Hold to switch tabs" 5, "Tap the name to
- * switch panes" 5, every other line once.
+ * listed k times is k times as likely — "Hold the button to talk" 10, "Hold to switch tabs" 5, "Tap the name to
+ * switch panes" 5, every other line once. Voice starts only from the BOOT hold (owner, 2026-11-11), so the talk line says so.
  */
-#define TAP_TO_TALK "Tap to talk"
+#define HOLD_TO_TALK "Hold the button to talk"
 #define HOLD_FOR_TABS "Hold to switch tabs"
 #define TAP_THE_NAME "Tap the name to switch panes"
 static const char *const RESTING[] = {
     "Let's build it", "Do anything", "What's next?", "Ready when you are",
     "Say the word", "Make it happen", "Start something",
-    TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK,
-    TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK,
+    HOLD_TO_TALK, HOLD_TO_TALK, HOLD_TO_TALK, HOLD_TO_TALK, HOLD_TO_TALK,
+    HOLD_TO_TALK, HOLD_TO_TALK, HOLD_TO_TALK, HOLD_TO_TALK, HOLD_TO_TALK,
     HOLD_FOR_TABS, HOLD_FOR_TABS, HOLD_FOR_TABS, HOLD_FOR_TABS, HOLD_FOR_TABS,
     TAP_THE_NAME, TAP_THE_NAME, TAP_THE_NAME, TAP_THE_NAME, TAP_THE_NAME,
 };
 /*
  * THE RELAXING FACE'S LINES (owner, 2026-10-09: mockup/relaxing.html): one short line on the lower arc, two or three
- * words, picked the same way — "Tap to talk" 10, "Hold for tabs" 5, "Tap name for panes" 5, every other line once.
- * Each fits the lower arc's 390 px (Tap name for panes, the longest, is 248).
+ * words, picked the same way — "Hold the button to talk" 10, "Hold for tabs" 5, "Tap name for panes" 5, every other line once.
+ * Each must fit the lower arc (test_character.c: ht_arc_measure <= HT_ARC_SPAN for every line in the list).
  */
-#define TAP_TALK "Tap to talk"
+#define HOLD_TALK "Hold the button to talk"
 #define HOLD_TABS "Hold for tabs"
 #define TAP_NAME "Tap name for panes"
 static const char *const RELAXING[] = {
-    TAP_TALK, TAP_TALK, TAP_TALK, TAP_TALK, TAP_TALK, TAP_TALK, TAP_TALK, TAP_TALK, TAP_TALK, TAP_TALK,
+    HOLD_TALK, HOLD_TALK, HOLD_TALK, HOLD_TALK, HOLD_TALK, HOLD_TALK, HOLD_TALK, HOLD_TALK, HOLD_TALK, HOLD_TALK,
     HOLD_TABS, HOLD_TABS, HOLD_TABS, HOLD_TABS, HOLD_TABS,
     TAP_NAME, TAP_NAME, TAP_NAME, TAP_NAME, TAP_NAME,
     "What's next?", "Your move", "Say the word", "Ask away",
@@ -888,7 +888,7 @@ void ht_focus_face(ht_scene_t *s, const ht_character_face_t *f, uint8_t frame, u
     // Resting (no recap, no line of status) the mark stands where a full recap's does (design 2026-10-06, focus-
     // project.html "Rest": "same position as Recap"); a pet is centred over the resting line itself, its capitals'
     // top, like over a recap, and over a working line its capitals too (owner, 2026-10-07: from the full recap's place
-    // it stood 35 px under the name and 66 over "Tap to talk").
+    // it stood 35 px under the name and 66 over "Hold the button to talk").
     int full_cap = RECAP_AREA_Y + (RECAP_AREA_H - RECAP_LINES * RECAP_PITCH) / 2 + RECAP_BASELINE - RECAP_CAP;
     int rest_cap = body_y + ht_pfont(ef)->ascent - EMPTY_CAP;
     // A status of its own ("Try again" after a failed voice turn) is one line in the middle: the mark sizes and sits

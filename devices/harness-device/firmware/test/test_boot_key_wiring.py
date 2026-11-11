@@ -29,12 +29,27 @@ assert 'if (pwr_key && power_take_pwrkey_tap()) screen_toggle("PWR tap");' in ta
 press_case = re.search(r'case BK_PRESS:(.*?)break;', task, re.S)[1]
 assert 'ui_boot_pressed' not in press_case and 'display_wake' in press_case
 
-# ---- the voice entry points are the touch gesture's ----
+# ---- BOOT is the only voice start: touch never starts a capture (owner, 2026-11-11) ----
+# The main-surface start is ui_voice_start, called by the BOOT hold. Its make_action(A_VOICE) is the one such dispatch in the file.
 start = re.search(r'void ui_voice_start\(void\)\n\{.*?^\}', ui, re.M | re.S)[0]
 assert 'dispatch(make_action((hit_t){.action = A_VOICE}))' in start
-gesture = re.search(r'ESP_LOGI\("habitat", "focus touch: start voice"\);.*?dispatch\(make_action\(\(hit_t\)\{\.action = A_VOICE\}\)\);', ui, re.S)
-assert gesture, 'the focus-face touch start that ui_voice_start mirrors'
-assert re.search(r'void ui_voice_stop\(void\)\n\{\n    display_lock\(\);\n    dispatch\(\(action_t\)\{\.kind = A_VOICE_STOP\}\);', ui), 'stop is the gesture tap\'s A_VOICE_STOP'
+assert ui.count('make_action((hit_t){.action = A_VOICE})') == 1, 'a second main-surface voice start (touch) is back'
+assert 'focus touch: start voice' not in ui and 'gesture tap: start voice' not in ui
+# The touch handler never names A_VOICE (A_VOICE_STOP is the touch's finish and is allowed: \bA_VOICE\b does not match it).
+touch = re.search(r'^void habitat_touch\(bool down.*?^\}', ui, re.M | re.S)[0]
+assert not re.search(r'\bA_VOICE\b', touch), 'habitat_touch starts voice'
+assert 'A_VOICE_STOP' in touch and 'gesture tap: finish voice' in touch, 'a tap or a hold on the voice screen still ends the capture'
+# Screen controls that started a capture by touch are dark (no hit), and the draft text and Add to message take no recording.
+for dark in ('"[say]", A_FORM_SAY, 0, false)', '"[find]", A_SELECT_FIND, 0, false)', '"[ find ]", A_SELECT_FIND, 0, false)',
+             '"[again]",A_QUESTION_SAY,0,false)', '"Add to message", A_DRAFT_APPEND, 0, false)',
+             'q->draft[0] ? A_QUESTION_REVIEW : A_QUESTION_SAY,0,q->draft[0] && !s.q.pending)'):
+    assert dark in ui, dark
+assert 'hold for options' in ui and 'tap to re-speak part' not in ui
+assert re.search(r'else if \(a\.kind == A_DRAFT_EDIT \|\| a\.kind == A_DRAFT_APPEND\) \{\n\s+// No recording from a touch', ui), 'a tap on the draft text no longer re-speaks it'
+focus = (main / 'ui/habitat/focus.c').read_text()
+assert '#define HOLD_TO_TALK "Hold the button to talk"' in focus and '#define HOLD_TALK "Hold the button to talk"' in focus
+assert 'Tap to talk' not in focus, 'a resting or relaxing line still tells the user to tap to talk'
+assert re.search(r'void ui_voice_stop\(void\)\n\{\n    display_lock\(\);\n    dispatch\(\(action_t\)\{\.kind = A_VOICE_STOP\}\);', ui), 'stop is the tap and hold on the voice screen: A_VOICE_STOP'
 can = re.search(r'bool ui_voice_can_start\(void\)\n\{.*?^\}', ui, re.M | re.S)[0]
 for needle in ('s.view == HOME || s.view == AGENT', 's.connected', '!s.loading', 'audio_client_active()'):
     assert needle in can, needle

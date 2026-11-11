@@ -21,8 +21,8 @@ static const char *TAG = "ptt";
 // Two keys, two dials (board.h):
 //   • BOOT (GPIO0, both dials), a state machine in boot_key.c:
 //       - a TAP (released within BK_HOLD_MS) interrupts the running turn, on the release;
-//       - a HOLD records: BOOT held for BK_HOLD_MS starts a voice capture through the same entry the touch gesture uses
-//         (ui_voice_start), and the release sends it (ui_voice_stop). If no capture can start (a turn is running, no link, not a
+//       - a HOLD records: BOOT held for BK_HOLD_MS starts a voice capture through ui_voice_start (the only voice start:
+//         touch never starts one, owner 2026-11-11), and the release sends it (ui_voice_stop). If no capture can start (a turn is running, no link, not a
 //         talk screen) the hold is denied and its release is a tap;
 //       - the screen toggle on a BOOT hold is gone where there is a PWR key, which does that; a board without the PMIC keeps it (a hold of
 //         BK_TOGGLE_MS, and then no hold-to-talk);

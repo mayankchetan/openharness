@@ -1786,8 +1786,9 @@ static void render_question(ht_scene_t *f)
      * The choices screen is still one drag away, which is what the position line says.
      */
     control(f, 54, 336,119,"[later]",A_HOME,0,true);
+        // [say] is dark: voice never starts from a touch (owner, 2026-11-11). [draft] still reviews the draft.
         control(f, 184, 336,119,q->draft[0] ? "[draft]" : "[say]",
-                q->draft[0] ? A_QUESTION_REVIEW : A_QUESTION_SAY,0,!s.q.pending);
+                q->draft[0] ? A_QUESTION_REVIEW : A_QUESTION_SAY,0,q->draft[0] && !s.q.pending);
         control(f, 313, 336,102,"[next]",A_QUESTION_CHOICES,0,!s.q.pending);
     } else {
         control(f, 79, 346,153,"[ later ]",A_HOME,0,true);
@@ -1823,7 +1824,7 @@ static void render_answer_review(ht_scene_t *f)
     if (s.q.pending) { center(f, 346, "Waiting...", DIM); return; }
     int footer_y = q->draft[0] ? 332 : 366;
     control(f,q->draft[0] ? 54 : 88,footer_y,102,"[back]",A_QUESTION_BACK,0,true);
-    if (q->draft[0]) control(f,176,footer_y,119,"[again]",A_QUESTION_SAY,0,true);
+    if (q->draft[0]) control(f,176,footer_y,119,"[again]",A_QUESTION_SAY,0,false);   // dark: no voice from a touch (2026-11-11)
     control(f,q->draft[0] ? 313 : 258,footer_y,102,s.q.index+1 < s.q.count ? "[next]" : "[send]",
         A_ANSWER,0,s.connected && !s.q.pending && (q->selected || q->draft[0]));
 }
@@ -2319,10 +2320,10 @@ static void render_selection(ht_scene_t *f)
         s.hits[s.hit_count++] = (hit_t){{53, 151, 360, 184}, A_PET, 0, true};
     }
     if (selection.query[0] && !selection.matches && !selection.pending) {
-        control(f, FACE_CX(192), 349, 192, "[ find ]", A_SELECT_FIND, 0, ht_selection_ready(&selection));
+        control(f, FACE_CX(192), 349, 192, "[ find ]", A_SELECT_FIND, 0, false);   // dark: voice search is not a touch (2026-11-11)
         return;
     }
-    control(f, 46, 332, 102, "[find]", A_SELECT_FIND, 0, ht_selection_ready(&selection));
+    control(f, 46, 332, 102, "[find]", A_SELECT_FIND, 0, false);   // dark: voice search is not a touch (2026-11-11)
     control(f, 165, 332, 119, selection.query[0] ? "[lines]" : selection.extending ? "[range]" : "[line]",
             A_SELECT_EXTEND, 0, ht_selection_ready(&selection) && selection.rows > 0);
     control(f, 301, 332, 119, "[carry]", A_CARRY, 0,
@@ -2347,8 +2348,7 @@ static void render_form(ht_scene_t *f)
     // a full line at the larger interface size. Errors replace the detail.
     if (p->error[0]) ui_wrap(f, FACE_CX(336), 275, 336, 2, 0, UI_FONT, ERROR, p->error);
     control(f, 60, 352, 102, "[back]", A_FORM_BACK, 0, !form.pending || finding);
-    control(f, 173, 352, 85, "[say]", A_FORM_SAY, 0,
-            !form.pending && !form.failed && p->active && p->can_query && !p->busy);
+    control(f, 173, 352, 85, "[say]", A_FORM_SAY, 0, false);   // dark: no voice from a touch (owner, 2026-11-11)
     char action[44];
     snprintf(action, sizeof action, "[%.23s]", form.failed ? "retry" : p->busy ? "wait" :
              form.pending && form.pending_op != HT_FORM_STATE ? "..." : !strcmp(p->action, "check status") ? "check" : p->action[0] ? p->action : "wait");
@@ -2375,7 +2375,7 @@ static void render_draft(ht_scene_t *f)
     else if (!p->can_send) ui_wrap(f, FACE_CX(336), 326, 336, 2, 0, &ht_mono_20, DIM,
         "Some characters cannot display. Re-speak that part.");
     else center(f, 333, draft.pending ? (draft.op == HT_DRAFT_SEND ? "Sending..." : "One moment...") :
-        "tap to re-speak part", DIM);
+        p->locked || draft.failed ? "" : "hold for options", DIM);   // a tap no longer re-speaks the text (2026-11-11)
     bool editable = !draft.pending && !draft.failed && !p->locked;
     s.hits[s.hit_count++] = (hit_t){{49, 139, 368, 151}, A_DRAFT_EDIT, 0, editable};
     control(f, 83, 370, 156, p->locked ? "[close]" : "[discard]", A_DRAFT_DISCARD, 0, !draft.pending);
@@ -2388,7 +2388,7 @@ static void render_draft_options(ht_scene_t *f)
     center(f, 83, "Your draft", FG);
     text(f, FACE_CX(312), 118, 312, draft.page.context, DIM);
     bool editable = !draft.pending && !draft.failed && !draft.page.locked;
-    control(f, FACE_CX(336), 167, 336, "Add to message", A_DRAFT_APPEND, 0, editable);
+    control(f, FACE_CX(336), 167, 336, "Add to message", A_DRAFT_APPEND, 0, false);   // dark: voice is not a touch (2026-11-11)
     control(f, FACE_CX(336), 245, 336, "Undo last edit", A_DRAFT_UNDO, 0, editable && draft.page.can_undo);
     control(f, FACE_CX(336), 323, 336, "Back to draft", A_DRAFT_BACK, 0, true);
     center(f, 380, draft.page.locked ? "Check terminal" : "Nothing sent yet", DIM);
@@ -3004,10 +3004,8 @@ static void dispatch(action_t a)
         if (a.kind == A_DRAFT_OPTIONS) view(DRAFT_OPTIONS);
         else if (a.kind == A_DRAFT_BACK) view(DRAFT);
         else if (a.kind == A_DRAFT_EDIT || a.kind == A_DRAFT_APPEND) {
-            if (draft.failed || draft.page.locked) break;
-            view(DRAFT);
-            a.value = a.kind == A_DRAFT_APPEND ? 6 : 5; a.kind = A_VOICE;
-            ht_gesture_guard(&gesture, ms()); dispatch(a);
+            // No recording from a touch (owner, 2026-11-11): a tap on the text and Add to message start nothing.
+            // A hold on the text opens the options (A_DRAFT_OPTIONS, touch handler).
         } else {
             ht_draft_op_t op = a.kind == A_DRAFT_SEND ? HT_DRAFT_SEND : a.kind == A_DRAFT_DISCARD ? HT_DRAFT_DISCARD :
                 a.kind == A_DRAFT_UNDO ? HT_DRAFT_UNDO : HT_DRAFT_STATE;
@@ -3881,32 +3879,18 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
         } else if (surface && character.id == HT_CHARACTER_FOCUS && pressed_action.kind == A_PET &&
                    !gesture.guarded && dx * dx + dy * dy < 24 * 24 && now - s.touch_started < 650) {
             /*
-             * ON FOCUS A TOUCH ANYWHERE ON THE FACE TALKS (owner, 2026-10-01), and it is a THUMB's
-             * touch, not an idealised tap. ht_gesture_end() calls a contact a tap only inside 12 px
-             * (1.20 mm on this glass) and 350 ms; a real press drifts past both, which is the fault
-             * the old microphone button had (21 presses in 49). So the face answers what a button
-             * answers: a contact that did not scroll, came up within 24 px of where it went down,
-             * and let go before the 650 ms that opens the tabs.
+             * A TOUCH ON THE FACE DOES NOT START VOICE (owner, 2026-11-11). Voice starts only from the
+             * BOOT hold (ptt.c -> ui_voice_start). A swipe on the dial face was read as a tap and
+             * recorded, so this contact is consumed and does nothing else.
              */
             ht_gesture_guard(&gesture, now);
-            if (s.connected && !s.loading && (active() || swarm_mode())) {
-                ESP_LOGI("habitat", "focus touch: start voice");
-                // Built as the old microphone's was: make_action names the agent on the face, and
-                // main-surface voice without a recipient is dropped.
-                dispatch(make_action((hit_t){.action = A_VOICE}));
-            }
         } else if (result == HT_TOUCH_TAP && pressed_action.kind == A_PET &&
                    (surface || s.view == VOICE || s.view == SELECTION)) {
             ht_gesture_guard(&gesture, now);
+            // A tap ends a capture that BOOT started; it never starts one (owner, 2026-11-11).
             if (s.view == VOICE) {
                 ESP_LOGI("habitat", "gesture tap: finish voice");
                 dispatch((action_t){.kind = A_VOICE_STOP});
-            } else if (character.id == HT_CHARACTER_FOCUS && s.view != SELECTION) {
-                // Focus's face answers its touches in the branch above; nothing more here.
-            } else if (s.connected && !s.loading && pressed_action.id[0]) {
-                ESP_LOGI("habitat", "gesture tap: start voice");
-                pressed_action.kind = A_VOICE;
-                dispatch(pressed_action);
             }
         } else if (result == HT_TOUCH_HOLD) {
             if (s.view == VOICE && pressed_action.kind == A_PET && cable_client_supports(CABLE_FEATURE_DRAFT)) {
@@ -6128,7 +6112,7 @@ bool ui_voice_can_start(void)
 void ui_voice_start(void)
 {
     display_lock();
-    // Exactly the touch gesture's start ("focus touch: start voice"): make_action names the agent on the face, or the Lead in a swarm.
+    // The only voice start on the main surface (BOOT hold, ptt.c; touch never starts voice, owner 2026-11-11). make_action names the agent on the face, or the Lead in a swarm.
     if (s.connected && !s.loading && (active() || swarm_mode()))
         dispatch(make_action((hit_t){.action = A_VOICE}));
     display_unlock();

@@ -492,8 +492,7 @@ const char *ui_get_active_session_id(void);
 // Start/stop streaming voice for the active project (called by the physical PTT button
 // or the on-screen mic button). Safe to call from a non-LVGL task.
 void ui_voice_start(void);
-// BOOT hold-to-talk (ptt.c, boot_key.h): true when a capture can start from the BOOT key now, on a surface the touch gesture also
-// starts one from: Home or an agent, connected, loaded, an agent or a Lead to talk to, no capture or upload in flight.
+// BOOT hold-to-talk (ptt.c, boot_key.h): true when a capture can start from the BOOT key now: Home or an agent, connected, loaded, an agent or a Lead to talk to, no capture or upload in flight.
 bool ui_voice_can_start(void);
 // The voice generation: it moves when a capture is queued and when the voice view is closed, so a caller that started a capture can tell later
 // whether it is still the current one (ptt.c, boot_key.h bk_capture_begin).
