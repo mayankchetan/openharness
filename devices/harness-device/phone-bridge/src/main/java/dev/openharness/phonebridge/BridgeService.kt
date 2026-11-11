@@ -116,6 +116,7 @@ class BridgeService : Service() {
         val link = DialLink(this, BuildConfig.DEV_ALLOW_UNBONDED, object : DialLink.Listener {
             override fun onScanning() = update(tag.id, Phase.SCANNING, "scanning for the dial")
             override fun onConnecting(name: String) = update(tag.id, Phase.CONNECTING, "connecting to $name")
+            override fun onPairing() = update(tag.id, Phase.CONNECTING, "pairing: confirm the number on the dial and the phone")
             override fun onChannel(channel: DialChannel) {
                 val id = tag.id
                 main.post { startPump(id, channel) }

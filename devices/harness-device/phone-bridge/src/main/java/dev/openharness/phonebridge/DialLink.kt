@@ -13,7 +13,10 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -42,7 +45,9 @@ class SocketDialChannel(private val socket: BluetoothSocket) : DialChannel {
  * characteristic is not read).
  *
  * `allowUnbonded` is the dev flag: it uses the insecure channel call so M1 can run before pairing exists. Product
- * builds pass false and use the secure call.
+ * builds pass false and use the secure call. Before that call a product build bonds with the dial (BondGate): the
+ * secure call alone does not start a pairing that survives the retry ladder, so the app calls createBond() and waits
+ * for the bond broadcast, up to BondGate.TIMEOUT_MS. It never tears the link down while Android is bonding.
  *
  * The listener may be called on any thread. After stop() no callback reports a failure.
  */
@@ -55,6 +60,9 @@ class DialLink(
     interface Listener {
         fun onScanning()
         fun onConnecting(name: String)
+
+        /** The dial is not bonded yet: Android is pairing and the user must confirm the number. */
+        fun onPairing() {}
         fun onChannel(channel: DialChannel)
         fun onFailed(detail: String)
     }
@@ -72,6 +80,12 @@ class DialLink(
     /** The token of our status writer on the shared publisher, so a late detach cannot drop a newer link's writer. */
     @Volatile private var statusToken: Any? = null
     @Volatile private var scanCallback: ScanCallback? = null
+
+    private val bondGate = BondGate(allowUnbonded)
+    private val bondGateStarted = AtomicBoolean(false)
+    private val bondReceiverOn = AtomicBoolean(false)
+    private var bondReceiver: BroadcastReceiver? = null
+    private val bondTimeout = Runnable { handleBondStep(bondGate.onTimeout()) }
 
     /** The socket while connect() blocks, so stop() can close it and unblock that thread. */
     @Volatile private var connecting: BluetoothSocket? = null
@@ -119,6 +133,7 @@ class DialLink(
     fun stop() {
         if (!stopped.compareAndSet(false, true)) return
         main.removeCallbacks(scanTimeout)
+        endBondWait()
         stopScan()
         try {
             connecting?.close() // unblocks connect() on its thread
@@ -191,15 +206,93 @@ class DialLink(
                 listener.onFailed("service discovery failed, status $status")
                 return
             }
-            if (channelStarted.compareAndSet(false, true)) {
-                Thread({ openChannel(g.device) }, "dial-coc-connect").start()
+            if (!bondGateStarted.compareAndSet(false, true)) return
+            // The dev build has nothing to wait for: it runs inline, as before. A product build moves to the main looper,
+            // where the bond receiver and the timer live.
+            if (allowUnbonded) beginBondGate(g) else main.post { beginBondGate(g) }
+        }
+    }
+
+    /** Main thread. Registers the bond receiver first, then reads the state, so no broadcast is missed. */
+    private fun beginBondGate(g: BluetoothGatt) {
+        if (stopped.get()) return
+        if (!allowUnbonded) registerBondReceiver(g.device)
+        val step = bondGate.start(BondState.fromAndroid(g.device.bondState))
+        if (step == BondStep.StartBond || step == BondStep.Wait) main.postDelayed(bondTimeout, BondGate.TIMEOUT_MS)
+        handleBondStep(step, g)
+    }
+
+    private fun handleBondStep(step: BondStep, g: BluetoothGatt? = gatt) {
+        if (stopped.get() || g == null) return
+        when (step) {
+            BondStep.OpenChannel -> {
+                endBondWait()
+                proceedToChannel(g)
             }
-            // Spec 6.3 rule 8. The characteristic needs an encrypted link, so a dev build that skips pairing writes only to a
-            // dial that is already bonded: a write to an unbonded dial would start a pairing the user did not ask for.
-            if (!allowUnbonded || g.device.bondState == BluetoothDevice.BOND_BONDED) {
-                statusToken = StatusPublisher.shared?.attach { writeStatus(g, it) }
+            BondStep.StartBond -> {
+                listener.onPairing()
+                val started = try {
+                    g.device.createBond()
+                } catch (e: Exception) {
+                    Log.w(TAG, "createBond refused: ${e.javaClass.simpleName}")
+                    false
+                }
+                if (!started) handleBondStep(bondGate.onCreateBondRefused(), g)
+            }
+            BondStep.Wait -> listener.onPairing()
+            is BondStep.Fail -> {
+                endBondWait()
+                Log.w(TAG, "pairing failed")
+                listener.onFailed(step.detail)
             }
         }
+    }
+
+    /** The bond is there (or the dev build skips it): open the channel and attach the status writer. */
+    private fun proceedToChannel(g: BluetoothGatt) {
+        if (channelStarted.compareAndSet(false, true)) {
+            Thread({ openChannel(g.device) }, "dial-coc-connect").start()
+        }
+        // Spec 6.3 rule 8. The characteristic needs an encrypted link, so a dev build that skips pairing writes only to a
+        // dial that is already bonded: a write to an unbonded dial would start a pairing the user did not ask for. A
+        // product build gets here only once bonded.
+        if (!allowUnbonded || g.device.bondState == BluetoothDevice.BOND_BONDED) {
+            statusToken = StatusPublisher.shared?.attach { writeStatus(g, it) }
+        }
+    }
+
+    private fun registerBondReceiver(device: BluetoothDevice) {
+        if (!bondReceiverOn.compareAndSet(false, true)) return
+        val r = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, intent: Intent) {
+                if (intent.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
+                val who = if (Build.VERSION.SDK_INT >= 33) {
+                    intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
+                }
+                if (who?.address != device.address) return
+                val state = BondState.fromAndroid(intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE))
+                handleBondStep(bondGate.onBondChanged(state))
+            }
+        }
+        bondReceiver = r
+        val filter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+        // A protected system broadcast: delivered to a receiver that is not exported.
+        if (Build.VERSION.SDK_INT >= 33) context.registerReceiver(r, filter, Context.RECEIVER_NOT_EXPORTED)
+        else context.registerReceiver(r, filter)
+    }
+
+    /** Stops waiting for a bond: no timer, no receiver. Safe to call twice and from any thread. */
+    private fun endBondWait() {
+        main.removeCallbacks(bondTimeout)
+        if (!bondReceiverOn.compareAndSet(true, false)) return
+        try {
+            bondReceiver?.let { context.unregisterReceiver(it) }
+        } catch (_: Exception) {
+        }
+        bondReceiver = null
     }
 
     /** One write of the relay-status byte. Returns true when the write is out and onCharacteristicWrite will follow. */
