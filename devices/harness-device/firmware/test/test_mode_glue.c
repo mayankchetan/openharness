@@ -80,13 +80,24 @@ typedef struct {
     uint64_t wall;              // wall clock over the whole run, across reboots
     int probe_calls, notice_calls;
     int held_calls; uint32_t held_busy; ms_mode_t held_target; bool held_asleep;   // the held-switch log hook (mg_ops_t.held)
-    char order[32];             // the reboot sequence as letters: L(og) S(eal) B(oot_usb) R(estart); r = restart refused (busy again), U = undo
+    char order[32];             // the reboot sequence as letters: L(og) S(eal) A(link_auto record) B(oot_usb) R(estart); r = restart refused (busy again), U = undo
     bool store_fails;
+
+    // wifi-first work: the link facts, as functions of the uptime of each boot, and what the link_auto ops saw
+    uint64_t wifi_from, wifi_to;    // the Wi-Fi link (up AND the daemon's welcome) is up from this uptime (0 = never) until wifi_to (0 = for ever)
+    uint64_t phone_from, phone_to;  // the same for the phone session
+    uint8_t noap_scans;             // Wi-Fi: scans in a row that found no access point (seen from 2 s of uptime, while the link is not up)
+    bool alert_seen;                // Wi-Fi: the daemon answered a handshake with an alert (seen from 4 s of uptime)
+    unsigned la_events;             // the OR of every event the auto_event op was given
+    int la_seals;                   // la_seal op calls
+    la_view_t la_last_sealed;
+    int edge_logs;                  // MG_AEV_EDGE events
 } dial_t;
 
 static dial_t D;
 
-// config_load_wl_effective(), or the forced value of a BLE test.
+// config_load_wl_effective(), or the forced value of a BLE test. This is the STORED value: 3 (auto) is possible here, and is resolved by mg_resolve_wl()
+// before any mg_* call, exactly as mode_glue.c's wl_resolved() does.
 static uint8_t wl_eff(void) { return D.wl_force ? D.wl_force : config_load_wl_effective(); }
 
 static void op_probe(void *c, bool on) { dial_t *d = c; d->probe_calls++; d->probe_installed = on; if (on) { d->have_welcome = false; d->last_hello = 0; d->probe_since = d->t; } }
@@ -128,8 +139,28 @@ static void op_undo(void *c, bool boot_usb_before, uint8_t flaps)
 }
 static void op_clear_crashes(void *c) { (void)c; mode_record_crash_clear(); }
 static bool op_load_boot_usb(void *c) { (void)c; return config_load_boot_usb(); }
+static void op_la_seal(void *c, const la_view_t *v)
+{
+    dial_t *d = c;
+    if (strlen(d->order) + 8 >= sizeof d->order) d->order[0] = 0;
+    strcat(d->order, "A");
+    d->la_seals++;
+    d->la_last_sealed = *v;
+    mode_record_la_save(v);
+}
+static void op_auto_event(void *c, uint32_t ev, const la_t *la, const la_out_t *lo, uint64_t now_ms)
+{
+    dial_t *d = c;
+    (void)la; (void)lo; (void)now_ms;
+    d->la_events |= ev;
+    if (ev & MG_AEV_EDGE) d->edge_logs++;
+}
 
-static const mg_ops_t OPS = {&D, op_probe, op_notice, op_clear, op_log, op_seal, op_store, op_restart, op_clear_crashes, op_undo, op_load_boot_usb, op_held};
+// The older table, written before the link_auto ops existed: the two new ops are simply absent (NULL) and the core must cope.
+static const mg_ops_t OPS_OLD = {.ctx = &D, .probe = op_probe, .notice = op_notice, .clear_flaps = op_clear, .log_reason = op_log, .seal = op_seal, .store_boot_usb = op_store,
+                                 .restart = op_restart, .clear_crashes = op_clear_crashes, .undo = op_undo, .load_boot_usb = op_load_boot_usb, .held = op_held};
+static const mg_ops_t OPS = {&D, op_probe, op_notice, op_clear, op_log, op_seal, op_store, op_restart, op_clear_crashes, op_undo, op_load_boot_usb, op_held, op_la_seal, op_auto_event};
+static const mg_ops_t *s_ops = &OPS;
 
 static bool sof_now(void)
 {
@@ -155,7 +186,14 @@ static ms_mode_t boot(void)
     in.record_ok = mode_record_boot(D.reset_sw, &view);
     in.record = view;
     in.crash_trip = mode_record_crash_boot(D.reset_cls, &in.crashes);   // reads the crash record; it is sealed again once the mode is known
-    in.wl_effective = wl_eff();
+    // The link_auto record (trusted after a software reset only; any other reset zeroes it), then the stored value resolved to this boot's target:
+    // mg_boot never sees 3 (mode_glue.c wl_resolved).
+    la_view_t lav;
+    (void)mode_record_la_boot(D.reset_sw, &lav);
+    bool auto_on = false;
+    in.wl_effective = mg_resolve_wl(wl_eff(), MG_RESOLVE_BOOT, lav.phone_boot, MS_MODE_USB, &auto_on);
+    in.auto_on = auto_on;
+    in.la = lav;
     in.stay_wl = config_load_stay_wl();
     in.boot_usb = config_load_boot_usb();
     // The glue waits until MS_SOF_SETTLE_MS of uptime, then reads the flag once.
@@ -165,6 +203,8 @@ static ms_mode_t boot(void)
     mg_boot_out_t out;
     mg_boot(&in, &out);
     assert(!out.sof_ignored);   // the simulator waits, so the reading is never too early
+    assert(!out.unsupported || wl_eff() > 3 || D.wl_force);   // the resolver never hands the core a number it cannot start (3 never reaches it)
+    if (!out.auto_on || out.la_clear) mode_record_la_clear();   // a USB boot, or no auto mode: the record is zero
     if (out.write_boot_usb) assert(config_save_boot_usb(out.boot_usb_new) || D.store_fails);
     strcpy(D.restored_focus, out.focus);
     mode_record_crash_seal(out.crashes, out.mode);   // at once: a crash while the radio comes up is counted against the mode that was being started
@@ -174,7 +214,9 @@ static ms_mode_t boot(void)
     // A wireless mode needs its radio; if it does not start the dial runs on USB in the same boot (net_link_start returns false)
     D.running = (out.mode != MS_MODE_USB && !D.radio_fails) ? out.mode : MS_MODE_USB;
     mode_record_crash_seal(out.crashes, D.running);
-    mg_init(&D.mg, D.running, out.flaps, wl_eff(), config_load_stay_wl());
+    bool live_auto = false;
+    mg_init(&D.mg, D.running, out.flaps, mg_resolve_wl(wl_eff(), MG_RESOLVE_LIVE, false, D.running, &live_auto), config_load_stay_wl());
+    mg_auto_start(&D.mg, out.auto_on, &out.la, D.t);
     mg_note_crashes(&D.mg, out.crashes);
     D.reset_sw = false;
     D.reset_cls = MS_RESET_POWERON;
@@ -211,24 +253,42 @@ static bool run(uint64_t ms)
         w.busy = D.busy;
         w.asleep = D.asleep;
         w.idle_ms = (uint32_t)(D.t - D.last_touch);
+        if (D.running == MS_MODE_WIFI) {
+            w.link_up = D.wifi_from && D.t >= D.wifi_from && (!D.wifi_to || D.t < D.wifi_to);
+            w.noap_scans = (!w.link_up && D.t >= 2000) ? D.noap_scans : 0;
+            w.alert_seen = D.alert_seen && D.t >= 4000;
+        } else if (D.running == MS_MODE_BLE) {
+            w.link_up = D.phone_from && D.t >= D.phone_from && (!D.phone_to || D.t < D.phone_to);
+        }
         const int before = D.reboots;
         // The glue task, each loop: re-read wl_mode and stay_wl when asked (mode_glue_settings_changed) or while a drop to "no target" awaits its
         // confirmation (mg_apply_settings). A read that lands inside a config_net_set_mode write sees the marker off, which reads as "no target".
         if (D.reload || D.mg.wl_pending) {
             D.reload = false;
-            uint8_t wl;
+            uint8_t stored;
             if (D.glitch_reads > 0) {
                 D.glitch_reads--;
                 nvs_handle_t h;
                 assert(nvs_open("pair", NVS_READWRITE, &h) == ESP_OK && nvs_erase_key(h, "wl_ver") == ESP_OK);   // marker_off
-                wl = config_load_wl_effective();
+                stored = config_load_wl_effective();
                 put_u8("wl_ver", 1);                                                                           // marker_on
             } else {
-                wl = wl_eff();
+                stored = wl_eff();
             }
+            // mode_glue.c wl_resolved(): the stored 3 becomes the running wireless mode (Wi-Fi when USB runs) before the core sees it
+            bool auto_on = false;
+            const uint8_t wl = mg_resolve_wl(stored, MG_RESOLVE_LIVE, false, D.running, &auto_on);
             mg_apply_settings(&D.mg, wl, config_load_stay_wl(), D.t);
+            if (wl != MS_WL_UNSET) {   // a read that says "no target" waits for its confirmation and does not touch the automatic rules
+                const bool was = D.mg.auto_on;
+                mg_set_auto(&D.mg, auto_on, D.t);
+                if (D.mg.auto_on != was) {
+                    if (D.mg.auto_on) { const la_view_t v = mg_auto_view(&D.mg); mode_record_la_save(&v); }
+                    else mode_record_la_clear();
+                }
+            }
         }
-        mg_step(&D.mg, &w, &OPS);
+        mg_step(&D.mg, &w, s_ops);
         if (D.reboots != before) return true;
     }
     return false;
@@ -258,6 +318,8 @@ static void fresh(void)
     strcpy(D.focus, "agent-12");
     memset(mode_record_raw_for_test(), 0, sizeof(ms_record_t));
     memset(mode_record_crash_raw_for_test(), 0, sizeof(ms_crash_t));
+    memset(mode_record_la_raw_for_test(), 0, sizeof(la_rec_t));
+    s_ops = &OPS;
 }
 // The dial resets by itself the abnormal way (panic, watchdog, brown-out) and boots again. The flap record is not believed after one (as before);
 // the crash record is.
@@ -1557,8 +1619,369 @@ static void test_a_crash_loop_in_ble_is_slowed_to_one_attempt_per_dwell(void)
     for (int i = 0; i < D.reboots && i < 64; i++) assert(D.reboot_uptime[i] >= MS_T_DWELL_MS);
 }
 
+// ═══ wifi-first work (T3): stored wl_mode 3, "Wi-Fi first, else phone" ═══════════════════════════════════════════════════════════════════════
+// The mode switch never sees 3: the glue resolves it to this boot's target (mg_resolve_wl, called from mode_glue.c's wl_resolved) before any mg_*
+// call. A raw 3 would boot USB (wl_known: "no target"), and at the first reload read as "the user picked USB": 600 ms later the dial would reboot to USB.
+static void provision_auto(void)
+{
+    provision(1);
+    assert(config_net_set_ble(KEY) == CFG_NET_OK);
+    assert(config_net_set_mode(3) == CFG_NET_OK);
+    assert(config_load_wl_effective() == 3);
+}
+// The link_auto record as it stands (read from a copy: reading must not consume it).
+static la_view_t rec_view(void)
+{
+    la_rec_t copy = *mode_record_la_raw_for_test();
+    la_view_t v;
+    const bool ok = la_boot(&copy, true, &v);
+    assert(ok);
+    return v;
+}
+static bool rec_is(bool phone, unsigned retries, unsigned edges)
+{
+    const la_view_t v = rec_view();
+    return v.phone_boot == phone && v.retries == retries && v.edges == edges;
+}
+static void seed_record(bool phone, unsigned retries, unsigned edges)
+{
+    const la_view_t v = {.phone_boot = phone, .retries = (uint8_t)retries, .edges = (uint8_t)edges};
+    mode_record_la_save(&v);
+    D.reset_sw = true;   // the boot that follows is a software reset: the record is believed
+    D.reset_cls = MS_RESET_HOLD;
+}
+
+static void test_auto_resolve(void)
+{
+    bool a;
+    // 3 is resolved to a wireless target and says so; nothing else is touched
+    assert(mg_resolve_wl(3, MG_RESOLVE_BOOT, false, MS_MODE_USB, &a) == MS_WL_WIFI && a);
+    assert(mg_resolve_wl(3, MG_RESOLVE_BOOT, true, MS_MODE_USB, &a) == MS_WL_BLE && a);
+    assert(mg_resolve_wl(3, MG_RESOLVE_LIVE, false, MS_MODE_WIFI, &a) == MS_WL_WIFI && a);
+    assert(mg_resolve_wl(3, MG_RESOLVE_LIVE, false, MS_MODE_BLE, &a) == MS_WL_BLE && a);
+    assert(mg_resolve_wl(3, MG_RESOLVE_LIVE, true, MS_MODE_USB, &a) == MS_WL_WIFI && a);   // an unplug is a fresh wake: Wi-Fi first, whatever the last pick
+    assert(mg_resolve_wl(3, MG_RESOLVE_LIVE, false, (ms_mode_t)9, &a) == MS_WL_WIFI && a);
+    for (unsigned s = 0; s < 256; s++) {
+        if (s == 3) continue;
+        assert(mg_resolve_wl((uint8_t)s, MG_RESOLVE_BOOT, true, MS_MODE_BLE, &a) == s && !a);
+        assert(mg_resolve_wl((uint8_t)s, MG_RESOLVE_LIVE, true, MS_MODE_BLE, &a) == s && !a);
+    }
+    assert(mg_resolve_wl(3, MG_RESOLVE_BOOT, false, MS_MODE_USB, NULL) == MS_WL_WIFI);   // the flag is optional
+    // why it must be resolved: a raw 3 is "unsupported" to the boot table, and "no target" to the live settings
+    const mg_boot_out_t o = plan(3, false, false, false, 50);
+    assert(o.unsupported && o.mode == MS_MODE_USB);
+    mg_t g;
+    mg_init(&g, MS_MODE_WIFI, 0, MS_WL_WIFI, false);
+    mg_apply_settings(&g, 3, false, 1000);
+    assert(g.wl_pending);   // a raw 3 would read as a drop to "no target"
+}
+
+static void test_auto_boot_picks_wifi_first_and_never_reads_3_as_usb(void)
+{
+    fresh();
+    provision_auto();
+    assert(boot() == MS_MODE_WIFI);                    // a power-on: Wi-Fi first
+    assert(D.mg.auto_on && D.mg.wl_effective == MS_WL_WIFI && D.mg.la.active && !D.mg.la.phone_boot);
+    assert(rec_is(false, 0, 0));
+    D.wifi_from = 3000;                                 // Wi-Fi works at 3 s
+    // reload after reload (the Link screen, a net.mode): the stored 3 is resolved every time, never read as "no target"
+    for (int i = 0; i < 80; i++) {
+        D.reload = true;
+        assert(!run(250));
+        assert(D.mg.wl_effective == MS_WL_WIFI && !D.mg.wl_pending);
+    }
+    assert(!run(60000) && D.reboots == 0 && D.mg.auto_on);       // 600 ms confirmation, a minute of dwell and more: no reboot to USB
+    // the same on the phone side
+    fresh();
+    provision_auto();
+    seed_record(true, 0, 1);
+    assert(boot() == MS_MODE_BLE);
+    D.phone_from = 3000;
+    for (int i = 0; i < 80; i++) {
+        D.reload = true;
+        assert(!run(250));
+        assert(D.mg.wl_effective == MS_WL_BLE);
+    }
+    assert(!run(60000) && D.reboots == 0);
+    // other resets: Wi-Fi, whatever the record said
+    for (int cls = 0; cls < 2; cls++) {
+        fresh();
+        provision_auto();
+        seed_record(true, 2, 5);
+        D.reset_sw = false;                            // a PWR wake, a panic, a watchdog
+        D.reset_cls = cls ? MS_RESET_CRASH : MS_RESET_POWERON;
+        assert(boot() == MS_MODE_WIFI);
+        assert(rec_is(false, 0, 0));                   // zeroed and sealed at once (finding 4)
+        D.reset_sw = true;                             // a later software reset ...
+        D.reset_cls = MS_RESET_HOLD;
+        assert(boot() == MS_MODE_WIFI);                // ... reads Wi-Fi, never the phone_boot of before the wake
+    }
+    // a record that is trusted is followed
+    fresh();
+    provision_auto();
+    seed_record(true, 1, 3);
+    assert(boot() == MS_MODE_BLE && D.mg.la.phone_boot && D.mg.la.retries == 1 && D.mg.la.edges == 3);
+}
+
+static void test_auto_wifi_that_does_not_work_goes_to_the_phone_after_30_s_in_the_documented_order(void)
+{
+    fresh();
+    provision_auto();
+    assert(boot() == MS_MODE_WIFI);
+    assert(!run(29500) && D.reboots == 0);             // window: LA_TRY_MS from the start of the radio
+    assert(rec_is(false, 0, 0));                       // nothing is sealed before the reboot
+    assert(run(1500) && D.reboots == 1 && D.reboot_to[0] == MS_MODE_BLE);
+    assert(!strcmp(D.order, "LSABR"));                 // log, seal, the link_auto record, boot_usb, THEN restart
+    assert(rec_is(true, 0, 1));                        // the phone's boot, no retry used, one edge
+    assert(D.mg.ms.flaps == 0 && D.edge_logs == 1);    // the flap count did not move
+    assert(boot() == MS_MODE_BLE && D.mg.la.phone_boot && D.mg.la.edges == 1);
+    assert(!config_load_boot_usb());                   // the next boot reads the table as for any wireless boot
+}
+
+static void test_auto_the_phone_that_never_connects_goes_back_to_wifi_and_wifi_that_works_stays(void)
+{
+    fresh();
+    provision_auto();
+    seed_record(true, 0, 1);
+    assert(boot() == MS_MODE_BLE);
+    assert(!run(119000) && D.reboots == 0);            // LA_NEVER_MS from the start of the phone stack
+    assert(run(2000) && D.reboot_to[0] == MS_MODE_WIFI);
+    assert(rec_is(false, 1, 2));                       // Wi-Fi's boot, one retry used
+    D.wifi_from = 4000;                                // this time the Wi-Fi works
+    assert(boot() == MS_MODE_WIFI);
+    assert(!run(120000) && D.reboots == 1);
+    // 600 s of a stable session clear the retries and the edges, and the record says so
+    assert(!run(500000) && D.reboots == 1);
+    assert(rec_is(false, 0, 0) && D.la_events);
+    assert(D.mg.la.retries == 0 && D.mg.la.edges == 0);
+}
+
+static void test_auto_a_drop_waits_30_60_120_s_by_retry(void)
+{
+    static const uint64_t wait[] = {30000, 60000, 120000};
+    for (unsigned r = 0; r < 3; r++) {
+        fresh();
+        provision_auto();
+        seed_record(true, r, r + 1);
+        assert(boot() == MS_MODE_BLE);
+        D.phone_from = 2000;
+        D.phone_to = 20000;                            // the session is up for 18 s, then gone
+        assert(!run(20000 + wait[r] - 1000) && D.reboots == 0);
+        assert(run(2000) && D.reboot_to[0] == MS_MODE_WIFI);
+        assert(rec_is(false, r + 1, r + 2));
+    }
+    // three retries are spent: the phone stays, however long the drop
+    fresh();
+    provision_auto();
+    seed_record(true, 3, 6);
+    assert(boot() == MS_MODE_BLE);
+    D.phone_from = 2000;
+    D.phone_to = 20000;
+    assert(!run(900000) && D.reboots == 0);
+    assert((D.la_events & LA_EV_REFUSE_RETRIES) && rec_is(true, 3, 6));
+}
+
+static void test_auto_nothing_works_is_bounded_to_7_reboots_and_ends_on_the_phone(void)
+{
+    fresh();
+    provision_auto();
+    assert(boot() == MS_MODE_WIFI);
+    const int n = run_wall(3600000);                   // an hour with neither radio working
+    assert(n == 7 && D.reboots == 7);
+    assert(D.running == MS_MODE_BLE && rec_is(true, 3, 7));
+    assert(D.mg.ms.flaps == 0);
+    assert(D.la_events & LA_EV_REFUSE_RETRIES);
+    // the reboots alternate Wi-Fi (retry) and phone, and none came before the radio had its time
+    for (int i = 0; i < 7; i++) assert(D.reboot_to[i] == (i % 2 == 0 ? MS_MODE_BLE : MS_MODE_WIFI));
+    assert(D.reboot_uptime[0] >= LA_TRY_MS && D.reboot_uptime[1] >= LA_NEVER_MS && D.reboot_uptime[2] >= LA_TRY_MS);
+}
+
+static void test_auto_no_access_point_goes_at_once_and_an_alert_holds_wifi(void)
+{
+    fresh();
+    provision_auto();
+    assert(boot() == MS_MODE_WIFI);
+    D.noap_scans = 1;
+    assert(!run(20000) && D.reboots == 0);             // one scan is not enough
+    D.noap_scans = 2;
+    assert(run(1000) && D.reboot_to[0] == MS_MODE_BLE && D.reboot_uptime[0] < LA_TRY_MS);
+    // an alert seen: Wi-Fi is held, however long, whatever the scans say
+    fresh();
+    provision_auto();
+    assert(boot() == MS_MODE_WIFI);
+    D.alert_seen = true;                               // seen from 4 s: the daemon is reachable and it says no
+    assert(!run(10000) && D.reboots == 0 && (D.la_events & LA_EV_HOLD_ALERT));
+    D.noap_scans = 5;                                  // the access point goes away afterwards: still held (the phone has the same key)
+    assert(!run(600000) && D.reboots == 0);
+}
+
+static void test_auto_the_busy_gate_and_the_notice_hold_the_edge_and_nothing_is_counted_meanwhile(void)
+{
+    fresh();
+    provision_auto();
+    assert(boot() == MS_MODE_WIFI);
+    D.busy = MS_BUSY_VOICE;
+    assert(!run(60000) && D.reboots == 0);
+    assert(D.notice_shown && D.held_calls >= 1);       // the user is told
+    assert(rec_is(false, 0, 0));                       // nothing counted while the gate holds it
+    D.busy = 0;
+    assert(run(1000) && D.reboot_to[0] == MS_MODE_BLE && rec_is(true, 0, 1));
+    // pairing holds an awake dial, a dark one switches silently
+    fresh();
+    provision_auto();
+    seed_record(true, 0, 1);
+    assert(boot() == MS_MODE_BLE);
+    D.busy = MS_BUSY_PAIRING;
+    assert(!run(200000) && D.reboots == 0);
+    D.asleep = true;
+    assert(run(1000) && D.reboot_to[0] == MS_MODE_WIFI);
+}
+
+static void test_auto_a_refused_restart_puts_the_record_back_and_the_retry_goes_through(void)
+{
+    fresh();
+    provision_auto();
+    assert(boot() == MS_MODE_WIFI);
+    D.refuse_restarts = 1;
+    assert(!run(31000) && D.reboots == 0 && D.attempts == 1);
+    assert(strstr(D.order, "LSABrUA"));                // log, seal, record, boot_usb, refused, undo, the record put back
+    assert(rec_is(false, 0, 0));                       // the old record is back
+    assert(D.la_last_sealed.phone_boot == false && D.la_last_sealed.edges == 0);
+    assert(run(12000) && D.reboots == 1 && rec_is(true, 0, 1));   // after the delay (10 s) the sequence runs again and goes through
+}
+
+static void test_auto_usb_entry_has_priority_and_a_host_without_a_daemon_does_not_strand_the_dial(void)
+{
+    // a laptop with the daemon: welcomes arrive, the edge is held, USB goes at the dwell
+    fresh();
+    provision_auto();
+    D.cable = true;
+    D.daemon = true;
+    assert(boot() == MS_MODE_WIFI);
+    assert(!run(50000) && D.reboots == 0 && (D.la_events & MG_AEV_HELD_USB));
+    assert(run(15000) && D.reboot_to[0] == MS_MODE_USB);
+    assert(!rec_is(true, 0, 1));                       // no edge was taken
+    // a host with no daemon: SOF but no welcome: the Wi-Fi attempt falls back as usual (finding 8)
+    fresh();
+    provision_auto();
+    D.cable = true;
+    D.daemon = false;
+    assert(boot() == MS_MODE_WIFI);
+    assert(run(31000) && D.reboot_to[0] == MS_MODE_BLE);
+}
+
+static void test_auto_a_usb_boot_clears_the_record_and_so_does_a_stored_mode_that_is_not_auto(void)
+{
+    fresh();
+    provision_auto();
+    config_save_boot_usb(true);
+    D.cable = true;
+    D.daemon = true;
+    seed_record(true, 2, 5);
+    assert(boot() == MS_MODE_USB);                      // the switch's own reboot, the cable still in
+    assert(rec_is(false, 0, 0));
+    // the unplug is a fresh wake: Wi-Fi first (resolved live from USB), whatever the record said
+    D.cable = false;
+    D.daemon = false;
+    assert(run(75000) && D.reboot_to[0] == MS_MODE_WIFI);
+    assert(boot() == MS_MODE_WIFI);
+    // stored 1: the record means nothing and is zeroed at boot
+    fresh();
+    provision(1);
+    seed_record(true, 3, 7);
+    assert(boot() == MS_MODE_WIFI && !D.mg.auto_on && !D.mg.la.active);
+    assert(rec_is(false, 0, 0));
+}
+
+static void test_auto_a_radio_that_does_not_start_runs_usb_without_the_rules(void)
+{
+    fresh();
+    provision_auto();
+    D.radio_fails = true;
+    assert(boot() == MS_MODE_USB && !D.mg.la.active);
+    assert(!run(300) && D.reboots == 0);
+    assert(run(70000) && D.reboot_to[0] == MS_MODE_WIFI);   // the existing rule: no cable for 10 s, 60 s of dwell
+    assert(D.edge_logs == 0);
+}
+
+static void test_auto_the_panic_loop_beats_it(void)
+{
+    fresh();
+    provision_auto();
+    mode_record_crash_seal(2, MS_MODE_WIFI);
+    D.reset_sw = false;
+    D.reset_cls = MS_RESET_CRASH;
+    assert(boot() == MS_MODE_USB && D.crash_usb);
+    assert(!D.mg.la.active);
+}
+
+static void test_auto_going_off_or_on_at_runtime(void)
+{
+    // stored 3 on the phone, then the user picks Wi-Fi only (net.mode 1) or phone only (net.mode 2): the edges stop
+    for (int to = 1; to <= 2; to++) {
+        fresh();
+        provision_auto();
+        seed_record(true, 0, 1);
+        assert(boot() == MS_MODE_BLE && D.mg.auto_on);
+        assert(!run(60000));
+        assert(config_net_set_mode(to) == CFG_NET_OK);
+        D.reload = true;
+        assert(!run(250) && !D.mg.auto_on && !D.mg.la.active);
+        assert(rec_is(false, 0, 0));
+        assert(!run(900000) && D.reboots == 0);         // the phone never connects, and nothing happens
+    }
+    // phone-only running, then `net auto`: the rules start fresh, on the phone, from now
+    fresh();
+    provision(1);
+    assert(config_net_set_ble(KEY) == CFG_NET_OK && config_net_set_mode(2) == CFG_NET_OK);
+    assert(boot() == MS_MODE_BLE && !D.mg.auto_on);
+    assert(!run(100000));
+    assert(config_net_set_mode(3) == CFG_NET_OK);
+    D.reload = true;
+    assert(!run(250) && D.mg.auto_on && D.mg.la.phone_boot && D.mg.wl_effective == MS_WL_BLE);
+    assert(rec_is(true, 0, 0));
+    assert(!run(118000) && D.reboots == 0);
+    assert(run(3000) && D.reboot_to[0] == MS_MODE_WIFI);
+    // a read inside a write window ("no target" for a moment) neither starts nor stops the rules, and loses no count
+    fresh();
+    provision_auto();
+    seed_record(false, 1, 2);
+    assert(boot() == MS_MODE_WIFI);
+    D.wifi_from = 3000;
+    D.glitch_reads = 1;
+    D.reload = true;
+    assert(!run(5000) && D.reboots == 0);
+    assert(D.mg.auto_on && D.mg.la.retries == 1 && D.mg.la.edges == 2 && D.mg.wl_effective == MS_WL_WIFI);
+}
+
+static void test_auto_a_table_written_before_the_link_auto_ops_still_works(void)
+{
+    fresh();
+    provision_auto();
+    s_ops = &OPS_OLD;                                   // no la_seal, no auto_event
+    assert(boot() == MS_MODE_WIFI);
+    assert(run(31000) && D.reboot_to[0] == MS_MODE_BLE);
+    assert(!strcmp(D.order, "LSBR") && D.la_seals == 0);   // the old order, nothing else
+    s_ops = &OPS;
+}
+
 int main(void)
 {
+    test_auto_resolve();
+    test_auto_boot_picks_wifi_first_and_never_reads_3_as_usb();
+    test_auto_wifi_that_does_not_work_goes_to_the_phone_after_30_s_in_the_documented_order();
+    test_auto_the_phone_that_never_connects_goes_back_to_wifi_and_wifi_that_works_stays();
+    test_auto_a_drop_waits_30_60_120_s_by_retry();
+    test_auto_nothing_works_is_bounded_to_7_reboots_and_ends_on_the_phone();
+    test_auto_no_access_point_goes_at_once_and_an_alert_holds_wifi();
+    test_auto_the_busy_gate_and_the_notice_hold_the_edge_and_nothing_is_counted_meanwhile();
+    test_auto_a_refused_restart_puts_the_record_back_and_the_retry_goes_through();
+    test_auto_usb_entry_has_priority_and_a_host_without_a_daemon_does_not_strand_the_dial();
+    test_auto_a_usb_boot_clears_the_record_and_so_does_a_stored_mode_that_is_not_auto();
+    test_auto_a_radio_that_does_not_start_runs_usb_without_the_rules();
+    test_auto_the_panic_loop_beats_it();
+    test_auto_going_off_or_on_at_runtime();
+    test_auto_a_table_written_before_the_link_auto_ops_still_works();
     test_ble_target_is_kept_by_the_glue_state();
     test_a_drop_from_ble_to_no_target_waits_for_its_confirmation_too();
     test_a_ble_dial_goes_to_usb_and_comes_back();

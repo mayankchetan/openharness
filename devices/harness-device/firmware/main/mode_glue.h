@@ -8,6 +8,11 @@
 //                 mode_glue_restore_focus();                                      // the agent the dial showed before the switch
 //                 mode_glue_start(wifi ? MS_MODE_WIFI : MS_MODE_USB);             // the 250 ms task that decides the next switch
 //
+// "Wi-Fi first, else phone" (stored wl_mode 3; link_auto.h, wifi-first spec): mode_glue_boot() reads the link_auto RTC record (trusted after a software reset
+// only), resolves the stored 3 to this boot's pick (Wi-Fi unless the record says phone) and returns that mode, exactly as for a stored 1 or 2; the mode switch
+// never sees a 3 (mode_glue.c wl_resolved). While a wireless mode runs the task steps the rules and, when the other mode is due, reboots into it through the
+// same sequence (the record is sealed between the focus and boot_usb).
+//
 // The task "mode_sw" has an INTERNAL stack on purpose: it writes NVS (boot_usb) and installs and removes the USB driver, and flash operations stay
 // off PSRAM stacks (task_util.h). It is the only caller of the probe.
 #pragma once

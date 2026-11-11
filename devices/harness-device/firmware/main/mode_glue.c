@@ -17,6 +17,8 @@
 #include "last_words.h"
 #include "mode_glue_core.h"
 #include "mode_record.h"
+#include "net_link.h"
+#include "net_state.h"
 #include "power_sleep.h"
 #include "store_gate.h"
 #include "ui/display.h"
@@ -46,8 +48,18 @@ static atomic_bool s_keep_wifi;        // stay_wl as of the last read (mode_glue
 static atomic_bool s_reload;           // mode_glue_settings_changed(): the task re-reads wl_mode and stay_wl at its next step
 static bool s_crash_usb;               // this boot took USB because of the panic loop (said again once the daemon is likely to be listening)
 static uint8_t s_crashes;              // the crash count as of this boot
+static bool s_pick_phone;              // "Wi-Fi first, else phone": this boot's pick when the stored mode is 3 (the link_auto record's phone_boot; Wi-Fi when untrusted)
 
 static uint64_t uptime_ms(void) { return (uint64_t)(esp_timer_get_time() / 1000); }
+
+// THE ONE PLACE the stored wl_mode is read for the mode switch. Stored 3 ("Wi-Fi first, else phone") is not a target the mode switch knows (wl_known(): "1, 2
+// or nothing"): left alone it would boot USB, and at the first reload read as "the user picked USB" and reboot the dial to USB 600 ms later. So it is resolved
+// here, to this boot's pick or to the wireless mode that runs (Wi-Fi when USB does: an unplug is a fresh wake), before any mg_* call. The answer is 0, 1 or 2;
+// `auto_on` says that the stored value was 3. test_mode_glue_source.py: every config_load_wl_effective() call in this file is inside this function.
+static uint8_t wl_resolved(mg_resolve_t when, bool *auto_on)
+{
+    return mg_resolve_wl(config_load_wl_effective(), when, s_pick_phone, s_running, auto_on);
+}
 
 // ── boot ────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -89,7 +101,11 @@ ms_mode_t mode_glue_boot(void)
     in.record_ok = mode_record_boot(esp_reset_reason() == ESP_RST_SW, &in.record);
     // The crash record is believed after every reset but a power-on (it is there to count the abnormal ones).
     in.crash_trip = mode_record_crash_boot(reset_class(esp_reset_reason()), &in.crashes);
-    in.wl_effective = config_load_wl_effective();
+    // The link_auto record: believed after a software reset only; any other reset (power-on, a PWR wake, a panic, a watchdog) zeroes it and seals it again at
+    // once, so the pick is Wi-Fi. Read in every boot, acted on only when the stored mode is 3.
+    const bool la_trusted = mode_record_la_boot(esp_reset_reason() == ESP_RST_SW, &in.la);
+    s_pick_phone = in.la.phone_boot;
+    in.wl_effective = wl_resolved(MG_RESOLVE_BOOT, &in.auto_on);
     in.stay_wl = config_load_stay_wl();
     in.boot_usb = config_load_boot_usb();
     // The SOF flag starts TRUE in secondary init and falls only after ticks have run: read it no earlier than MS_SOF_SETTLE_MS after the reset.
@@ -108,6 +124,13 @@ ms_mode_t mode_glue_boot(void)
     s_crash_usb = s_boot.crash_usb;
     s_crashes = s_boot.crashes;
     if (s_crash_usb) ESP_LOGW(TAG, "Wireless mode crashed %u times; started in USB", (unsigned)s_crashes);
+    // A USB boot, or a stored mode that is not auto, leaves the link_auto record at zero: the next wake starts at Wi-Fi. (An RTC write, no flash.)
+    if (!s_boot.auto_on || s_boot.la_clear) mode_record_la_clear();
+    if (s_boot.auto_on) {
+        ESP_LOGW(TAG, "auto: boot pick=%s record=%s phone_boot=%u retries=%u edges=%u", la_target_name(s_pick_phone ? LA_TARGET_PHONE : LA_TARGET_WIFI),
+                 la_trusted ? "trusted" : "zeroed", (unsigned)in.la.phone_boot, (unsigned)in.la.retries, (unsigned)in.la.edges);
+        if (!la_trusted) ESP_LOGW(TAG, "auto: record zeroed (reset %d)", (int)esp_reset_reason());
+    }
     if (s_boot.write_boot_usb && !config_save_boot_usb(s_boot.boot_usb_new))
         ESP_LOGW(TAG, "boot_usb could not be stored; the next boot may pick the other mode (the flap cap bounds it)");
     snprintf(s_focus, sizeof s_focus, "%s", s_boot.focus);
@@ -255,6 +278,50 @@ static bool op_restart(void *ctx, ms_mode_t target)
     return false;
 }
 
+// "Wi-Fi first, else phone". The link_auto record is RTC memory (no flash): sealed in the reboot sequence of an automatic edge, and put back after a refused
+// restart. The events are the lines the bench reads; over BLE only warnings reach the daemon (cable-ble-link.md section 4), so the ones that matter are ESP_LOGW.
+static void op_la_seal(void *ctx, const la_view_t *record)
+{
+    (void)ctx;
+    mode_record_la_save(record);
+}
+
+static void op_auto_event(void *ctx, uint32_t ev, const la_t *la, const la_out_t *lo, uint64_t now_ms)
+{
+    (void)ctx;
+    (void)now_ms;
+    if (ev & LA_EV_WORKS) ESP_LOGI(TAG, "auto: wifi works after %u ms", (unsigned)lo->waited_ms);
+    if (ev & MG_AEV_EDGE) {
+        if (lo->target == LA_TARGET_PHONE) {
+            if (lo->why == LA_WHY_NO_AP) ESP_LOGW(TAG, "auto: wifi -> phone: no_ap x%u after %u ms", (unsigned)LA_NOAP_SCANS, (unsigned)lo->waited_ms);
+            else if (lo->why == LA_WHY_WIFI_LOST) ESP_LOGW(TAG, "auto: wifi -> phone: wifi lost %u ms after it worked", (unsigned)lo->waited_ms);
+            else ESP_LOGW(TAG, "auto: wifi -> phone: %s, alert_seen=%d after %u ms", la_why_name(lo->why), (int)la->alert_latched, (unsigned)lo->waited_ms);
+        } else {
+            ESP_LOGW(TAG, "auto: phone -> wifi: %s %u ms, retry %u of %u", la_why_name(lo->why), (unsigned)lo->waited_ms, (unsigned)lo->next.retries,
+                     (unsigned)LA_RETRY_MAX);   // 1-based in the text; the record holds the same count, 0-based use
+        }
+    }
+    if (ev & LA_EV_HOLD_ALERT) ESP_LOGW(TAG, "auto: edge held: alert_seen (the daemon refused the handshake; the phone has the same key)");
+    if (ev & MG_AEV_HELD_USB) ESP_LOGW(TAG, "auto: edge held: usb welcomes");
+    if (ev & MG_AEV_HELD_BUSY) ESP_LOGW(TAG, "auto: edge held: busy");
+    if (ev & LA_EV_REFUSE_RETRIES) ESP_LOGW(TAG, "auto: edge refused: retries %u", (unsigned)LA_RETRY_MAX);
+    if (ev & LA_EV_REFUSE_EDGES) ESP_LOGW(TAG, "auto: edge refused: edge cap %u", (unsigned)LA_EDGE_CAP);
+    if (ev & LA_EV_STABLE) ESP_LOGI(TAG, "auto: stable %u min: retries and edges cleared", (unsigned)(LA_STABLE_MS / 60000u));
+}
+
+// The stored mode went to or from 3 while a wireless mode runs (net.mode over the cable): the record follows, so a restart that is no switch finds the pick.
+static void auto_changed(bool on)
+{
+    if (on) {
+        const la_view_t v = mg_auto_view(&s_mg);
+        mode_record_la_save(&v);
+        ESP_LOGW(TAG, "auto: on while %s runs: Wi-Fi first at the next wake, the rules start now", ms_mode_name(s_running));
+    } else {
+        mode_record_la_clear();
+        ESP_LOGW(TAG, "auto: off");
+    }
+}
+
 static const mg_ops_t OPS = {
     .ctx = NULL,
     .probe = op_probe,
@@ -268,6 +335,8 @@ static const mg_ops_t OPS = {
     .undo = op_undo,
     .load_boot_usb = op_load_boot_usb,
     .held = op_held,
+    .la_seal = op_la_seal,
+    .auto_event = op_auto_event,
 };
 
 static void sample(mg_world_t *w, uint64_t now)
@@ -283,6 +352,9 @@ static void sample(mg_world_t *w, uint64_t now)
         if (w->have_daemon_byte) w->last_daemon_byte_ms = now - (uint32_t)((uint32_t)now - last32);
     } else {
         w->have_welcome = usb_probe_last_welcome(&w->last_welcome_ms);
+        // The link facts of link_auto.h, only while its rules are on. Works = the session is up (the daemon's welcome came); over Wi-Fi the link must be up too
+        // (net_state NET_UP: the same test as serve() in net_link.c). Association or an address alone is not enough.
+        if (s_mg.auto_on) w->link_up = cable_client_is_connected() && (s_running != MS_MODE_WIFI || net_link_state() == NET_UP);
     }
     w->busy = mode_switch_busy();
     w->asleep = display_is_asleep();
@@ -298,7 +370,14 @@ static void mode_sw_task(void *arg)
         // A reload (the Link screen wrote wl_mode or stay_wl), and again at every loop while a drop to "no target" waits for its second read: the
         // value of a read taken inside a config_net_set_mode write is not believed alone (mg_apply_settings, MG_CONFIRM_MS).
         if (atomic_exchange(&s_reload, false) || s_mg.wl_pending) {
-            mg_apply_settings(&s_mg, config_load_wl_effective(), config_load_stay_wl(), now);
+            bool auto_on = false;
+            const uint8_t wl = wl_resolved(MG_RESOLVE_LIVE, &auto_on);   // stored 3 -> the wireless mode that runs; the core never sees it
+            mg_apply_settings(&s_mg, wl, config_load_stay_wl(), now);
+            if (wl != MS_WL_UNSET) {   // a read that says "no target" waits for its confirmation and leaves the automatic rules alone
+                const bool was = s_mg.auto_on;
+                mg_set_auto(&s_mg, auto_on, now);
+                if (s_mg.auto_on != was) auto_changed(s_mg.auto_on);
+            }
             atomic_store(&s_keep_wifi, s_mg.stay_wl);
         }
 
@@ -344,7 +423,15 @@ void mode_glue_start(ms_mode_t running)
     // A dial that RUNS a wireless mode was told by the boot decision that this mode is a target, so it starts believing that (the stored byte is the
     // mode number); the first loop re-reads (and a read that says "no target" has to be confirmed like any other), so one failed read of NVS here
     // cannot send it to USB (review finding 2).
-    mg_init(&s_mg, s_running, s_boot.flaps, ms_mode_is_wireless(s_running) ? (uint8_t)s_running : config_load_wl_effective(), config_load_stay_wl());
+    bool live_auto = false;
+    mg_init(&s_mg, s_running, s_boot.flaps, ms_mode_is_wireless(s_running) ? (uint8_t)s_running : wl_resolved(MG_RESOLVE_LIVE, &live_auto), config_load_stay_wl());
+    // The rules of "Wi-Fi first, else phone" run only when the stored mode is 3 AND a wireless mode really started (a radio that did not come up is USB, in this
+    // boot, and the existing USB-to-wireless rule moves the dial). The clock starts here: net_link_start() / ble_link_start() returned a moment ago.
+    mg_auto_start(&s_mg, s_boot.auto_on, &s_boot.la, uptime_ms());
+    if (s_mg.auto_on) {
+        if (!s_mg.la.phone_boot) ESP_LOGW(TAG, "auto: wifi try start, window %u ms", (unsigned)LA_TRY_MS);
+        else ESP_LOGW(TAG, "auto: phone start, never-connected window %u ms, retries used %u of %u", (unsigned)LA_NEVER_MS, (unsigned)s_mg.la.retries, (unsigned)LA_RETRY_MAX);
+    }
     if (ms_mode_is_wireless(s_running)) atomic_store(&s_reload, true);
     atomic_store(&s_keep_wifi, s_mg.stay_wl);
     mg_note_crashes(&s_mg, s_crashes);

@@ -48,3 +48,20 @@ void mode_record_crash_clear(void)
 #ifdef MODE_RECORD_HOST
 ms_crash_t *mode_record_crash_raw_for_test(void) { return &s_crash; }
 #endif
+
+// ── the link_auto record ─────────────────────────────────────────────────────────────────────────────
+static RTC_NOINIT_ATTR la_rec_t s_la;
+
+bool mode_record_la_boot(bool reset_is_software, la_view_t *view) { return la_boot(&s_la, reset_is_software, view); }
+
+void mode_record_la_save(const la_view_t *v)
+{
+    if (v) la_seal(&s_la, v->phone_boot, v->retries, v->edges);
+    else la_seal(&s_la, false, 0, 0);
+}
+
+void mode_record_la_clear(void) { la_seal(&s_la, false, 0, 0); }
+
+#ifdef MODE_RECORD_HOST
+la_rec_t *mode_record_la_raw_for_test(void) { return &s_la; }
+#endif

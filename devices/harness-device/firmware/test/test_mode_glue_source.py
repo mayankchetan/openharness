@@ -97,7 +97,21 @@ assert 'in.crash_trip = mode_record_crash_boot(' in boot, 'the answer of the cra
 assert 'mode_record_crash_seal(s_boot.crashes, s_boot.mode)' in boot and boot.index('mg_boot(') < boot.index('mode_record_crash_seal('), 'sealed with the decided mode'
 assert 'Wireless mode crashed %u times; started in USB' in raw_glue and 'Wi-Fi mode crashed' not in raw_glue, 'the panic loop counts Wi-Fi and BLE runs alike: the message does not say Wi-Fi'
 assert 's_boot.crash_usb' in boot
-assert 'config_load_wl_effective()' in boot and 'config_load_stay_wl()' in boot and 'config_load_boot_usb()' in boot
+assert 'wl_resolved(MG_RESOLVE_BOOT, &in.auto_on)' in boot and 'config_load_stay_wl()' in boot and 'config_load_boot_usb()' in boot
+# wifi-first work (T3), review finding 1: the stored wl_mode 3 (auto) is resolved to this boot's target BEFORE any mg_* call. config_load_wl_effective() is
+# called in exactly one place of this file, wl_resolved(), and the three reads of the mode switch (boot, the reload in the task, the start) go through it,
+# so wl_known() in the core never sees a 3 (it would read as "no target": a USB boot, and 600 ms after the first reload a reboot to USB).
+assert len(re.findall(r'\bconfig_load_wl_effective\(', glue)) == 1, 'config_load_wl_effective() is called in one place: wl_resolved()'
+resolved = body(glue, 'wl_resolved')
+assert 'config_load_wl_effective()' in resolved and 'mg_resolve_wl(' in resolved
+assert len(re.findall(r'\bwl_resolved\(', glue)) == 4, 'the definition and the three reads of the mode switch (boot, reload, start)'
+assert 'wl_resolved(MG_RESOLVE_LIVE, &auto_on)' in body(glue, 'mode_sw_task') and 'wl_resolved(MG_RESOLVE_LIVE, &live_auto)' in body(glue, 'mode_glue_start')
+assert boot.index('mode_record_la_boot(') < boot.index('wl_resolved(') < boot.index('mg_boot('), 'the link_auto record is read, the stored mode resolved, then the decision'
+assert 'esp_reset_reason() == ESP_RST_SW' in boot[boot.index('mode_record_la_boot('):boot.index('mode_record_la_boot(') + 80], 'the link_auto record is believed after a software reset only'
+assert 'mode_record_la_clear()' in boot and 's_boot.la_clear' in boot, 'a USB boot (and a stored mode that is not auto) zeroes the link_auto record'
+assert 'mg_auto_start(&s_mg, s_boot.auto_on, &s_boot.la,' in body(glue, 'mode_glue_start')
+assert 'mg_set_auto(&s_mg, auto_on, now)' in body(glue, 'mode_sw_task') and 'if (wl != MS_WL_UNSET)' in body(glue, 'mode_sw_task'), 'a read that says "no target" leaves the automatic rules alone'
+assert 'MS_MODE_BLE' not in glue and 'MS_WL_BLE' not in glue, 'the glue stays mode-agnostic: the resolver is in the core'
 assert 'config_save_boot_usb(s_boot.boot_usb_new)' in boot and 's_boot.write_boot_usb' in boot, 'boot_usb is rewritten only when the plan says so'
 assert re.search(r'_Static_assert\(MS_FOCUS_MAX == ID_MAX', raw_glue), 'the record holds an agent id: same size as cable_client.h'
 assert re.search(r'#define ID_MAX\s+48\b', text('cable_client.h')) and re.search(r'#define MS_FOCUS_MAX\s+48\b', text('mode_switch.h'))
@@ -115,11 +129,17 @@ assert 'mode_record_save(focus, flaps)' in body(glue, 'op_seal') and 'ui_mode_sw
 assert 'config_save_boot_usb(boot_usb)' in body(glue, 'op_store_boot_usb')
 core = code('mode_glue_core.c')
 step = body(core, 'mg_step')
-order = [step.index(x) for x in ('ops->log_reason(', 'ops->seal(', 'ops->store_boot_usb(', 'ops->restart(')]
-assert order == sorted(order), 'log, seal, store, restart'
+order = [step.index(x) for x in ('ops->log_reason(', 'ops->seal(', 'ops->la_seal(ops->ctx, &lo.next)', 'ops->store_boot_usb(', 'ops->restart(')]
+assert order == sorted(order), 'log, seal, the link_auto record (an automatic edge only), store, restart'
 # a refused restart is undone and the core goes on: done is cleared, so the sequence runs again at a later step
-assert re.search(r'if \(ops->restart && !ops->restart\(ops->ctx, out\.target\)\) \{\s*if \(ops->undo\) ops->undo\(ops->ctx, boot_usb_before, g->ms\.flaps\);\s*g->done = false;', step), \
-    'a refused restart: undo with the value NVS held before the store, then done = false'
+assert re.search(r'if \(ops->restart && !ops->restart\(ops->ctx, out\.target\)\) \{\s*if \(ops->undo\) ops->undo\(ops->ctx, boot_usb_before, g->ms\.flaps\);\s*'
+                 r'if \(out\.auto_edge && ops->la_seal\) ops->la_seal\(ops->ctx, &lo\.now\);[^\n]*\n\s*g->done = false;', step), \
+    'a refused restart: undo with the value NVS held before the store, the old link_auto record back, then done = false'
+assert 'out.auto_edge && ops->la_seal' in step and step.count('ops->la_seal(') == 3, 'la_seal: the stable clear, the edge, and the put-back after a refused restart'
+for field in ('la_seal', 'auto_event'):
+    assert re.search(r'\.' + field + r' = op_\w+', ops), field
+assert 'mode_record_la_save(record)' in body(glue, 'op_la_seal'), 'the link_auto record is RTC memory: no flash call in the reboot sequence'
+assert 'esp_restart' not in body(glue, 'op_la_seal') + body(glue, 'op_auto_event') and not re.search(r'\bnvs_|\bconfig_', body(glue, 'op_la_seal') + body(glue, 'op_auto_event'))
 assert step.index('ops->load_boot_usb(') < step.index('ops->store_boot_usb('), 'W15e: the old boot_usb is read before it is overwritten'
 assert re.search(r'if \(g->refusals && w->now_ms < g->retry_at\) return;', step) and 'mg_retry_delay_ms(g->refusals)' in step, 'W15e: a refusal holds the next attempt back (behaviour: test_mode_glue.c)'
 assert 'ms_mode_is_wireless(g->ms.mode)' in step and 'MS_CRASH_CLEAR_MS' in step and 'ops->clear_crashes(' in step, 'ten minutes up in a wireless mode (Wi-Fi or BLE) clear the crash count; USB time does not'
@@ -153,7 +173,7 @@ assert 'usb_probe_last_welcome(' in sample and sample.index('s_running == MS_MOD
 # the clock handed to the module is wrap-safe
 assert 'now - (uint32_t)((uint32_t)now - last32)' in sample
 # the mode the module sees is the effective one
-assert 'config_load_wl_effective()' in body(glue, 'mode_glue_start')
+assert 'wl_resolved(MG_RESOLVE_LIVE, &live_auto)' in body(glue, 'mode_glue_start')
 # W16c (bench, 2026-11-01): every writer of wl_mode, the marker or the key tells the running mode switch. `net.set` over the cable stored wl_mode = 1 and the
 # dial never left USB, because the glue keeps "USB, no target, never leaves" until it is told to read again. Writers of those NVS values are the net_store
 # task (the cable) and the Link screen's worker; each calls mode_glue_settings_changed() after its write, on success and on failure (a failed write can
@@ -178,13 +198,15 @@ assert net_store.index('mode_glue_settings_changed()') < net_store.index('net_re
 # W16b (review of the Link screen, finding 1 and 2): the task reads wl_mode through the confirming path, so one read inside a config_net_set_mode write
 # cannot send a Wi-Fi dial to USB (behaviour: test_mode_glue.c), and a dial that RUNS Wi-Fi starts believing Wi-Fi is a target.
 task_src = body(glue, 'mode_sw_task')
-assert re.search(r'atomic_exchange\(&s_reload, false\) \|\| s_mg\.wl_pending\) \{\s*mg_apply_settings\(&s_mg, config_load_wl_effective\(\), config_load_stay_wl\(\), now\);\s*atomic_store\(&s_keep_wifi, s_mg\.stay_wl\);\s*\}', task_src)
+assert re.search(r'atomic_exchange\(&s_reload, false\) \|\| s_mg\.wl_pending\) \{\s*bool auto_on = false;\s*const uint8_t wl = wl_resolved\(MG_RESOLVE_LIVE, &auto_on\);[^\n]*\n\s*'
+                 r'mg_apply_settings\(&s_mg, wl, config_load_stay_wl\(\), now\);', task_src), 'the reload reads the stored mode through the resolver and the confirming path'
+assert re.search(r'mg_apply_settings\(&s_mg, wl, config_load_stay_wl\(\), now\);.*?atomic_store\(&s_keep_wifi, s_mg\.stay_wl\);\s*\}', task_src, re.S)
 assert 'mg_set_settings(' not in glue, 'the glue never applies a read of wl_mode without the confirmation'
 start_src = body(glue, 'mode_glue_start')
 # B8a: a wireless mode that really started (Wi-Fi now, BLE once B4b starts it) is believed to be a target; USB asks NVS. The glue passes the mode through
 # instead of collapsing everything but Wi-Fi to USB.
 assert 'ms_mode_is_wireless(running) ? running : MS_MODE_USB' in start_src
-assert 'ms_mode_is_wireless(s_running) ? (uint8_t)s_running : config_load_wl_effective()' in start_src
+assert 'ms_mode_is_wireless(s_running) ? (uint8_t)s_running : wl_resolved(MG_RESOLVE_LIVE, &live_auto)' in start_src
 assert 'if (ms_mode_is_wireless(s_running)) atomic_store(&s_reload, true)' in start_src
 assert 's_running == MS_MODE_WIFI' not in start_src, 'no Wi-Fi-only test left in mode_glue_start'
 assert 'ms_mode_is_wireless' in code('mode_switch.h') and 'MS_MODE_BLE' in code('mode_switch.h')

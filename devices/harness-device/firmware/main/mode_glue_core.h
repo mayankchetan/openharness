@@ -18,11 +18,26 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "link_auto.h"
 #include "mode_switch.h"
+
+//   "Wi-Fi first, else phone" (wifi-first work; link_auto.h): the stored wl_mode 3 is NOT a target of this core. mode_glue.c resolves it to this boot's
+//     target (1 or 2) with mg_resolve_wl() before any mg_* call, so wl_known() below stays "1, 2 or nothing". The core runs link_auto's rules while a
+//     wireless mode runs and auto is on, hands the mode switch the mode that is due (ms_in_t.auto_target), and on an automatic edge seals the link_auto
+//     record between the focus seal and the boot_usb store (ops->la_seal), putting the old record back when the restart is refused.
+#define MG_WL_AUTO 3u            // the stored wl_mode byte for auto (config_store.h). Never a value of mg_t.wl_effective.
+
+typedef enum { MG_RESOLVE_BOOT = 0, MG_RESOLVE_LIVE } mg_resolve_t;
+// The one place the stored value becomes a target. `stored` is config_load_wl_effective(). For 0, 1, 2 (and anything else: wl_known filters it) it is returned
+// as it is and *auto_on is false. For 3 (auto) *auto_on is true and the answer is Wi-Fi or the phone:
+//   MG_RESOLVE_BOOT  this boot's pick (`pick_phone` from the link_auto record)
+//   MG_RESOLVE_LIVE  a reload or the start of the glue: the wireless mode that runs, or Wi-Fi when USB runs (an unplug is a fresh wake)
+// `auto_on` may be NULL.
+uint8_t mg_resolve_wl(uint8_t stored, mg_resolve_t when, bool pick_phone, ms_mode_t running, bool *auto_on);
 
 // ── boot ────────────────────────────────────────────────────────────────────────────────────────────
 typedef struct {
-    uint8_t  wl_effective;      // config_load_wl_effective(): 1 = Wi-Fi is a usable target, 2 = BLE is, 0 = none. Any other number is a mode with no transport.
+    uint8_t  wl_effective;      // the target: 1 = Wi-Fi is a usable target, 2 = BLE is, 0 = none. Any other number is a mode with no transport. NEVER the stored 3: mg_resolve_wl() first.
     bool     stay_wl;           // config_load_stay_wl()
     bool     boot_usb;          // config_load_boot_usb()
     bool     sof;               // usb_serial_jtag_is_connected(), read no earlier than MS_SOF_SETTLE_MS after the reset
@@ -31,6 +46,9 @@ typedef struct {
     ms_record_view_t record;    // its contents (zeros when not trusted)
     bool     crash_trip;        // mode_record_crash_boot(): this boot follows the MS_CRASH_LIMIT-th abnormal reset in a row in a wireless mode
     uint8_t  crashes;           // the crash count after this boot's reset
+    // after the fields above (a test written for the older struct still lines up)
+    bool     auto_on;           // the stored wl_mode is 3 (auto): mg_resolve_wl() said so
+    la_view_t la;               // the link_auto record's contents (zeros when not trusted): the pick that wl_effective was resolved from
 } mg_boot_in_t;
 
 typedef struct {
@@ -43,6 +61,9 @@ typedef struct {
     uint8_t   crashes;          // the crash count to seal (the input's)
     uint8_t   flaps;            // from the record, 0 if untrusted
     char      focus[MS_FOCUS_MAX];   // the agent to put back on the carousel, "" for none
+    bool      auto_on;          // the input's: the rules of link_auto.h run in a wireless mode that starts (mg_auto_start)
+    la_view_t la;               // the input's record contents
+    bool      la_clear;         // the result is USB: the link_auto record is zeroed (the glue does it: a USB boot clears it, a later wake starts at Wi-Fi)
 } mg_boot_out_t;
 
 void mg_boot(const mg_boot_in_t *in, mg_boot_out_t *out);
@@ -59,6 +80,10 @@ typedef struct {
     uint32_t busy;                  // MS_BUSY_*
     bool     asleep;
     uint32_t idle_ms;               // milliseconds since the last touch (display_idle_ms()): the wireless -> USB gate's idle rule
+    // after the fields above. The link facts of link_auto.h, read only while auto is on and a wireless mode runs:
+    bool     link_up;               // Wi-Fi: net_state == NET_UP AND the daemon's welcome came (cable_client_is_connected()); phone: the session is up
+    uint8_t  noap_scans;            // Wi-Fi: scans in a row that found no access point
+    bool     alert_seen;            // Wi-Fi: the daemon answered a handshake with a TLS alert in this boot
 } mg_world_t;
 
 // What the glue can do. `ctx` goes to every call. All of them are called from the one task that calls mg_step.
@@ -83,7 +108,19 @@ typedef struct {
     // after the table above. A due switch is held by the busy gate: called when it is first held and again each time the busy mask or the asleep flag
     // changes, once per hold (not on every step). The glue logs it: before this a replug that took five minutes left no line saying what held it.
     void (*held)(void *ctx, ms_mode_t target, uint32_t busy, bool asleep);
+    // after the table above (wifi-first work). Both may be NULL (a table written before them).
+    // la_seal: the link_auto record (RTC). Called in the reboot sequence of an AUTOMATIC edge right after `seal` and before `store_boot_usb`, with the record
+    // of the boot that is about to start; again with the old record after a refused restart (after `undo`); and with the cleared counts when a stable session
+    // clears them (ms_out stays untouched).
+    void (*la_seal)(void *ctx, const la_view_t *record);
+    // auto_event: something the glue should say (a log line, ESP_LOGW: over BLE only warnings reach the daemon). `ev` is a mask of LA_EV_* (link_auto.h) and
+    // MG_AEV_*; `la` and `lo` give the numbers (`lo` is the answer of this step); `now_ms` the uptime.
+    void (*auto_event)(void *ctx, uint32_t ev, const la_t *la, const la_out_t *lo, uint64_t now_ms);
 } mg_ops_t;
+// The core's own events, beside the LA_EV_* bits (1 << 0 to 1 << 4):
+#define MG_AEV_EDGE      (1u << 8)    // an automatic edge is being taken now (the reboot sequence starts): lo->target, lo->why, lo->waited_ms, lo->next
+#define MG_AEV_HELD_USB  (1u << 9)    // an edge is due and USB entry holds it: welcomes are arriving (once per episode)
+#define MG_AEV_HELD_BUSY (1u << 10)   // an edge is due and the busy gate holds it (once per hold)
 
 typedef struct {
     ms_state_t ms;
@@ -100,6 +137,10 @@ typedef struct {
     bool       held_asleep;          // ... and this asleep flag
     bool       wl_pending;           // a read said "no wireless target" while a wireless mode runs; waiting for a second one (mg_apply_settings)
     uint64_t   wl_pending_at;        // uptime of that first read
+    // wifi-first work
+    bool       auto_on;              // the stored wl_mode is 3 and a wireless mode runs: link_auto's rules (`la`) are on
+    la_t       la;
+    bool       auto_usb_said;        // MG_AEV_HELD_USB has been reported for this episode
 } mg_t;
 
 // A drop to "no target" while a wireless mode runs is the user's pick of USB, which reboots the dial at once. The value comes from NVS, and a read that
@@ -145,3 +186,15 @@ void mg_apply_settings(mg_t *g, uint8_t wl_effective, bool stay_wl, uint64_t now
 // After mg_init(): the crash count this boot started with (mg_boot_out_t.crashes).
 void mg_note_crashes(mg_t *g, uint8_t crashes);
 void mg_step(mg_t *g, const mg_world_t *w, const mg_ops_t *ops);
+
+// ── "Wi-Fi first, else phone" (wifi-first work) ─────────────────────────────────────────────────────
+// After mg_init(), once: switch the rules on when the stored mode is 3 (auto) and a wireless mode really runs. `view` is the record's contents (the pick
+// this boot was resolved from, and the retries and edges used so far); `start_ms` the uptime of the radio's start. USB running (the radio did not come
+// up) leaves the rules off.
+void mg_auto_start(mg_t *g, bool auto_on, const la_view_t *view, uint64_t start_ms);
+// A reload read a wireless target (the caller does not call this for a read that says "no target"): auto went on or off in NVS. Going on starts the
+// rules fresh on the mode that runs (no retries, no edges used, the clock from `now_ms`); going off stops them. Nothing changes when `auto_on` is what
+// it was, so a reload every few seconds loses no count.
+void mg_set_auto(mg_t *g, bool auto_on, uint64_t now_ms);
+// The record as it stands (what the glue seals when auto goes on).
+la_view_t mg_auto_view(const mg_t *g);

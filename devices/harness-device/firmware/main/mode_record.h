@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "link_auto.h"
 #include "mode_switch.h"
 
 // At boot, once. `reset_is_software` is esp_reset_reason() == ESP_RST_SW. Fills `view` (zeros when the record is not trusted) and returns whether
@@ -42,4 +43,20 @@ void mode_record_crash_clear(void);
 
 #ifdef MODE_RECORD_HOST
 ms_crash_t *mode_record_crash_raw_for_test(void);
+#endif
+
+// ── the link_auto record (wifi-first work: "Wi-Fi first, else phone"; link_auto.h) ──────────────────────────────────────────────────────────
+// A third RTC_NOINIT variable, 12 bytes: which radio this boot picked, the returns to Wi-Fi used, the automatic reboots used. Trusted after a SOFTWARE
+// reset only (and with a good checksum and values in range); ANY other reset zeroes it and seals it again at once (the PMIC power-off keeps the RTC
+// memory alive, so an old pick must not be believed by a later software reset). It is read in every boot but acted on only when the stored wl_mode is 3.
+
+// At boot, once. True and the pick when trusted; otherwise false, `view` is zeros and the record is zeroed and sealed (so a later software reset reads Wi-Fi).
+bool mode_record_la_boot(bool reset_is_software, la_view_t *view);
+// Seal `v`: the record of the boot about to start (just before esp_restart() of an automatic edge), or the current state after a clear.
+void mode_record_la_save(const la_view_t *v);
+// A USB boot, or the automatic mode going off: zero, sealed.
+void mode_record_la_clear(void);
+
+#ifdef MODE_RECORD_HOST
+la_rec_t *mode_record_la_raw_for_test(void);
 #endif

@@ -69,6 +69,14 @@ int main(void)
     assert(ring_for_stored_mode() == BUFFER_BYTES_WIFI);
     assert(config_net_clear() == CFG_NET_OK);
     assert(ring_for_stored_mode() == BUFFER_BYTES);
+    // wifi-first work: mode 3 (auto, Wi-Fi first then the phone) is whole only with both settings, and gets the 96 KB ring (either radio may run)
+    host_nvs_reset();
+    assert(config_net_set("home-net", "correct horse battery", "192.168.1.20", 18480, KEY, 1) == CFG_NET_OK);
+    assert(config_net_set_ble(KEY) == CFG_NET_OK && config_net_set_mode(3) == CFG_NET_OK);
+    assert(ring_for_stored_mode() == BUFFER_BYTES_WIFI);
+    assert(config_net_set_mode(0) == CFG_NET_OK);
+    assert(ring_for_stored_mode() == BUFFER_BYTES);
+    assert(config_net_clear() == CFG_NET_OK);
     puts("ble voice: ADPCM over BLE exactly when offered, PCM on USB, the 96 KB ring only for a whole phone or Wi-Fi mode PASS");
     return 0;
 }

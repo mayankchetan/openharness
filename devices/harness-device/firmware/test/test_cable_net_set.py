@@ -115,7 +115,7 @@ assert re.search(r'#ifdef DEVICE_BLE_LINK\n[^\n]*\n\s*if \(cable_link_transport\
 
 # 7. B6: the phone-mode forms (key-only net.set, net.mode 2) need the image AND the daemon's "ble"; the refusal comes before any write.
 assert re.search(r'static bool ble_provisioning_allowed\(void\)\s*\{\s*return cable_ble_link_built\(\) && cable_client_supports\(CABLE_FEATURE_BLE\);\s*\}', CLIENT)
-assert 'feature_refused = !ble_provisioning_allowed();' in handle_net and 'feature_refused = err == CFG_NET_OK && mode == 2 && !ble_provisioning_allowed();' in handle_net
+assert 'feature_refused = !ble_provisioning_allowed();' in handle_net and 'feature_refused = err == CFG_NET_OK && (mode == 2 || mode == 3) && !ble_provisioning_allowed();' in handle_net, 'mode 2 (phone) and mode 3 (auto: Wi-Fi first, then the phone) need the image and the daemon\'s "ble"'
 assert handle_net.index('feature_refused ? "feature"') > handle_net.index('feature_refused = !ble_provisioning_allowed()')
 assert handle_net.index('feature_refused ? "feature"') < handle_net.index('atomic_exchange(&s_net_busy, true)'), 'refused before the line is claimed'
 assert "case 'b': err = config_net_set_ble(r->key); break;" in net_store
@@ -364,7 +364,8 @@ static void test_the_other_messages(void)
     assert(ok_of(r) && !strcmp(cJSON_GetObjectItemCaseSensitive(r, "host")->valuestring, "10.0.0.2") && cJSON_GetObjectItemCaseSensitive(r, "port")->valueint == 19000);
     // mode
     refused("{\"t\":\"net.mode\",\"mode\":2}", "feature");   // B6: 2 is the phone; without "ble" in the welcome the dial refuses it before any write
-    refused("{\"t\":\"net.mode\",\"mode\":3}", "mode");
+    refused("{\"t\":\"net.mode\",\"mode\":3}", "feature");   // wifi-first work: 3 is auto (Wi-Fi first, then the phone) and needs "ble" in the welcome like 2
+    refused("{\"t\":\"net.mode\",\"mode\":4}", "mode");
     refused("{\"t\":\"net.mode\"}", "mode");
     r = ask("{\"t\":\"net.mode\",\"mode\":0}");
     assert(ok_of(r) && cJSON_GetObjectItemCaseSensitive(r, "mode")->valueint == 0);
@@ -611,12 +612,18 @@ static void test_ble_key_only_form_and_mode_2(void)
     assert(ok_of(ask(SET)));
     r = ask("{\"t\":\"net.get\"}");
     assert(saved_of(r) && ble_of(r));
+    // wifi-first work: mode 3 (auto, Wi-Fi first then the phone) over both settings: stored, told by net.get, and the glue's target
+    r = ask("{\"t\":\"net.mode\",\"mode\":3}");
+    assert(ok_of(r) && !err_of(r) && saved_of(r) && ble_of(r) && mode_of(r) == 3);
+    r = ask("{\"t\":\"net.get\"}");
+    assert(ok_of(r) && mode_of(r) == 3 && config_load_wl_effective() == 3);
     // net.clear forgets both
     r = ask("{\"t\":\"net.clear\"}");
     assert(ok_of(r) && !saved_of(r) && !ble_of(r) && !host_nvs_has("bl_ver") && wl_held() == 0 && config_load_wl_effective() == 0);
-    // a mode 2 over Wi-Fi settings alone is refused by the task
+    // a mode 2 over Wi-Fi settings alone is refused by the task, and so is a mode 3
     assert(ok_of(ask(SET)));
     refused("{\"t\":\"net.mode\",\"mode\":2}", "not_provisioned");
+    refused("{\"t\":\"net.mode\",\"mode\":3}", "not_provisioned");
 }
 
 static void test_ble_forms_refusals(void)

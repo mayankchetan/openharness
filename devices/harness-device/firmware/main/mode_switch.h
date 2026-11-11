@@ -143,6 +143,10 @@ typedef struct {
     uint32_t busy;                // MS_BUSY_* mask
     bool     asleep;              // display_is_asleep()
     uint32_t idle_ms;             // milliseconds since the last touch (or key, or anything that bumps the screen's idle timer): display_idle_ms()
+    // "Wi-Fi first, else phone" (link_auto.c; wifi-first spec). The OTHER wireless mode when the automatic rule says it is due, else 0. Wireless modes
+    // only, and only when it differs from the running mode. It is a level (the same answer every step while it holds), so a gate that holds the reboot
+    // does not lose it. wl_mode stays the one concrete target (1 or 2, never the stored 3: mode_glue.c resolves that before any call here).
+    uint8_t  auto_target;
 } ms_in_t;
 
 typedef enum {
@@ -160,6 +164,9 @@ typedef struct {
     bool      flaps_cleared;  // the count has just gone to zero by 10 min of uptime: rewrite the RTC record
     bool      boot_usb;       // with REBOOT: the value of NVS boot_usb to store before restarting (target == USB). Without it the next boot
                               // finds the old value and picks the old mode again; storing it here makes the boot's own write unnecessary.
+    bool      auto_edge;      // the switch that is due (NOTICE, REBOOT or held by the gate) is the automatic edge between the two wireless modes: no dwell, no flap
+                              // count (link_auto.c has its own bounds), flaps unchanged. The glue seals the link_auto record before it restarts.
+    bool      auto_held;      // an automatic edge is due and USB entry holds it: welcomes are arriving (the T_ENTER window is open). USB has priority.
 } ms_out_t;
 
 void ms_init(ms_state_t *s, ms_mode_t running_mode, uint8_t flaps_from_record);

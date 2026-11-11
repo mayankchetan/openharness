@@ -2,6 +2,20 @@
 
 #include <string.h>
 
+_Static_assert((uint8_t)LA_TARGET_WIFI == (uint8_t)MS_MODE_WIFI && (uint8_t)LA_TARGET_PHONE == (uint8_t)MS_MODE_BLE,
+               "link_auto.h's targets are the numbers of ms_mode_t: the mode switch takes them as its auto_target");
+
+// ── the stored 3 ────────────────────────────────────────────────────────────────────────────────────
+uint8_t mg_resolve_wl(uint8_t stored, mg_resolve_t when, bool pick_phone, ms_mode_t running, bool *auto_on)
+{
+    if (auto_on) *auto_on = false;
+    if (stored != MG_WL_AUTO) return stored;   // 0, 1, 2 as they are; any other number is wl_known()'s to refuse
+    if (auto_on) *auto_on = true;
+    if (when == MG_RESOLVE_BOOT) return pick_phone ? (uint8_t)MS_WL_BLE : (uint8_t)MS_WL_WIFI;
+    // a reload, or the start of the glue: the wireless mode that runs; when USB runs (or the radio did not come up) an unplug is a fresh wake: Wi-Fi first
+    return ms_mode_is_wireless(running) ? (uint8_t)running : (uint8_t)MS_WL_WIFI;
+}
+
 // ── boot ────────────────────────────────────────────────────────────────────────────────────────────
 void mg_boot(const mg_boot_in_t *in, mg_boot_out_t *out)
 {
@@ -34,6 +48,8 @@ void mg_boot(const mg_boot_in_t *in, mg_boot_out_t *out)
     out->boot_usb_new = r.boot_usb_new;
     out->sof_ignored = r.sof_ignored;
     out->crashes = in->crashes;
+    out->auto_on = in->auto_on;
+    out->la = in->la;
 
     // The panic loop: the third abnormal reset in a row that ended a wireless run, Wi-Fi or BLE (and every one after it), sends this boot to USB. It ranks above the
     // table (stay_wl, a stale boot_usb) and below nothing; it leaves the flap count alone, and it keeps boot_usb honest (boot_usb follows the
@@ -44,6 +60,8 @@ void mg_boot(const mg_boot_in_t *in, mg_boot_out_t *out)
         out->boot_usb_new = true;
         out->write_boot_usb = !in->boot_usb;
     }
+
+    out->la_clear = out->mode == MS_MODE_USB;   // a USB boot clears the link_auto record: the next wake starts at Wi-Fi
 
     if (in->record_ok) {
         out->flaps = in->record.flaps;
@@ -103,8 +121,30 @@ void mg_step(mg_t *g, const mg_world_t *w, const mg_ops_t *ops)
         .asleep = w->asleep,
         .idle_ms = w->idle_ms,
     };
+    // "Wi-Fi first, else phone": while auto is on and a wireless mode runs, link_auto's rules say which mode is due. The answer is a level (the same
+    // every step while it holds); the mode switch applies it (no dwell, no flap count, the busy gate, USB entry first) and nothing is counted until the
+    // reboot sequence below seals the record.
+    la_out_t lo;
+    memset(&lo, 0, sizeof lo);
+    if (g->auto_on && g->la.active && ms_mode_is_wireless(g->ms.mode)) {
+        const la_in_t li = {.now_ms = w->now_ms, .up = w->link_up, .noap_scans = w->noap_scans, .alert_seen = w->alert_seen};
+        la_step(&g->la, &li, &lo);
+        if (lo.events && ops->auto_event) ops->auto_event(ops->ctx, lo.events, &g->la, &lo, w->now_ms);
+        // A stable session cleared the retries and the edges: the record says so (a restart that is no switch must not find the old counts).
+        if ((lo.events & LA_EV_STABLE) && ops->la_seal) ops->la_seal(ops->ctx, &lo.now);
+        in.auto_target = (uint8_t)lo.target;
+    }
     ms_out_t out;
     ms_step(&g->ms, &in, &out);
+    // An edge held by USB entry (welcomes are arriving): said once per episode.
+    if (out.auto_held) {
+        if (!g->auto_usb_said) {
+            g->auto_usb_said = true;
+            if (ops->auto_event) ops->auto_event(ops->ctx, MG_AEV_HELD_USB, &g->la, &lo, w->now_ms);
+        }
+    } else {
+        g->auto_usb_said = false;
+    }
 
     // The probe follows the module's answer exactly: up while it is wanted, down when it is not. Edge-triggered, so a driver is installed once.
     if (out.probe_wanted != g->probe_on) {
@@ -126,6 +166,7 @@ void mg_step(mg_t *g, const mg_world_t *w, const mg_ops_t *ops)
             g->held_busy = w->busy;
             g->held_asleep = w->asleep;
             if (ops->held) ops->held(ops->ctx, out.target, w->busy, w->asleep);
+            if (out.auto_edge && ops->auto_event) ops->auto_event(ops->ctx, MG_AEV_HELD_BUSY, &g->la, &lo, w->now_ms);
         }
     } else {
         g->held_said = false;
@@ -147,14 +188,21 @@ void mg_step(mg_t *g, const mg_world_t *w, const mg_ops_t *ops)
     // ahead: the next boot picks the old mode, the flap count in the record has already been raised, and the cap bounds the detour.
     // The restart op looks at the busy gate once more at the very end (the steps above take a display lock, an NVS commit and a log flush, and the
     // user can start a voice turn meanwhile). If it says no, nothing was restarted: put back what the sequence wrote and try again at a later step.
+    //
+    // An automatic edge adds one step: the link_auto record of the boot that is about to start (which radio, the retries and the edges used) is sealed
+    // right after the focus and before boot_usb, so by the time the restart runs everything the next boot reads is in place. A refused restart puts the
+    // old record back (after undo).
     g->done = true;
     if (ops->log_reason) ops->log_reason(ops->ctx, out.target);
+    if (out.auto_edge && ops->auto_event) ops->auto_event(ops->ctx, MG_AEV_EDGE, &g->la, &lo, w->now_ms);
     if (ops->seal) ops->seal(ops->ctx, out.flaps);
+    if (out.auto_edge && ops->la_seal) ops->la_seal(ops->ctx, &lo.next);
     // What NVS holds NOW, read before the store: a refusal puts back this, not the running mode's value (they differ after a radio fallback).
     const bool boot_usb_before = ops->load_boot_usb ? ops->load_boot_usb(ops->ctx) : g->ms.mode == MS_MODE_USB;
     if (ops->store_boot_usb) (void)ops->store_boot_usb(ops->ctx, out.boot_usb);
     if (ops->restart && !ops->restart(ops->ctx, out.target)) {
         if (ops->undo) ops->undo(ops->ctx, boot_usb_before, g->ms.flaps);
+        if (out.auto_edge && ops->la_seal) ops->la_seal(ops->ctx, &lo.now);   // the record as it stood: a reset for another reason must not find the edge
         g->done = false;
         if (g->refusals < 250) g->refusals++;
         g->retry_at = w->now_ms + mg_retry_delay_ms(g->refusals);
@@ -199,4 +247,39 @@ void mg_apply_settings(mg_t *g, uint8_t wl_effective, bool stay_wl, uint64_t now
     }
     g->wl_pending = false;               // a wireless target again (either one), or no target both before and after: nothing is waiting
     g->wl_effective = wl;
+}
+
+// ── "Wi-Fi first, else phone" ────────────────────────────────────────────────────────────────────────
+void mg_auto_start(mg_t *g, bool auto_on, const la_view_t *view, uint64_t start_ms)
+{
+    if (!g) return;
+    g->auto_on = false;
+    g->auto_usb_said = false;
+    memset(&g->la, 0, sizeof g->la);
+    if (!auto_on || !ms_mode_is_wireless(g->ms.mode)) return;   // USB runs (the radio did not come up): the rules stay off
+    la_init(&g->la, view, g->ms.mode == MS_MODE_BLE ? LA_TARGET_PHONE : LA_TARGET_WIFI, start_ms);
+    g->auto_on = g->la.active;
+}
+
+void mg_set_auto(mg_t *g, bool auto_on, uint64_t now_ms)
+{
+    if (!g || auto_on == g->auto_on) return;       // a reload that finds what it knew changes nothing: no count is lost
+    if (!auto_on) {
+        g->auto_on = false;
+        g->la.active = false;
+        return;
+    }
+    const la_view_t fresh = {0};
+    mg_auto_start(g, true, &fresh, now_ms);        // fresh on the mode that runs; USB running: stays off
+}
+
+la_view_t mg_auto_view(const mg_t *g)
+{
+    la_view_t v = {0};
+    if (g) {
+        v.phone_boot = g->la.phone_boot;
+        v.retries = g->la.retries;
+        v.edges = g->la.edges;
+    }
+    return v;
 }

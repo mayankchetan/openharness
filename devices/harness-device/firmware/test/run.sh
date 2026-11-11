@@ -108,11 +108,11 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
 # paths to USB and the bounds on every detour).
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/host_stubs" -I "$here/host_nvs" -I "$here/../main"    -o "$out/test_mode_config" "$here/test_mode_config.c" "$here/host_nvs/host_nvs.c" "$here/../main/config_store.c"
 "$out/test_mode_config"
-cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -DMODE_RECORD_HOST -I "$here/host_stubs" -I "$here/../main"    -o "$out/test_mode_record" "$here/test_mode_record.c" "$here/../main/mode_record.c" "$here/../main/mode_switch.c"
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -DMODE_RECORD_HOST -I "$here/host_stubs" -I "$here/../main"    -o "$out/test_mode_record" "$here/test_mode_record.c" "$here/../main/mode_record.c" "$here/../main/mode_switch.c" "$here/../main/link_auto.c"
 "$out/test_mode_record"
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main"    -o "$out/test_usb_probe" "$here/test_usb_probe.c" "$here/../main/usb_probe_core.c" "$here/../main/cable_frame.c"
 "$out/test_usb_probe"
-cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -DMODE_RECORD_HOST -I "$here/host_stubs" -I "$here/host_nvs" -I "$here/../main"    -o "$out/test_mode_glue" "$here/test_mode_glue.c" "$here/../main/mode_glue_core.c" "$here/../main/mode_record.c" "$here/../main/mode_switch.c"    "$here/host_nvs/host_nvs.c" "$here/../main/config_store.c"
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -DMODE_RECORD_HOST -I "$here/host_stubs" -I "$here/host_nvs" -I "$here/../main"    -o "$out/test_mode_glue" "$here/test_mode_glue.c" "$here/../main/mode_glue_core.c" "$here/../main/mode_record.c" "$here/../main/mode_switch.c" "$here/../main/link_auto.c"    "$here/host_nvs/host_nvs.c" "$here/../main/config_store.c"
 "$out/test_mode_glue"
 # The IDF side of that glue, as source rules: boot order and the radio gate, SOF settle, record trusted after a software reset only, internal task stack,
 # the reboot sequence, the probe retry, no Bluetooth target, no stay_wl writer, the UI busy rows, the last_words reason, the build list.

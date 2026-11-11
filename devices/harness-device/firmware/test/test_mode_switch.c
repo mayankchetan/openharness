@@ -30,6 +30,7 @@ typedef struct {
     uint64_t welcome_period;   // probe hello every 2 s
     uint64_t sof_rise;
     uint8_t wl_mode;
+    uint8_t auto_target;       // wifi-first: the mode the automatic rule (link_auto.c) says is due; 0 = none
     bool stay_wl;
     bool asleep;
     uint32_t busy;
@@ -45,6 +46,8 @@ typedef struct {
     ms_mode_t reboot_target;
     uint8_t reboot_flaps;
     bool reboot_boot_usb;
+    bool reboot_auto_edge;
+    unsigned auto_held_ticks, auto_edge_ticks;
     unsigned notices, probes_wanted;
     bool cleared_event;
 } sim_t;
@@ -84,6 +87,7 @@ static ms_act_t tick(sim_t *m)
     memset(&in, 0, sizeof in);
     in.now_ms = m->t;
     in.wl_mode = m->wl_mode;
+    in.auto_target = m->auto_target;
     in.stay_wl = m->stay_wl;
     in.sof = m->sof;
     in.session_up = m->have_byte && m->t - m->last_byte <= 15000;   // the dial's 15 s silence rule
@@ -98,12 +102,15 @@ static ms_act_t tick(sim_t *m)
     if (m->out.probe_wanted) m->probes_wanted++;
     if (m->out.act == MS_ACT_NOTICE) m->notices++;
     if (m->out.flaps_cleared) m->cleared_event = true;
+    if (m->out.auto_held) m->auto_held_ticks++;
+    if (m->out.auto_edge) m->auto_edge_ticks++;
     if (m->out.act == MS_ACT_REBOOT && !m->rebooted) {
         m->rebooted = true;
         m->reboot_t = m->t;
         m->reboot_target = m->out.target;
         m->reboot_flaps = m->out.flaps;
         m->reboot_boot_usb = m->out.boot_usb;
+        m->reboot_auto_edge = m->out.auto_edge;
     }
     return m->out.act;
 }
@@ -1368,6 +1375,144 @@ static void test_h12_pick_usb_while_wireless(void)
     }
 }
 
+// ── H14: the automatic edge of "Wi-Fi first, else phone" (wifi-first work, T3) ─────────────────────────────────────────────────────────────
+// link_auto.c says which wireless mode is due (ms_in_t.auto_target); this module only applies it. The rules: no dwell and no flap cap (link_auto.c
+// has its own bounds), the busy gate as for every switch, USB entry has priority and holds the edge while welcomes arrive, flaps unchanged.
+static void test_h14_auto_edge(void)
+{
+    // Wi-Fi runs, the rule says phone: at the first step, long before the dwell
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_WIFI, MS_WL_WIFI, 0);
+        m.auto_target = MS_MODE_BLE;
+        CHECK(run_to(&m, S(1)));
+        CHECK(m.reboot_target == MS_MODE_BLE && m.reboot_auto_edge && !m.reboot_boot_usb && m.reboot_flaps == 0);
+        CHECK(m.reboot_t < MS_T_DWELL_MS && m.reboot_t <= 200);
+        CHECK(m.notices == 0);
+        CHECK(m.out.probe_wanted == false);   // no cable: no probe
+    }
+    // phone to Wi-Fi the same way
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_BLE, MS_WL_BLE, 0);
+        m.auto_target = MS_MODE_WIFI;
+        CHECK(run_to(&m, S(1)) && m.reboot_target == MS_MODE_WIFI && m.reboot_auto_edge && !m.reboot_boot_usb);
+    }
+    // the flap cap does not hold it, and the count does not move (flaps stay for the USB rule)
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_WIFI, MS_WL_WIFI, MS_FLAP_CAP);
+        m.auto_target = MS_MODE_BLE;
+        CHECK(run_to(&m, S(1)) && m.reboot_target == MS_MODE_BLE && m.reboot_flaps == MS_FLAP_CAP);
+        sim_init(&m, MS_MODE_WIFI, MS_WL_WIFI, 2);
+        m.auto_target = MS_MODE_BLE;
+        CHECK(run_to(&m, S(1)) && m.reboot_flaps == 2);
+    }
+    // nothing due: the rule says nothing, or names the mode that already runs, or a number that is no mode
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_WIFI, MS_WL_WIFI, 0);
+        CHECK(!run_to(&m, S(120)));
+        m.auto_target = MS_MODE_WIFI;
+        CHECK(!run_to(&m, S(130)) && m.auto_edge_ticks == 0);
+        m.auto_target = 9;
+        CHECK(!run_to(&m, S(140)) && m.auto_edge_ticks == 0);
+        m.auto_target = MS_MODE_USB;
+        CHECK(!run_to(&m, S(150)) && m.auto_edge_ticks == 0);
+    }
+    // a USB dial ignores the field (the rule runs in a wireless mode only; a stray value changes nothing)
+    {
+        sim_t m;
+        usb_ready(&m, MS_WL_WIFI);
+        m.auto_target = MS_MODE_BLE;
+        CHECK(!run_to(&m, S(100)) && m.auto_edge_ticks == 0);
+    }
+    // the busy gate holds it like any switch: a notice while awake, a hard row even on a dark dial; a dark dial with a soft row goes silently
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_WIFI, MS_WL_WIFI, 0);
+        m.auto_target = MS_MODE_BLE;
+        m.busy = MS_BUSY_VOICE;
+        CHECK(!run_to(&m, S(5)) && m.notices > 0 && m.out.waiting && m.out.target == MS_MODE_BLE && m.out.auto_edge);
+        m.asleep = true;
+        m.busy = MS_BUSY_FW_UPDATE;
+        CHECK(!run_to(&m, S(10)) && m.out.waiting && m.out.act == MS_ACT_NONE);   // an update holds even a dark dial
+        m.busy = 0;
+        CHECK(run_to(&m, S(11)) && m.reboot_target == MS_MODE_BLE && m.reboot_auto_edge);   // it goes when the gate opens (the answer was a level)
+    }
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_WIFI, MS_WL_WIFI, 0);
+        m.auto_target = MS_MODE_BLE;
+        m.busy = MS_BUSY_VOICE;
+        m.asleep = true;
+        CHECK(run_to(&m, S(1)) && m.reboot_target == MS_MODE_BLE && m.notices == 0);   // a sleeping dial switches silently
+    }
+    {
+        sim_t m;   // the pairing window holds an awake dial
+        sim_init(&m, MS_MODE_BLE, MS_WL_BLE, 0);
+        m.auto_target = MS_MODE_WIFI;
+        m.busy = MS_BUSY_PAIRING;
+        CHECK(!run_to(&m, S(5)) && m.out.waiting && m.notices > 0);
+        m.busy = 0;
+        CHECK(run_to(&m, S(6)) && m.reboot_target == MS_MODE_WIFI);
+    }
+    // USB entry wins: SOF and welcomes arriving hold the edge while the T_ENTER window runs, and USB goes (after the dwell: it is an automatic switch)
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_WIFI, MS_WL_WIFI, 0);
+        sim_set_sof(&m, true);
+        m.auto_target = MS_MODE_BLE;
+        CHECK(!run_to(&m, S(4)) && m.auto_held_ticks > 0 && m.auto_edge_ticks == 0);   // held: welcomes arrive, the edge does not fire
+        CHECK(m.out.probe_wanted);
+        CHECK(!run_to(&m, MS_T_DWELL_MS - 1000) && m.auto_edge_ticks == 0);
+        CHECK(run_to(&m, S(70)));
+        CHECK(m.reboot_target == MS_MODE_USB && !m.reboot_auto_edge && m.reboot_boot_usb && m.reboot_flaps == 1);
+    }
+    // a host with no daemon (SOF, no welcome): nothing holds the edge, it fires as usual (finding 8)
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_WIFI, MS_WL_WIFI, 0);
+        m.daemon = false;
+        sim_set_sof(&m, true);
+        m.auto_target = MS_MODE_BLE;
+        CHECK(run_to(&m, S(1)) && m.reboot_target == MS_MODE_BLE && m.reboot_auto_edge && m.auto_held_ticks == 0);
+    }
+    // welcomes that stop release the edge: the host was a laptop that left
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_WIFI, MS_WL_WIFI, 0);
+        sim_set_sof(&m, true);
+        m.auto_target = MS_MODE_BLE;
+        CHECK(!run_to(&m, S(3)) && m.auto_held_ticks > 0);
+        m.daemon = false;   // no more welcomes: the newest is older than 3 s a moment later
+        CHECK(run_to(&m, S(9)) && m.reboot_target == MS_MODE_BLE && m.reboot_auto_edge);
+    }
+    // stay_wl: the probe never runs, so nothing holds it
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_WIFI, MS_WL_WIFI, 0);
+        m.stay_wl = true;
+        sim_set_sof(&m, true);
+        m.auto_target = MS_MODE_BLE;
+        CHECK(run_to(&m, S(1)) && m.reboot_target == MS_MODE_BLE && m.reboot_auto_edge);
+    }
+    // the user's own pick of USB (no target any more) beats the edge, and is not an automatic one
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_WIFI, MS_WL_UNSET, 0);
+        m.auto_target = MS_MODE_BLE;
+        CHECK(run_to(&m, S(1)) && m.reboot_target == MS_MODE_USB && !m.reboot_auto_edge && m.reboot_boot_usb);
+    }
+    // ordinary switches never carry the mark
+    {
+        sim_t m;
+        wireless_ready(&m, MS_MODE_WIFI);
+        sim_set_sof(&m, true);
+        CHECK(run_to(&m, S(80)) && m.reboot_target == MS_MODE_USB && !m.reboot_auto_edge);
+    }
+}
+
 int main(void)
 {
     test_h1_boot_table();
@@ -1383,6 +1528,7 @@ int main(void)
     test_h11_panic_loop();
     test_h12_pick_usb_while_wireless();
     test_h13_idle_gate();
+    test_h14_auto_edge();
     test_robustness();
     printf("test_mode_switch: %d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;

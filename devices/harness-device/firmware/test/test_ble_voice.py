@@ -18,7 +18,7 @@ HERE = Path(__file__).resolve().parent
 MAIN = HERE / '../main'
 source = (MAIN / 'audio_client_habitat.c').read_text(encoding='utf-8')
 
-match = re.search(r'^\s*ring_bytes = (\(net\.mode == 1 \|\| net\.mode == 2\) \? BUFFER_BYTES_WIFI : BUFFER_BYTES);', source, re.M)
+match = re.search(r'^\s*ring_bytes = (\(net\.mode == 1 \|\| net\.mode == 2 \|\| net\.mode == 3\) \? BUFFER_BYTES_WIFI : BUFFER_BYTES);', source, re.M)
 assert match, 'the ring-size line of audio_client_init is not the one the phone mode needs'
 assert 'config_net_info(&net)' in source, 'the size comes from the stored mode'
 # no other place picks the ring from the Wi-Fi flag alone

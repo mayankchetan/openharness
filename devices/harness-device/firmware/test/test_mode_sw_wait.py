@@ -58,7 +58,9 @@ static jmp_buf done;
 static unsigned power_sleep_wait_ms(pp_poller_t who, unsigned awake_ms) { (void)who; return relaxed && awake_ms < 2000 ? 2000 : awake_ms; }
 static void vTaskDelay(unsigned ticks) { delays++; delay_ms_total += ticks; clock_ms += ticks; if (++passes >= 1000) longjmp(done, 1); }
 static unsigned uxTaskGetStackHighWaterMark(void *t) { (void)t; return 2000; }
-static uint8_t config_load_wl_effective(void) { return 1; }
+static uint8_t wl_resolved(mg_resolve_t when, bool *auto_on) { (void)when; if (auto_on) *auto_on = false; return 1; }
+static void auto_changed(bool on) { (void)on; }
+void mg_set_auto(mg_t *g, bool auto_on, uint64_t now) { (void)g; (void)auto_on; (void)now; }
 static bool config_load_stay_wl(void) { return false; }
 void mg_apply_settings(mg_t *g, uint8_t wl, bool stay, uint64_t now) { (void)g; (void)wl; (void)stay; (void)now; }
 void mg_step(mg_t *g, const mg_world_t *w, const mg_ops_t *ops) { (void)g; (void)w; (void)ops; steps++; }

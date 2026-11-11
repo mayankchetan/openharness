@@ -96,6 +96,39 @@ static void test_clearing_the_count_reseals_zero_and_no_focus(void)
     assert(v.focus[0] == 0);
 }
 
+// ── the link_auto record (wifi-first work): a third RTC variable, 12 bytes, trusted after a software reset only ─────────────────────────────
+static void la_clean(void) { memset(mode_record_la_raw_for_test(), 0, sizeof(la_rec_t)); }
+
+static void test_la_record_round_trip_and_zeroing(void)
+{
+    la_view_t v;
+    la_clean();
+    assert(!mode_record_la_boot(true, &v) && !v.phone_boot && v.retries == 0);   // zeros are not a record (no magic): untrusted, and sealed zero now
+    assert(mode_record_la_boot(true, &v) && !v.phone_boot);                      // so the next software reset reads Wi-Fi
+    la_view_t save = {.phone_boot = true, .retries = 2, .edges = 5};
+    mode_record_la_save(&save);
+    assert(mode_record_la_boot(true, &v) && v.phone_boot && v.retries == 2 && v.edges == 5);
+    assert(mode_record_la_boot(true, &v) && v.phone_boot && v.retries == 2);     // a boot does not consume it: a restart that is no switch keeps the pick
+    // finding 4: any other reset zeroes it (a PWR wake keeps the RTC memory alive), and a later software reset reads Wi-Fi
+    assert(!mode_record_la_boot(false, &v) && !v.phone_boot && v.retries == 0 && v.edges == 0);
+    assert(mode_record_la_boot(true, &v) && !v.phone_boot && v.retries == 0 && v.edges == 0);
+    // clear: a USB boot, or the automatic mode going off
+    mode_record_la_save(&save);
+    mode_record_la_clear();
+    assert(mode_record_la_boot(true, &v) && !v.phone_boot && v.retries == 0 && v.edges == 0);
+    // garbage (a power cut)
+    memset(mode_record_la_raw_for_test(), 0xA5, sizeof(la_rec_t));
+    assert(!mode_record_la_boot(true, &v) && !v.phone_boot);
+    // the record is its own variable: the flap and crash records are untouched by it
+    mode_record_save("agent-3", 2);
+    mode_record_la_save(&save);
+    ms_record_view_t fv;
+    assert(mode_record_boot(true, &fv) && fv.flaps == 2 && !strcmp(fv.focus, "agent-3"));
+    mode_record_la_clear();
+    assert(mode_record_boot(true, &fv) && fv.flaps == 2);
+    assert(sizeof(la_rec_t) == 12);
+}
+
 // ── the crash record (panic loop, user decision 2026-10-31) ─────────────────────────────────────────
 // A sibling variable with its own checksum. Unlike the record above it is believed after EVERY kind of reset but a power-on, because it exists
 // to count the abnormal ones. A power cut may lose it: then the count is zero, which is the safe side (the dial boots as it always did).
@@ -180,6 +213,7 @@ int main(void)
     test_flap_count_is_held_at_the_cap();
     test_long_focus_is_cut_and_terminated();
     test_clearing_the_count_reseals_zero_and_no_focus();
+    test_la_record_round_trip_and_zeroing();
     puts("ok test_mode_record");
     return 0;
 }
