@@ -6101,20 +6101,64 @@ uint32_t ui_voice_generation(void)
     display_unlock();
     return g;
 }
+/*
+ * THE VOICE A BOOT HOLD STARTS ON THE SCREEN IT IS ON (owner, 2026-11-11). Only BOOT starts a capture; the touch
+ * controls for these purposes stay dark. Each purpose is the action its control built before it went dark, so the
+ * worker takes it exactly as it took the control's: 0 the main voice (Home, an agent, or the Lead), 4 a question's
+ * answer ([say] on the question, [again] on a reviewed answer), 2 the form's find ([say]), 7 the selection's find
+ * ([find], [ find ]), 5 the draft's re-speak, 6 the draft's Add to message (from the options). False where there is none.
+ */
+static bool boot_voice(action_t *out)
+{
+    if (!s.connected) return false;
+    action_t a = {.kind = A_VOICE};
+    if (s.view == HOME || s.view == AGENT) {
+        if (s.loading || !(active() || swarm_mode())) return false;   // make_action names the agent on the face, or the Lead
+        *out = make_action((hit_t){.action = A_VOICE});
+        return true;
+    }
+    if (s.view == QUESTION || s.view == ANSWER_REVIEW) {
+        const question_item_t *q = &s.q.item[s.q.index];
+        if (!s.q.valid || !s.q.supported || s.q.loading || s.q.pending || s.q.error[0] || !q->can_text) return false;
+        // [say] shows on the question when there is no draft; [again] on the review when there is one.
+        if (s.view == QUESTION && q->draft[0]) return false;
+        if (s.view == ANSWER_REVIEW && !q->draft[0]) return false;
+        a.value = 4; a.revision = s.q.revision; a.dy = s.q.index;
+        COPY(a.id, s.q.agent); copy(a.text, sizeof s.q.token, s.q.token);
+    } else if (s.view == FORM) {
+        if (form.pending || form.failed || !form.page.active || !form.page.can_query || form.page.busy) return false;
+        a.value = 2; a.revision = form.page.revision; a.dy = (int)form.page.revision;
+        copy(a.text, sizeof form.id, form.id);
+    } else if (s.view == SELECTION) {
+        if (carry.pending || !ht_selection_ready(&selection)) return false;
+        a.value = 7; a.dy = (int)selection.revision;
+        COPY(a.id, selection.agent); copy(a.text, sizeof selection.id, selection.id);
+    } else if (s.view == DRAFT || s.view == DRAFT_OPTIONS) {
+        if (!draft.page.active || draft.pending || draft.failed || draft.page.locked) return false;
+        a.value = s.view == DRAFT ? 5 : 6;   // the options' Add to message appends; the draft itself re-speaks its part
+        a.revision = draft.page.revision; a.dy = (int)draft.page.revision;
+        copy(a.text, sizeof draft.page.id, draft.page.id);
+    } else return false;
+    *out = a;
+    return true;
+}
 bool ui_voice_can_start(void)
 {
     display_lock();
-    const bool ok = (s.view == HOME || s.view == AGENT) && s.connected && !s.loading && (active() || swarm_mode()) &&
-                    !s.voice_open && !s.voice_waiting && !audio_client_active();
+    action_t a = {0};
+    const bool ok = boot_voice(&a) && !s.voice_open && !s.voice_waiting && !audio_client_active();
     display_unlock();
     return ok;
 }
 void ui_voice_start(void)
 {
     display_lock();
-    // The only voice start on the main surface (BOOT hold, ptt.c; touch never starts voice, owner 2026-11-11). make_action names the agent on the face, or the Lead in a swarm.
-    if (s.connected && !s.loading && (active() || swarm_mode()))
-        dispatch(make_action((hit_t){.action = A_VOICE}));
+    action_t a = {0};
+    if (boot_voice(&a)) {
+        // Add to message is accepted from the draft itself (the worker checks DRAFT), as the touch control's was.
+        if (a.value == 6 && s.view == DRAFT_OPTIONS) view(DRAFT);
+        dispatch(a);
+    }
     display_unlock();
 }
 void ui_voice_start_goal(void)

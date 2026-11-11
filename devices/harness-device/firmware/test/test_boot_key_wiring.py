@@ -30,10 +30,32 @@ press_case = re.search(r'case BK_PRESS:(.*?)break;', task, re.S)[1]
 assert 'ui_boot_pressed' not in press_case and 'display_wake' in press_case
 
 # ---- BOOT is the only voice start: touch never starts a capture (owner, 2026-11-11) ----
-# The main-surface start is ui_voice_start, called by the BOOT hold. Its make_action(A_VOICE) is the one such dispatch in the file.
+# ui_voice_start and ui_voice_can_start both go through boot_voice(), the one place that builds a voice purpose from the screen.
+boot = re.search(r'static bool boot_voice\(action_t \*out\)\n\{.*?^\}', ui, re.M | re.S)[0]
 start = re.search(r'void ui_voice_start\(void\)\n\{.*?^\}', ui, re.M | re.S)[0]
-assert 'dispatch(make_action((hit_t){.action = A_VOICE}))' in start
-assert ui.count('make_action((hit_t){.action = A_VOICE})') == 1, 'a second main-surface voice start (touch) is back'
+can = re.search(r'bool ui_voice_can_start\(void\)\n\{.*?^\}', ui, re.M | re.S)[0]
+assert 'boot_voice(&a)' in start and 'dispatch(a);' in start, 'BOOT dispatches the purpose of the screen it is on'
+assert 'a.value == 6 && s.view == DRAFT_OPTIONS) view(DRAFT);' in start, 'Add to message is accepted from the draft, as the touch control was'
+assert 'boot_voice(&a)' in can and 's.voice_open' in can and 's.voice_waiting' in can and 'audio_client_active()' in can
+assert ui.count('make_action((hit_t){.action = A_VOICE})') == 1, 'the one main-surface voice purpose (Home, agent, Lead) is in boot_voice'
+assert 'make_action((hit_t){.action = A_VOICE})' in boot
+# Each screen's BOOT purpose, pinned in boot_voice: the gate its touch control had, and the purpose value the worker accepts.
+for needle in (
+    'if (!s.connected) return false;',
+    's.view == HOME || s.view == AGENT', 'if (s.loading || !(active() || swarm_mode())) return false;',
+    's.view == QUESTION || s.view == ANSWER_REVIEW', '!s.q.valid || !s.q.supported || s.q.loading || s.q.pending || s.q.error[0] || !q->can_text',
+    'if (s.view == QUESTION && q->draft[0]) return false;', 'if (s.view == ANSWER_REVIEW && !q->draft[0]) return false;',
+    'a.value = 4; a.revision = s.q.revision; a.dy = s.q.index;', 'COPY(a.id, s.q.agent); copy(a.text, sizeof s.q.token, s.q.token);',
+    's.view == FORM', 'form.pending || form.failed || !form.page.active || !form.page.can_query || form.page.busy',
+    'a.value = 2; a.revision = form.page.revision; a.dy = (int)form.page.revision;',
+    's.view == SELECTION', 'carry.pending || !ht_selection_ready(&selection)', 'a.value = 7; a.dy = (int)selection.revision;',
+    's.view == DRAFT || s.view == DRAFT_OPTIONS', '!draft.page.active || draft.pending || draft.failed || draft.page.locked',
+    'a.value = s.view == DRAFT ? 5 : 6;', 'else return false;'):
+    assert needle in boot, needle
+# The worker still accepts each purpose value with the screen check it had (a purpose BOOT builds must not be refused).
+for needle in ('if (a.value == 4 && (!question_view(s.view)', 'if (a.value == 2) {\n            if (s.view != FORM', 'if (a.value == 7 && (s.view != SELECTION',
+               'if (a.value == 5 || a.value == 6) {\n            if (s.view != DRAFT'):
+    assert needle in ui, needle
 assert 'focus touch: start voice' not in ui and 'gesture tap: start voice' not in ui
 # The touch handler never names A_VOICE (A_VOICE_STOP is the touch's finish and is allowed: \bA_VOICE\b does not match it).
 touch = re.search(r'^void habitat_touch\(bool down.*?^\}', ui, re.M | re.S)[0]
@@ -50,9 +72,8 @@ focus = (main / 'ui/habitat/focus.c').read_text()
 assert '#define HOLD_TO_TALK "Hold the button to talk"' in focus and '#define HOLD_TALK "Hold the button to talk"' in focus
 assert 'Tap to talk' not in focus, 'a resting or relaxing line still tells the user to tap to talk'
 assert re.search(r'void ui_voice_stop\(void\)\n\{\n    display_lock\(\);\n    dispatch\(\(action_t\)\{\.kind = A_VOICE_STOP\}\);', ui), 'stop is the tap and hold on the voice screen: A_VOICE_STOP'
-can = re.search(r'bool ui_voice_can_start\(void\)\n\{.*?^\}', ui, re.M | re.S)[0]
-for needle in ('s.view == HOME || s.view == AGENT', 's.connected', '!s.loading', 'audio_client_active()'):
-    assert needle in can, needle
+# Touch cannot reach the voice purposes: the touch handler does not call boot_voice, and the five touch controls stay dark.
+assert 'boot_voice(' not in touch and 'ui_voice_start()' not in touch, 'touch reaches the BOOT voice purposes'
 
 # ---- app_main.c: no wipe on the first sight of BOOT; a countdown, then the wipe, then a restart ----
 assert app.count('config_clear_all()') == 1
