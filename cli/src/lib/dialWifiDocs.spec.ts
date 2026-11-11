@@ -110,3 +110,12 @@ describe('docs for the dial on Wi-Fi (W16)', () => {
     expect(note).not.toMatch(/psk|passphrase/i)
   })
 })
+
+describe('the Wi-Fi note and the auto mode (wifi-first work)', () => {
+  it('points at `harness dial net auto` and at the phone note, and never says to tap to talk', () => {
+    const note = read(NOTE)
+    expect(note).toContain('`harness dial net auto`')
+    expect(note).toContain('(dial-phone.md)')
+    expect(note).not.toMatch(/tap(ping)?\s+(the\s+\w+\s+)?to\s+(talk|speak|record)/i)
+  })
+})

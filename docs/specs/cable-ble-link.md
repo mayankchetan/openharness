@@ -158,8 +158,9 @@ a hint for the screen and is never trusted for data.
 
 ### 5.2 Home hint (`e70301f3-...`): write, encrypted
 
-Value 0x01 = the phone sees the home network; 0x00 = it does not. The dial feeds it to the mode switch (home hint true for 10 s
-returns the dial to Wi-Fi, subject to the flap cap and dwell). A write with a length other than 1 is rejected with ATT error
+Value 0x01 = the phone sees the home network; 0x00 = it does not. The dial stores the value (`ble_link_home_hint()` in `ble_link.c` returns it).
+No firmware code reads it for the mode switch: the return to Wi-Fi is decided by the rules of section 9, not by this hint. (An earlier draft of this
+spec said a true hint for 10 s returned the dial to Wi-Fi; that was never built.) A write with a length other than 1 is rejected with ATT error
 0x0D (invalid attribute value length). A write of a value above 1 is rejected with ATT error 0x80 (application error, value
 out of range).
 
@@ -211,3 +212,39 @@ out of range).
 
 ADPCM (frame type 0x07, Wi-Fi link spec section 2), negotiated by the `voice.begin` codec field. USB stays PCM. A record of one
 block is 325 bytes on the wire (derived: the spec's CBC record), so one record fits one L2CAP PDU of 504 bytes.
+
+## 9. Auto mode (Wi-Fi first, then the phone)
+
+Stored `wl_mode` 3. The decision is pure logic in `main/link_auto.c` (host test `test/test_link_auto.c`); the numbers are in `main/link_auto.h`. One radio
+runs per boot: a change is a software restart (`esp_restart`, through the mode switch's reboot sequence), so the dial costs what a Wi-Fi boot or a phone
+boot costs today. The settings are the Wi-Fi settings and the phone settings together (they share `wl_key`); `config_load_wl_effective()` returns 3 only then.
+`harness dial net auto` sets it over the cable. An older firmware reads 3 as "no target" and boots USB, which is safe.
+
+The mode switch never sees a 3. `mode_glue.c` resolves it (`wl_resolved`) to this boot's pick, 1 (Wi-Fi) or 2 (phone), before any other code reads it.
+The pick comes from a 12 byte RTC record (`la_rec`: magic, checksum, `phone_boot`, `retries`, `edges`). The record is trusted only after a software reset with a
+good checksum. After any other reset (power-on, a wake from the power chip's off state, a panic, a watchdog) it is zeroed and sealed again at once, so the
+pick is Wi-Fi. A USB boot clears it.
+
+| Rule | Value | Result |
+|---|---|---|
+| Wi-Fi works | link up AND the daemon's `welcome` came | stay on Wi-Fi |
+| Network not found | 2 scans in a row (`LA_NOAP_SCANS`) | restart on the phone at once |
+| TLS alert from the daemon | seen once in the attempt (sticky) | hold on Wi-Fi: no fallback (the phone has the same key) |
+| Not working | 30 s (`LA_TRY_MS`: 15 s join + 5 s TCP + 5 s TLS = 25 s, plus 20 percent) | restart on the phone |
+| Wi-Fi lost after it worked | 120 s (`LA_WIFI_LOST_MS`) | restart on the phone (not a retry) |
+| Phone link dropped (it had been up) | 30, 60, 120 s by retry (`LA_DROP_WAIT_LIST`) | restart to try Wi-Fi: retry + 1 |
+| Phone never connected | 120 s from the BLE start (`LA_NEVER_MS`) | restart to try Wi-Fi: retry + 1 |
+| Retries | 3 per wake (`LA_RETRY_MAX`), tested before the wait table is read | then the dial stays on the phone until the next wake |
+| Edges | 8 without a clear (`LA_EDGE_CAP`) | then no automatic restart |
+| Stable session | 600 s (`LA_STABLE_MS`) | retries and edges back to zero |
+
+At most 7 restarts per wake: 1 + 2 x 3. The mode switch applies an automatic edge without the 60 s dwell and without the flap count, and keeps the busy gate
+(voice, a draft, an open pairing window, an update) and its "Switching in a moment" notice. A switch to USB has priority: while the probe's welcomes arrive the edge
+is held; with a USB host that sends no welcome (no daemon) nothing holds it. In auto mode the phone stack starts only after a fallback, so pair the phone first
+in phone-only mode. With no bond the pairing window then opens at the fallback and needs the user's Yes as always.
+
+The log lines (`mode_sw` tag, warnings, so they reach the daemon over BLE): `auto: boot pick=... record=...`, `auto: wifi -> phone: ...`, `auto: phone -> wifi: ... retry n of 3`,
+`auto: edge held: ...`, `auto: edge refused: ...`, `auto: stable ...`, `auto: record zeroed`.
+
+The dial shows a small link mark (a Wi-Fi mark or a phone mark; amber while the session is not up) at the lower right of every screen while a wireless mode runs.
+Voice starts with the BOOT button only: no line on the dial says to tap.

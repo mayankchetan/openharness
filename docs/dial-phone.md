@@ -86,6 +86,47 @@ Pairing starts on the dial, not on the phone. You do it once.
 To remove the pairing, open Settings > Phone on the dial and use Forget. Then remove the dial in Android Bluetooth settings as well
 (see the four actions under "Install the release build").
 
+## Wi-Fi first, then the phone (auto mode)
+
+If the dial also holds Wi-Fi settings, it can try your Wi-Fi first and use the phone only when Wi-Fi does not work. This is the mode for a
+dial that is mostly at home but sometimes away.
+
+1. Set up the phone and pair it first, as above. Pair it in phone-only mode (`harness dial phone on`). In auto mode the phone link starts only
+   after a Wi-Fi attempt fails, and the dial cannot say how many phones it is paired with while Bluetooth is off, so Harness cannot check it
+   for you.
+2. Give the dial its Wi-Fi network (`harness dial wifi set`, see [the Wi-Fi note](dial-wifi.md)). The Wi-Fi settings and the phone settings
+   share one key.
+3. With the dial plugged in, run `harness dial net auto`. It refuses a dial that lacks one of the two and names the command that is missing.
+   `harness dial wifi show` and `harness dial phone show` then say "auto: Wi-Fi first, then phone".
+4. Unplug the cable.
+
+What the dial does, in this order:
+
+- Every start tries Wi-Fi first: after you unplug the cable, after the power chip switched the dial off and you pressed PWR, and after a
+  power-on. A restart that Harness makes by itself during a switch does not change this rule.
+- If the Wi-Fi network is not found twice in a row, or the dial is not connected to this computer after 30 seconds, it restarts on the phone.
+- If this computer answers the dial's handshake with a refusal (a wrong key), the dial stays on Wi-Fi and shows "Plug in USB". The phone
+  uses the same key, so it would be refused too.
+- On the phone: if the phone link drops, the dial waits 30 seconds and then restarts to try Wi-Fi again. The second drop waits 60 seconds and
+  the third 120 seconds. If the phone never connects, it tries Wi-Fi again 2 minutes after the phone link started. That is at most 3 returns to
+  Wi-Fi; after the third the dial stays on the phone until the next start. A phone link that holds for 10 minutes clears the count.
+- On Wi-Fi: if the link was up and then stays down for 2 minutes, the dial restarts on the phone. It does not go back to Wi-Fi by itself
+  later, except by the rules above.
+- Plugging the cable in works as before: after about 5 seconds, and 30 seconds after your last touch if a page, a question or a picker is open.
+  It never restarts in the middle of a voice message, a draft, a firmware update or a pet upload. While a pairing number is on the glass it waits.
+
+What you see on the dial:
+
+- A small link mark at the lower right of the glass on every screen, whenever the dial is not on USB. A Wi-Fi mark means the Wi-Fi link
+  runs. A phone mark means the phone link runs. It is dim while the dial is connected to this computer, and amber while it is not.
+- Under the word "Harness", "Using phone" while the phone link is not up yet ("Joining Wi-Fi" is the Wi-Fi line).
+- On the Link screen (this version has no gesture that opens it), "Link: Auto - Wi-Fi" or "Link: Auto - Phone".
+
+Voice starts with the BOOT button on the dial only. Touching the glass does not start it.
+
+To leave auto mode run `harness dial wifi on` (Wi-Fi only), `harness dial phone on` (phone only) or `harness dial wifi off` (USB only).
+`harness dial phone off` is refused while the dial is in auto mode.
+
 ## Check that it works
 
 - The app status line says "tunnel up" when the dial has a session with this computer.

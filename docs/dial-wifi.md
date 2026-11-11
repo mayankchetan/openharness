@@ -55,6 +55,9 @@ bottom edge; that was removed). Choose from this computer, with the dial plugged
 A dial set up for the phone (`harness dial phone on`) is in the phone mode, not in Wi-Fi mode: only one of
 them is on at a time, and `harness dial wifi on` or a new `harness dial wifi set` turns the phone mode off.
 
+A dial that holds both settings can also try Wi-Fi first and use the phone when Wi-Fi does not work: `harness dial net auto`. The rules and
+what the dial shows are in [the phone note](dial-phone.md). The dial shows a small link mark at the lower right of the glass while it is not on USB.
+
 ## Long idle on the battery
 
 In the image built with `DEVICE_BATTERY_POWEROFF`, a dial that has been idle in light sleep for 30 minutes on its battery closes its link to this computer
