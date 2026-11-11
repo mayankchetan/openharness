@@ -24,6 +24,9 @@ The wire format is in [the BLE link specification](specs/cable-ble-link.md). Thi
 4. Unplug the cable.
 5. Install the phone app: `adb install phone-bridge-debug.apk` (the file is in `devices/harness-device/phone-bridge/build/outputs/apk/debug/`
    after `gradlew assembleDebug`).
+
+   For daily use install the signed release build instead (see "Install the release build" below). The debug build allows an unbonded
+   channel and talks to `127.0.0.1` for development; the release build always pairs first and talks to the Cloudflare host.
 6. Open the app and tap Settings. Fill in three fields, then tap Save:
    - Relay URL: `wss://<your host name>/relay`
    - Cloudflare Access Client ID
@@ -31,6 +34,29 @@ The wire format is in [the BLE link specification](specs/cable-ble-link.md). Thi
 
    The app keeps the secret encrypted on the phone. Never put it in the URL, and never type it anywhere else.
 7. Go back and tap Start bridge. Allow "Nearby devices" and notifications when Android asks.
+
+## Install the release build
+
+The release build is signed with a personal key. The key file and its password stay outside the repository, in a folder you keep private
+(here `C:\Users\<you>\.harness\bench\android-release\`). Back that folder up: a later update must use the same key.
+
+1. Build it. In `devices/harness-device/phone-bridge` run, with JDK 21:
+   `set PHONEBRIDGE_SIGNING=<path to keystore.properties>` and then `gradlew assembleRelease`. The properties file has
+   `storeFile`, `storePassword`, `keyAlias` and `keyPassword`. Without `PHONEBRIDGE_SIGNING` the build still works but gives an unsigned
+   APK, which Android will not install. The file is `build/outputs/apk/release/phone-bridge-release.apk`.
+2. Uninstall the debug app first (`adb uninstall dev.openharness.phonebridge`, or remove it in Android Settings). The debug build and the
+   release build have different signatures, so Android will not update one with the other.
+3. Install the release APK: `adb install phone-bridge-release.apk`.
+4. The uninstall wiped the app's stored Cloudflare Access token. Push it again from this computer with the token script in the
+   workbench repository: `scripts\dial\push-access-token.ps1`. Or open Settings in the app and type the three fields again.
+5. Tap Start bridge. If the phone is not bonded with the dial yet, the app starts the pairing itself: Android shows a 6-digit number, the dial
+   shows one too. Open the dial's Phone screen first so its pairing window is open (it opens by itself when the dial has no bond). Check that
+   the two numbers match, then tap [yes] on both. The app waits up to 60 seconds. If you refuse, or the time runs out, the status says
+   "Pairing refused or timed out - check the dial", and the app tries again after a pause.
+
+The Android pairing (bond) with the dial belongs to the phone's Bluetooth stack, not to the app. It survives the uninstall and the
+reinstall, so a dial that was paired before needs no new pairing. If you used Forget on the dial, remove the dial in Android Settings >
+Connected devices too, so the two sides agree, then pair again.
 
 ## Pair the dial with the phone
 

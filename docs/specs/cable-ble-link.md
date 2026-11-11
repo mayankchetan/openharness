@@ -79,7 +79,7 @@ contract.
   Pairing is allowed only inside the window the user opens in Settings (`pair_window_ms` = 120000 ms). A dial has no touch path
   to Settings, so the dial also opens the same window by itself when the phone mode starts (after an unplug) with no bond
   stored, and shows the Phone screen with the countdown, and again at a connect while the window is closed (expired, or closed
-  by a touch) and no bond is stored, at most `rearm_max` = 3 times per start (a new unplug is a new start; the opening at the
+  by a touch) and no bond is stored, at most `rearm_max` = 3 times per start (a new unplug is a new start, and a Forget also restores the budget, because the bond store is empty again; the opening at the
   start is not counted; the dial logs when the budget is spent); with a bond stored it does not. An open window is not extended
   by a connect. The screen is woken once when the window opens and once when a number appears, not at every tick. While the window
   is open the dial keeps advertising (the 30 s advertising timeout waits, and is due at once when the window ends). Only the user
