@@ -348,6 +348,9 @@ static struct {
     uint32_t left_s;   // seconds of the window left, rounded up
     uint32_t code;     // the 6-digit number to compare (PASSKEY only)
 } phone_ui;
+// Review M-1(c) / F-1: the screen-wake marks for the pairing window and the number. They live here, not in phone_poll, so phone_leave can clear them: phone_poll
+// returns early off the three views and could not reset a function-local static, and a window that a later connect re-opens while the user is elsewhere must bump again.
+static bool bumped_window, bumped_prompt;
 static bool phone_view(view_t v) { return v == PHONE || v == PASSKEY || v == FORGET; }
 static void phone_leave(void);
 static uint32_t ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
@@ -2491,6 +2494,8 @@ static void phone_leave(void)
     if (s.view == PASSKEY) ble_link_pair_answer(false);   // an unanswered number is a No (it also closes the window and ends the link)
     if (ble_link_pairing_busy()) ble_link_pairing_window(false);
     memset(&phone_ui, 0, sizeof phone_ui);
+    bumped_window = false;                   // review F-1: the next window (a later connect's re-arm, while the user is elsewhere) wakes the screen again
+    bumped_prompt = false;
 }
 // One read of the link into phone_ui, and the moves that follow from it. Render task, display lock held. Outside the three views it does one thing: when the
 // link has opened the pairing window by itself (no bond stored; ble_link.c), it shows the Phone screen, because no touch path reaches Settings > Phone. The
@@ -2526,7 +2531,6 @@ static void phone_poll(void)
     phone_ui.code = prompt ? code % 1000000 : 0;
     // Review M-1(c): wake a dimmed screen when the window opens and when a number appears, once each, not at every tick (a stranger's connects must not hold the
     // screen up for the whole window). The marks reset when the window or the number is gone.
-    static bool bumped_window, bumped_prompt;
     if (!window) bumped_window = false;
     if (!prompt) bumped_prompt = false;
     if (window && !bumped_window) { bumped_window = true; display_bump_activity(); }

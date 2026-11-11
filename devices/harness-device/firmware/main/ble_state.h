@@ -208,6 +208,9 @@ bool ble_pair_stays_open_after_no(bool phone_mode_on, unsigned bonds);
 //    changes: the number and the user's Yes stay required, and the per-link hold above caps what a connected peer can hold. Review M-1(b): at most BLE_REARM_MAX
 //    re-arms per start (`rearms` = how many were used), so a stranger who keeps connecting cannot keep a window open for ever.
 bool ble_pair_rearm_wanted(const ble_pair_window_t *w, uint64_t now_ms, bool phone_mode_on, unsigned bonds, unsigned rearms);
+//  - Review F-2 (2026-11-11): true when ble_pair_rearm_wanted refuses ONLY because the budget is spent (the window closed, phone mode on, no bond, rearms at
+//    BLE_REARM_MAX). The glue logs that denial once per start; every other refusal is silent, as before.
+bool ble_pair_rearm_budget_spent(const ble_pair_window_t *w, uint64_t now_ms, bool phone_mode_on, unsigned bonds, unsigned rearms);
 //  - Review M-1(a): the cooldown (ms) before advertising again after a link was dropped at the encryption deadline: the flat BLE_COOLDOWN_MS unless a pairing number
 //    was shown on that link (a person was comparing it), then none.
 uint32_t ble_enc_timeout_cooldown_ms(bool number_was_shown);

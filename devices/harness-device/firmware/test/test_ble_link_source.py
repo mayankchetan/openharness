@@ -178,11 +178,17 @@ sdk = (fw / 'sdkconfig.defaults.ble').read_text()
 assert 'BT_NIMBLE_HS_PVCY=n' not in sdk and 'BT_NIMBLE_SM_SC=y' in sdk, 'privacy (RPA resolving) stays at the IDF default: on'
 assert 'BLE_SM_PAIR_KEY_DIST_ID' in body(link, 'apply_bonding_policy') and body(link, 'apply_bonding_policy').count('BLE_SM_PAIR_KEY_DIST_ID') == 2, 'both sides distribute the ID key when the window is open'
 # Item 4a: the auto-open is asked again at every connect, before the security request is decided, and an open window is not extended
-assert re.search(r'const unsigned bonds = ble_link_bond_count\(\);\s*state_lock\(\);\s*const bool rearm = ble_pair_rearm_wanted\(&s_pair, now_ms\(\), s_started, bonds, s_rearms\);\s*if \(rearm\) s_rearms\+\+;\s*const unsigned rearms_now = s_rearms;\s*state_unlock\(\);\s*if \(rearm\) window_set\(true, ', connect), 'the re-arm: bond count outside the lock, rule and budget under it'
+assert re.search(r'const unsigned bonds = ble_link_bond_count\(\);\s*state_lock\(\);\s*const bool rearm = ble_pair_rearm_wanted\(&s_pair, now_ms\(\), s_started, bonds, s_rearms\);\s*if \(rearm\) s_rearms\+\+;\s*const bool denied = !rearm && !s_rearm_denied_logged && ble_pair_rearm_budget_spent\(&s_pair, now_ms\(\), s_started, bonds, s_rearms\);\s*if \(denied\) s_rearm_denied_logged = true;\s*state_unlock\(\);\s*if \(rearm\) window_set\(true, ', connect), 'the re-arm: bond count outside the lock, rule, budget and the once-per-start denial mark under it'
 # Review M-1(b): the budget is per start (reset in ble_init_task, where the auto-open is not counted), spent at a connect only, and the spending is logged
 assert code('ble_link.c').count('s_rearms++') == 1 and 's_rearms = 0;' in body(link, 'ble_init_task') and 'BLE_REARM_MAX' in text('ble_state.h')
-assert 're-arm budget spent' in raw_link and 'rearms_now == BLE_REARM_MAX' in connect
 assert 's_rearms' not in body(link, 'window_set') and 's_rearms' not in body(link, 'ble_link_pairing_window'), 'neither the auto-open nor the Phone screen spends the budget'
+# Review F-2 (2026-11-11): the first denied re-arm of a start is logged (once), and a Forget gives the budget back (the bond store is empty again)
+assert 'pair window re-arm budget spent' in raw_link and 'rearms_now' not in connect, 'the denial is logged where it happens, not at the third use'
+assert re.search(r'if \(denied\) ESP_LOGW\(TAG, "pair window re-arm budget spent \(%u per start\)[^"]*", \(unsigned\)BLE_REARM_MAX\);', raw_link), 'the denial line names the budget'
+assert code('ble_link.c').count('s_rearm_denied_logged = true') == 1 and 's_rearm_denied_logged = false;' in body(link, 'ble_init_task'), 'the once-per-start mark: set at the denial, cleared at a start'
+fget_b = body(link, 'forget_run')
+assert re.search(r'ble_store_clear\(\);.*?state_lock\(\);\s*s_rearms = 0;\s*state_unlock\(\);', fget_b, re.S), 'Forget: the budget is reset after the wipe, under the lock'
+assert code('ble_link.c').count('s_rearms = 0;') == 2, 'the two resets: a new start and a Forget'
 # Review M-1(a): a link dropped at the encryption deadline with no number shown on it gets the flat cooldown; the flag is set where the number goes up and cleared at a connect
 task_m = body(link, 'ble_link_task')
 assert re.search(r'const bool number_shown_here = s_number_shown_link;\s*state_unlock\(\);', task_m), 'read under the lock, in the step that decided the drop'
@@ -311,6 +317,13 @@ failed = re.search(r'if \(event->enc_change\.status != 0\) \{(.*?)\n        \}',
 assert failed, 'a failed encryption has its own branch'
 failed = failed[1]
 assert 's_prompt.active = false;' in failed and 's_prompt.number = 0;' in failed and 'ble_set_prompting(&s_ble, false);' in failed, 'the offer and the deadline hold are cleared'
+# Review F-4 (2026-11-11): a failed pairing on a link that showed no number gets the flat cooldown (none when a number was shown: a person decided). The host task
+# only leaves the value; the link task owns the advertising clock and takes the value under the lock, before its advertising step.
+assert re.search(r'ble_set_prompting\(&s_ble, false\);\s*s_enc_fail_cool_ms = ble_enc_timeout_cooldown_ms\(s_number_shown_link\);\s*state_unlock\(\);\s*terminate_link\(\);', failed), 'the cooldown is set under the lock, just before the link is ended'
+assert code('ble_link.c').count('s_enc_fail_cool_ms') == 4, 'declaration, the failed-pairing write, and the link task read and reset'
+task_fc = body(link, 'ble_link_task')
+assert re.search(r'state_lock\(\);\s*const uint32_t fail_cool = s_enc_fail_cool_ms;\s*s_enc_fail_cool_ms = 0;\s*state_unlock\(\);\s*if \(fail_cool\) s_adv_not_before_ms = now \+ fail_cool;', task_fc), 'the link task takes the cooldown and starts its clock'
+assert task_fc.index('if (fail_cool) s_adv_not_before_ms') < task_fc.index('if (st == BLE_ST_ADVERTISING && !s_adv_active && now >= s_adv_not_before_ms) advertise();'), 'before the advertising step of the same tick'
 assert failed.index('state_lock()') < failed.index('s_prompt.active = false;') < failed.index('ble_set_prompting(&s_ble, false);') < failed.index('state_unlock()') < failed.index('terminate_link()'), 'under the lock, then the link is ended'
 assert 'ble_prompt_verdict(&s_pair, s_prompt.since_ms, now_ms(), answer)' in settle and 'ble_numcmp_verdict(' not in settle, 'the bounded verdict'
 assert 's_prompt.since_ms = now_ms();' in gapb, 'the time the number went on show'

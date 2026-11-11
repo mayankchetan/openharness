@@ -814,6 +814,37 @@ static void test_a_silent_peer_is_not_welcomed_back_at_once(void)
     CHECK(ble_enc_timeout_cooldown_ms(true) == 0);
 }
 
+// Review F-2 (2026-11-11): a re-arm refused only because the budget is spent is reported once per start. The glue asks this after ble_pair_rearm_wanted said no:
+// it is true exactly when the window is closed, phone mode is on, no bond is stored and the budget is used up. Every other refusal is not a budget denial.
+static void test_the_budget_denial_is_told_apart_from_the_other_refusals(void)
+{
+    ble_pair_window_t w;
+    ble_pair_init(&w);
+    CHECK(!ble_pair_rearm_budget_spent(&w, 5000, true, 0, BLE_REARM_MAX - 1));      // one re-arm left: not spent
+    CHECK(ble_pair_rearm_budget_spent(&w, 5000, true, 0, BLE_REARM_MAX));           // the fourth connect: spent
+    CHECK(ble_pair_rearm_budget_spent(&w, 5000, true, 0, BLE_REARM_MAX + 1));
+    CHECK(!ble_pair_rearm_budget_spent(&w, 5000, true, 1, BLE_REARM_MAX));          // a bond stored: no window is wanted, so not a budget denial
+    CHECK(!ble_pair_rearm_budget_spent(&w, 5000, false, 0, BLE_REARM_MAX));         // phone mode off
+    CHECK(ble_pair_rearm_budget_spent(NULL, 5000, true, 0, BLE_REARM_MAX));         // no window object reads as closed
+    ble_pair_open(&w, 5000);
+    CHECK(!ble_pair_rearm_budget_spent(&w, 5001, true, 0, BLE_REARM_MAX));          // the window is open: nothing to re-arm
+    CHECK(ble_pair_rearm_budget_spent(&w, 5000 + BLE_PAIR_WINDOW_MS, true, 0, BLE_REARM_MAX));   // expired: closed, so the budget is what refuses
+    for (unsigned open = 0; open < 2; open++) {
+        for (unsigned phone = 0; phone < 2; phone++) {
+            for (unsigned bonds = 0; bonds < 2; bonds++) {
+                for (unsigned rearms = 0; rearms <= BLE_REARM_MAX + 1; rearms++) {
+                    ble_pair_window_t v;
+                    ble_pair_init(&v);
+                    if (open) ble_pair_open(&v, 5000);
+                    const bool denied = ble_pair_rearm_budget_spent(&v, 5001, phone, bonds, rearms);
+                    const bool refused_only_by_budget = !ble_pair_rearm_wanted(&v, 5001, phone, bonds, rearms) && ble_pair_auto_open_wanted(phone, bonds) && !open;
+                    CHECK(denied == (refused_only_by_budget && rearms >= BLE_REARM_MAX));
+                }
+            }
+        }
+    }
+}
+
 // Review M-2: a stored bond that is not authenticated with a 16-byte key is junk, whether or not the stack calls the link bonded, and it is deleted at the
 // pairing's end or at the link drop, so bonds stays 0 after a Just-Works attempt. Only an ENCRYPTED link that is not good counts (a link that never got
 // encrypted says nothing about the stored bond of a real phone), and a peer the store does not hold has nothing to delete.
@@ -1059,6 +1090,7 @@ int main(int argc, char **argv)
     test_a_no_leaves_the_auto_opened_window_open();
     test_the_window_is_rearmed_at_a_connect();
     test_a_silent_peer_is_not_welcomed_back_at_once();
+    test_the_budget_denial_is_told_apart_from_the_other_refusals();
     test_a_junk_bond_is_found_without_the_bonded_flag();
     test_advertising_goes_on_while_the_window_is_open();
     test_a_peer_that_may_hold_a_bond();

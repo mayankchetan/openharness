@@ -229,6 +229,11 @@ bool ble_pair_rearm_wanted(const ble_pair_window_t *w, uint64_t now_ms, bool pho
     return rearms < BLE_REARM_MAX && ble_pair_auto_open_wanted(phone_mode_on, bonds) && !ble_pair_is_open(w, now_ms);
 }
 
+bool ble_pair_rearm_budget_spent(const ble_pair_window_t *w, uint64_t now_ms, bool phone_mode_on, unsigned bonds, unsigned rearms)
+{
+    return rearms >= BLE_REARM_MAX && ble_pair_auto_open_wanted(phone_mode_on, bonds) && !ble_pair_is_open(w, now_ms);
+}
+
 uint32_t ble_enc_timeout_cooldown_ms(bool number_was_shown)
 {
     return number_was_shown ? 0 : BLE_COOLDOWN_MS;

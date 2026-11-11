@@ -99,7 +99,12 @@ assert 'phone_leave' not in land and 'user_nav' not in land, 'the boot landing i
 assert 'phone: the user left the Phone screen' in body(raw, 'phone_leave'), 'a close by the user says so in the log (item 4c)'
 # Review M-1(c): the screen is woken when the window opens and when a number appears, once each, never at every tick
 poll_b = body(raw, 'phone_poll')
-assert re.search(r'static bool bumped_window, bumped_prompt;\s*if \(!window\) bumped_window = false;\s*if \(!prompt\) bumped_prompt = false;\s*if \(window && !bumped_window\) \{ bumped_window = true; display_bump_activity\(\); \}\s*if \(prompt && !bumped_prompt\) \{ bumped_prompt = true; display_bump_activity\(\); \}', poll_b), 'one bump per window open and per number'
+assert re.search(r'if \(!window\) bumped_window = false;\s*if \(!prompt\) bumped_prompt = false;\s*if \(window && !bumped_window\) \{ bumped_window = true; display_bump_activity\(\); \}\s*if \(prompt && !bumped_prompt\) \{ bumped_prompt = true; display_bump_activity\(\); \}', poll_b), 'one bump per window open and per number'
+# Review F-1 (2026-11-11): the marks live at file scope (not in phone_poll, which returns early off the Phone views), and leaving the Phone screen clears them, so a
+# window that a later connect re-opens while the user is elsewhere is bumped again. A static inside phone_poll could not be reset from phone_leave.
+assert raw.count('static bool bumped_window, bumped_prompt;') == 1 and raw.index('} phone_ui;') < raw.index('static bool bumped_window, bumped_prompt;') < raw.index('static void phone_poll(void)\n{'), 'file-scope marks, after phone_ui and before phone_poll'
+assert 'bumped_window = false;' in leave and 'bumped_prompt = false;' in leave, 'phone_leave clears both marks'
+assert leave.index('memset(&phone_ui, 0, sizeof phone_ui)') < leave.index('bumped_window = false;'), 'the marks are cleared with the view state, after the window closes'
 assert 'if (window || prompt) display_bump_activity()' not in poll_b, 'no bump at every tick'
 assert 'case FORGET:' in body(raw, 'ui_mode_switch_busy'), 'the question holds the mode switch like the stop question'
 

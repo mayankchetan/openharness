@@ -317,6 +317,8 @@ static void apply_bonding_policy(void)
 
 static bool s_number_shown_link;             // a pairing number was put on the screen on the current link (cleared at each connect); guarded by s_lock
 static unsigned s_rearms;                    // connect re-arms of the pairing window used since this start (BLE_REARM_MAX); guarded by s_lock
+static bool s_rearm_denied_logged;           // the budget refusal was logged once in this start (review F-2); guarded by s_lock
+static uint32_t s_enc_fail_cool_ms;          // review F-4: the flat cooldown a failed pairing on a link with no number shown asks for; the host task sets it, the link task takes it (guarded by s_lock)
 static bool s_window_close_logged = true;   // guarded by s_lock: the last close was logged with its reason (an expiry has none until the link task notices it)
 
 // The one place that opens or closes the window, with the reason in the log (item 4c). Not for the expiry: that closes itself, and the link task logs it.
@@ -540,6 +542,9 @@ static void forget_run(struct ble_npl_event *ev)
     window_set(false, "forget");
     prompt_settle(-1);                 // a number on show is rejected: the window is closed
     const int rc = ble_store_clear();  // every bond, once (the store never evicts by itself)
+    state_lock();
+    s_rearms = 0;                      // review F-2: the store is empty again, so the connect re-arm (no bond stored) has its budget back
+    state_unlock();
     ESP_LOGI(TAG, "forget: bonds cleared (rc=%d)", rc);
     terminate_link();
 }
@@ -576,10 +581,12 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                 state_lock();
                 const bool rearm = ble_pair_rearm_wanted(&s_pair, now_ms(), s_started, bonds, s_rearms);
                 if (rearm) s_rearms++;
-                const unsigned rearms_now = s_rearms;
+                // Review F-2: a refusal by the budget alone is logged once per start, at the first connect it refuses (not at the last re-arm that spent it)
+                const bool denied = !rearm && !s_rearm_denied_logged && ble_pair_rearm_budget_spent(&s_pair, now_ms(), s_started, bonds, s_rearms);
+                if (denied) s_rearm_denied_logged = true;
                 state_unlock();
                 if (rearm) window_set(true, "re-armed at a connect: no bond is stored");
-                if (rearm && rearms_now == BLE_REARM_MAX) ESP_LOGW(TAG, "re-arm budget spent (%u per start): the window will not open again at a connect until the next start", (unsigned)BLE_REARM_MAX);
+                if (denied) ESP_LOGW(TAG, "pair window re-arm budget spent (%u per start): no window at this connect (a Forget or a new start gives the budget back)", (unsigned)BLE_REARM_MAX);
                 bool by_identity = false;
                 const bool bonded_peer = peer_bonded(s_conn, bonds, &by_identity);
                 state_lock();
@@ -620,6 +627,9 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             s_prompt.active = false;
             s_prompt.number = 0;
             ble_set_prompting(&s_ble, false);
+            // Review F-4: a failed pairing on a link that showed no number (a stranger's request, refused) waits the flat cooldown before the dial advertises again;
+            // a number that was shown is a person's decision and gets none. The link task starts the clock (it owns the advertising timer).
+            s_enc_fail_cool_ms = ble_enc_timeout_cooldown_ms(s_number_shown_link);
             state_unlock();
             terminate_link();
             return 0;
@@ -905,7 +915,13 @@ static void ble_link_task(void *arg)
             }
         }
 
-        // 2. advertising: while ADVERTISING and not on the air (the first time, after a disconnect, after a refused back-off)
+        // 2. advertising: while ADVERTISING and not on the air (the first time, after a disconnect, after a refused back-off). Review F-4: a failed pairing
+        // (ENC_CHANGE, host task) left its flat cooldown; it is taken here, under the lock, so the advertising clock is only ever written by this task.
+        state_lock();
+        const uint32_t fail_cool = s_enc_fail_cool_ms;
+        s_enc_fail_cool_ms = 0;
+        state_unlock();
+        if (fail_cool) s_adv_not_before_ms = now + fail_cool;
         if (st == BLE_ST_ADVERTISING && !s_adv_active && now >= s_adv_not_before_ms) advertise();
         if (st != BLE_ST_ADVERTISING && s_adv_active && s_conn == BLE_HS_CONN_HANDLE_NONE) {
             ble_gap_adv_stop();
@@ -1079,6 +1095,7 @@ static void ble_init_task(void *arg)
         }
         ble_init(&s_ble);
         s_rearms = 0;   // a new start (a new unplug) has a new budget; the auto-open below is not counted
+        s_rearm_denied_logged = false;   // review F-2: the denial is logged once per start
         s_number_shown_link = false;
         s_started = true;
         post(BLE_EV_START);
