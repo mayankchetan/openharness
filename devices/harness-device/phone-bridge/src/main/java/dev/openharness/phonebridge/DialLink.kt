@@ -174,6 +174,20 @@ class DialLink(
     }
 
     /**
+     * Asks the GATT link for a connection priority (spec section 3, LinkRatePolicy). False if there is no live link to
+     * ask: the policy then has nothing to change, and the next channel or traffic report asks again.
+     */
+    fun setLinkRate(rate: LinkRate): Boolean {
+        val g = gatt
+        if (stopped.get() || g == null || gattClosed.get()) return false
+        val priority = when (rate) {
+            LinkRate.HIGH -> BluetoothGatt.CONNECTION_PRIORITY_HIGH
+            LinkRate.BALANCED -> BluetoothGatt.CONNECTION_PRIORITY_BALANCED
+        }
+        return g.requestConnectionPriority(priority)
+    }
+
+    /**
      * Opens a new CoC on the GATT link that is still up (spec 6.3 rule 4: a tunnel error closes only the channel).
      * False if the link is gone or stopped; the caller then starts over with a scan.
      */

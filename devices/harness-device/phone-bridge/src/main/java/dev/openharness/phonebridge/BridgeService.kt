@@ -28,6 +28,8 @@ class BridgeService : Service() {
 
     private val main = Handler(Looper.getMainLooper())
     private var dialLink: DialLink? = null
+    /** The connection priority of the current link (spec section 3). Stopped with the link. */
+    private var linkRate: LinkRatePolicy? = null
     private var pump: Pump? = null
     private val scheduler = Scheduler { delayMs, task ->
         main.postDelayed(task, delayMs)
@@ -131,6 +133,8 @@ class BridgeService : Service() {
             }
         }, staleBonds)
         dialLink = link
+        // The link starts at HIGH (DialLink asks for it on connect); the policy takes it down to BALANCED when idle.
+        linkRate = LinkRatePolicy(RealClock, scheduler, { rate -> link.setLinkRate(rate) })
         link.start()
     }
 
@@ -144,6 +148,7 @@ class BridgeService : Service() {
             val id = ++session
             tag.id = id
             if (link.reopenChannel()) {
+                linkRate?.setupStarted()
                 update(id, Phase.CONNECTING, "opening the channel again")
                 return
             }
@@ -158,7 +163,14 @@ class BridgeService : Service() {
         }
         bleRetry.connected()
         update(mySession, Phase.CHANNEL_OPEN, "channel open, waiting for the dial")
-        val p = Pump(channel, TunnelLink.fromSettings(settingsStore(this).load()), object : PumpListener {
+        // Every byte either way reports to the link policy on the main thread, so a voice upload from the dial
+        // switches the link to HIGH on its first packet. The idle clock starts now.
+        val rate = linkRate
+        val handler = main
+        rate?.channelUp()
+        val watched: DialChannel =
+            if (rate == null) channel else ActivityDialChannel(channel) { handler.post { rate.onTraffic() } }
+        val p = Pump(watched, TunnelLink.fromSettings(settingsStore(this).load()), object : PumpListener {
             override fun onTunnelOpening() = update(mySession, Phase.RELAYING, "tunnel opening")
             override fun onTunnelOpen() {
                 tunnelRetry.connected()
@@ -245,9 +257,13 @@ class BridgeService : Service() {
         main.removeCallbacks(ticker)
         pump?.stop()
         pump = null
+        linkRate?.channelDown() // the kept link (tunnel retry) is idle until the channel is set up again
     }
 
     private fun teardown() {
+        // The policy stops first, so the channel going down below does not request a rate on a link being closed.
+        linkRate?.stop()
+        linkRate = null
         teardownPump()
         dialLink?.stop()
         dialLink = null

@@ -73,6 +73,13 @@ contract.
 - Framing: NimBLE delivers one SDU per receive event; Android's socket may present a byte stream. Neither side relies on SDU
   boundaries. TLS records and cable frames carry their own lengths.
 
+The phone sets the link priority (`LinkRatePolicy`, phone app). It asks for HIGH (interval about 15 ms) while the channel is
+being set up and while any byte moves on the open channel in either direction. It asks for BALANCED once the open channel
+has carried no byte for 5 s. A byte in either direction asks for HIGH at once, so a voice upload from the dial is on HIGH
+from its first packet. Two priority requests are at least 2 s apart for a downgrade; an upgrade is never held back. When the
+channel closes on a kept link (a tunnel retry), the phone asks for BALANCED under the same rule, and HIGH again when the
+channel is set up. The dial's own parameters above do not change.
+
 ## 4. Security and admission
 
 - Pairing: LE Secure Connections, numeric comparison. The dial is DisplayYesNo and shows a 6-digit number with Yes and No.
