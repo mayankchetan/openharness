@@ -51,12 +51,24 @@ The release build is signed with a personal key. The key file and its password s
    workbench repository: `scripts\dial\push-access-token.ps1`. Or open Settings in the app and type the three fields again.
 5. Tap Start bridge. If the phone is not bonded with the dial yet, the app starts the pairing itself: Android shows a 6-digit number, the dial
    shows one too. Open the dial's Phone screen first so its pairing window is open (it opens by itself when the dial has no bond). Check that
-   the two numbers match, then tap [yes] on both. The app waits up to 60 seconds. If you refuse, or the time runs out, the status says
-   "Pairing refused or timed out - check the dial", and the app tries again after a pause.
+   the two numbers match, then tap [yes] on both. The app waits up to 60 seconds. If you refuse, or the time runs out, the app stops and
+   the status says "Pairing failed - press Start to try again". It does not retry by itself, so a refused pairing does not prompt you
+   again. Check the dial, then tap Start bridge.
 
 The Android pairing (bond) with the dial belongs to the phone's Bluetooth stack, not to the app. It survives the uninstall and the
-reinstall, so a dial that was paired before needs no new pairing. If you used Forget on the dial, remove the dial in Android Settings >
-Connected devices too, so the two sides agree, then pair again.
+reinstall, so a dial that was paired before needs no new pairing.
+
+Four actions erase the dial's bonds. Use any of them and the phone still holds the old bond:
+
+- Forget on the dial (Settings > Phone > Forget).
+- `harness dial phone forget`.
+- `harness dial wifi forget`.
+- The BOOT reset (the factory reset on the dial).
+
+After any of them, remove the dial in Android Settings > Connected devices (Bluetooth) too, so the two sides agree, then pair again.
+Android does not pair a device it still holds as bonded, so the dial's new pairing request never comes. If the bridge keeps failing
+with a bonded phone, it stops and the status says "The dial does not know this phone any more - remove it in Android Bluetooth settings,
+then press Start".
 
 ## Pair the dial with the phone
 
@@ -71,7 +83,8 @@ Pairing starts on the dial, not on the phone. You do it once.
    can start again from the phone.
 5. The dial now shows "Paired". When the phone has the link it shows "Connected".
 
-To remove the pairing, open Settings > Phone on the dial and use Forget.
+To remove the pairing, open Settings > Phone on the dial and use Forget. Then remove the dial in Android Bluetooth settings as well
+(see the four actions under "Install the release build").
 
 ## Check that it works
 
@@ -83,4 +96,5 @@ To remove the pairing, open Settings > Phone on the dial and use Forget.
 
 - `harness dial phone off` makes the dial start on USB only. `harness dial phone on` turns it back on.
 - `harness dial phone forget` clears the phone settings and the key on the dial and on this computer. The dial must be plugged in.
+  It erases the dial's bonds too: remove the dial in Android Bluetooth settings afterwards.
 - Tap Stop in the app (or in its notification) to stop the bridge. Set `CABLE_TUNNEL_ENABLE=false` to close the endpoint.

@@ -56,6 +56,8 @@ class DialLink(
     private val context: Context,
     private val allowUnbonded: Boolean,
     private val listener: Listener,
+    /** Owned by the service, not by this link: every retry of the ladder makes a new DialLink. */
+    private val staleBonds: StaleBondCounter,
 ) {
     interface Listener {
         fun onScanning()
@@ -64,12 +66,20 @@ class DialLink(
         /** The dial is not bonded yet: Android is pairing and the user must confirm the number. */
         fun onPairing() {}
         fun onChannel(channel: DialChannel)
-        fun onFailed(detail: String)
+
+        /** The link failed. `kind` tells the caller whether the retry ladder may run again. */
+        fun onFailed(detail: String, kind: FailureKind)
     }
 
     private val stopped = AtomicBoolean(false)
     private val found = AtomicBoolean(false)
     private val channelStarted = AtomicBoolean(false)
+
+    /** True once the current channel attempt has opened. Cleared when an attempt starts (startAttempt). */
+    @Volatile private var channelUp = false
+
+    /** One attempt counts as one failure, even when the socket and the GATT link both report it. */
+    private val attemptFailed = AtomicBoolean(false)
     private val main = Handler(Looper.getMainLooper())
 
     @Volatile private var gatt: BluetoothGatt? = null
@@ -93,7 +103,7 @@ class DialLink(
     private val scanTimeout = Runnable {
         if (!stopped.get() && !found.get()) {
             stopScan()
-            listener.onFailed("dial not found")
+            listener.onFailed("dial not found", FailureKind.LINK)
         }
     }
 
@@ -101,7 +111,7 @@ class DialLink(
         val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
         val scanner = adapter?.bluetoothLeScanner
         if (scanner == null) {
-            listener.onFailed("Bluetooth scanner unavailable")
+            listener.onFailed("Bluetooth scanner unavailable", FailureKind.LINK)
             return
         }
         val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(Wire.SERVICE_UUID)).build()
@@ -121,7 +131,7 @@ class DialLink(
             }
 
             override fun onScanFailed(errorCode: Int) {
-                if (!stopped.get()) listener.onFailed("scan failed, code $errorCode")
+                if (!stopped.get()) listener.onFailed("scan failed, code $errorCode", FailureKind.LINK)
             }
         }
         scanCallback = cb
@@ -170,6 +180,7 @@ class DialLink(
     fun reopenChannel(): Boolean {
         val g = gatt
         if (stopped.get() || g == null || gattClosed.get() || !channelStarted.get()) return false
+        startAttempt()
         Thread({ openChannel(g.device) }, "dial-coc-reconnect").start()
         return true
     }
@@ -189,7 +200,12 @@ class DialLink(
                 g.discoverServices()
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 statusToken?.let { StatusPublisher.shared?.detach(it) }
-                if (!stopped.get()) listener.onFailed("link lost, status $status")
+                if (stopped.get()) return
+                val detail = "link lost, status $status"
+                // The dial dropping the link while the channel is still being set up (for example right after the
+                // encryption fails) counts like a failed channel attempt. A drop after the channel opened does not.
+                if (channelStarted.get() && !channelUp) channelFailed(detail, g.device)
+                else main.post { linkLost(detail, g) }
             }
         }
 
@@ -203,7 +219,7 @@ class DialLink(
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
             if (stopped.get()) return
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                listener.onFailed("service discovery failed, status $status")
+                listener.onFailed("service discovery failed, status $status", FailureKind.LINK)
                 return
             }
             if (!bondGateStarted.compareAndSet(false, true)) return
@@ -243,7 +259,7 @@ class DialLink(
             is BondStep.Fail -> {
                 endBondWait()
                 Log.w(TAG, "pairing failed")
-                listener.onFailed(step.detail)
+                listener.onFailed(step.detail, FailureKind.PAIRING)
             }
         }
     }
@@ -251,6 +267,7 @@ class DialLink(
     /** The bond is there (or the dev build skips it): open the channel and attach the status writer. */
     private fun proceedToChannel(g: BluetoothGatt) {
         if (channelStarted.compareAndSet(false, true)) {
+            startAttempt()
             Thread({ openChannel(g.device) }, "dial-coc-connect").start()
         }
         // Spec 6.3 rule 8. The characteristic needs an encrypted link, so a dev build that skips pairing writes only to a
@@ -279,8 +296,11 @@ class DialLink(
         }
         bondReceiver = r
         val filter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
-        // A protected system broadcast: delivered to a receiver that is not exported.
-        if (Build.VERSION.SDK_INT >= 33) context.registerReceiver(r, filter, Context.RECEIVER_NOT_EXPORTED)
+        // Exported on purpose. ACTION_BOND_STATE_CHANGED is a protected broadcast: only the Bluetooth stack (a core
+        // uid, not the app's own uid) can send it, so no third-party app can forge it. A NOT_EXPORTED receiver would
+        // get it only from its own app or from the root and system uids, so the bond state would never arrive. The
+        // receiver still checks the action and the device address before it acts.
+        if (Build.VERSION.SDK_INT >= 33) context.registerReceiver(r, filter, Context.RECEIVER_EXPORTED)
         else context.registerReceiver(r, filter)
     }
 
@@ -328,6 +348,8 @@ class DialLink(
                 socket.close()
                 return
             }
+            channelUp = true
+            staleBonds.onChannelOpened()
             listener.onChannel(SocketDialChannel(socket))
         } catch (e: Exception) {
             connecting = null
@@ -338,8 +360,34 @@ class DialLink(
             if (stopped.get()) return // stop() closed the socket on purpose
             // Class name only: messages can carry device addresses.
             Log.w(TAG, "channel open failed: ${e.javaClass.simpleName}")
-            listener.onFailed("channel open failed: ${e.javaClass.simpleName}")
+            channelFailed("channel open failed: ${e.javaClass.simpleName}", device)
         }
+    }
+
+    /**
+     * Main thread. The link dropped before any channel was up. A pairing still waiting for an answer has failed, and it
+     * stops like any failed pairing: a retry would prompt both devices again. Otherwise the ladder runs as before.
+     */
+    private fun linkLost(detail: String, g: BluetoothGatt) {
+        if (stopped.get()) return
+        val step = bondGate.onLinkLost()
+        if (step is BondStep.Fail) handleBondStep(step, g) else listener.onFailed(detail, FailureKind.LINK)
+    }
+
+    /** A new channel attempt begins (first open, or a tunnel retry on the kept link). */
+    private fun startAttempt() {
+        channelUp = false
+        attemptFailed.set(false)
+    }
+
+    /**
+     * A channel attempt failed. Counted once per attempt. Android reads the bond for the dial now: a bonded dial that
+     * keeps failing is a stale bond (the dial forgot this phone), and the counter says so after two in a row.
+     */
+    private fun channelFailed(detail: String, device: BluetoothDevice) {
+        if (stopped.get() || !attemptFailed.compareAndSet(false, true)) return
+        val kind = staleBonds.onChannelFailed(device.bondState == BluetoothDevice.BOND_BONDED)
+        listener.onFailed(if (kind == FailureKind.STALE_BOND) StaleBondCounter.STALE_TEXT else detail, kind)
     }
 
     companion object {

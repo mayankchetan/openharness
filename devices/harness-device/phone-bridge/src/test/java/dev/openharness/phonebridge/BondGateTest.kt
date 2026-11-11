@@ -49,7 +49,13 @@ class BondGateTest {
         g.onBondChanged(BondState.BONDING)
         val f = fail(g.onBondChanged(BondState.NONE))
         assertEquals(BondGate.FAILED_TEXT, f.detail)
-        assertTrue(f.detail, f.detail.contains("Pairing refused or timed out"))
+        assertTrue(f.detail, f.detail.startsWith("Pairing failed - press Start to try again"))
+    }
+
+    @Test
+    fun pairingFailedTextTellsTheUserToRemoveAForgottenDial() {
+        assertTrue(BondGate.FAILED_TEXT, BondGate.FAILED_TEXT.contains("if the dial was reset or forgotten"))
+        assertTrue(BondGate.FAILED_TEXT, BondGate.FAILED_TEXT.contains("remove it in Android Bluetooth settings"))
     }
 
     @Test
@@ -109,5 +115,95 @@ class BondGateTest {
         assertEquals(BondState.BONDING, BondState.fromAndroid(11))
         assertEquals(BondState.BONDED, BondState.fromAndroid(12))
         assertEquals(BondState.NONE, BondState.fromAndroid(-1))
+    }
+
+    // --- A link drop while the pairing still waits for an answer: a refused pairing, not a link problem. ---
+
+    @Test
+    fun aLinkLostWhilePairingIsAPairingFailure() {
+        val g = BondGate(false)
+        g.start(BondState.NONE)
+        assertEquals(BondGate.FAILED_TEXT, fail(g.onLinkLost()).detail)
+    }
+
+    @Test
+    fun aLinkLostWhileBondingRunsIsAPairingFailure() {
+        val g = BondGate(false)
+        g.start(BondState.BONDING)
+        assertEquals(BondGate.FAILED_TEXT, fail(g.onLinkLost()).detail)
+    }
+
+    @Test
+    fun aLinkLostBeforeAnyPairingStartedIsNotAPairingFailure() {
+        assertEquals(BondStep.Wait, BondGate(false).onLinkLost())
+    }
+
+    @Test
+    fun aLinkLostAfterTheOutcomeIsFinalIsNotAPairingFailure() {
+        val bonded = BondGate(false)
+        bonded.start(BondState.BONDED)
+        assertEquals(BondStep.Wait, bonded.onLinkLost())
+
+        val failed = BondGate(false)
+        failed.start(BondState.NONE)
+        failed.onBondChanged(BondState.BONDING)
+        fail(failed.onBondChanged(BondState.NONE))
+        assertEquals(BondStep.Wait, failed.onLinkLost())
+    }
+
+    // --- Stale bond: Android reads BONDED, but the channel keeps failing (the dial forgot this phone). ---
+
+    @Test
+    fun oneBondedChannelFailureIsAnOrdinaryLinkFailure() {
+        assertEquals(FailureKind.LINK, StaleBondCounter().onChannelFailed(bonded = true))
+    }
+
+    @Test
+    fun twoConsecutiveBondedChannelFailuresAreAStaleBond() {
+        val c = StaleBondCounter()
+        assertEquals(FailureKind.LINK, c.onChannelFailed(bonded = true))
+        assertEquals(FailureKind.STALE_BOND, c.onChannelFailed(bonded = true))
+    }
+
+    @Test
+    fun staleBondStaysReportedUntilAReset() {
+        val c = StaleBondCounter()
+        c.onChannelFailed(bonded = true)
+        c.onChannelFailed(bonded = true)
+        assertEquals(FailureKind.STALE_BOND, c.onChannelFailed(bonded = true))
+        c.reset()
+        assertEquals(FailureKind.LINK, c.onChannelFailed(bonded = true))
+    }
+
+    @Test
+    fun aSuccessfulChannelStartsTheCountAgain() {
+        val c = StaleBondCounter()
+        c.onChannelFailed(bonded = true)
+        c.onChannelOpened()
+        assertEquals(FailureKind.LINK, c.onChannelFailed(bonded = true))
+        assertEquals(FailureKind.STALE_BOND, c.onChannelFailed(bonded = true))
+    }
+
+    @Test
+    fun aFailureWithoutABondBreaksTheStreak() {
+        val c = StaleBondCounter()
+        c.onChannelFailed(bonded = true)
+        assertEquals(FailureKind.LINK, c.onChannelFailed(bonded = false))
+        assertEquals(FailureKind.LINK, c.onChannelFailed(bonded = true))
+    }
+
+    @Test
+    fun unbondedFailuresAreNeverAStaleBond() {
+        val c = StaleBondCounter()
+        repeat(5) { assertEquals(FailureKind.LINK, c.onChannelFailed(bonded = false)) }
+    }
+
+    @Test
+    fun staleBondLimitIsTwoAndTheTextSaysToRemoveTheDial() {
+        assertEquals(2, StaleBondCounter.LIMIT)
+        assertEquals(
+            "The dial does not know this phone any more - remove it in Android Bluetooth settings, then press Start",
+            StaleBondCounter.STALE_TEXT,
+        )
     }
 }

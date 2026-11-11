@@ -20,8 +20,9 @@ import android.util.Log
  * Foreground service (type connectedDevice) that owns one relay session: find the dial, open the CoC, open the
  * tunnel on the first byte, pump. When a session ends for a reason that can get better (dial out of range, tunnel
  * down) it waits on the 1-2-4-8-16-30 s ladder and starts again; one ladder for the BLE link, one for the tunnel,
- * each reset by its own good connection. It stops for good on a user Stop, a missing permission, Bluetooth off or a
- * rejected token (rule 6: do not loop). Presence (waking the service when the dial is near) is not in this version.
+ * each reset by its own good connection. It stops for good on a user Stop, a missing permission, Bluetooth off, a
+ * rejected token, a refused or timed-out pairing, or a stale bond (the dial forgot this phone): the user must act first
+ * (rule 6: do not loop). Presence (waking the service when the dial is near) is not in this version.
  */
 class BridgeService : Service() {
 
@@ -34,6 +35,8 @@ class BridgeService : Service() {
     }
     private val bleRetry = Reconnector(ReconnectLadder(random = java.util.Random()), scheduler) { begin() }
     private val tunnelRetry = Reconnector(ReconnectLadder(random = java.util.Random()), scheduler) { reopenChannelOrBegin() }
+    /** Outlives each DialLink: the count of bonded channel failures must span the ladder's retries. */
+    private val staleBonds = StaleBondCounter()
     private var session = 0 // bumped on every start, so a late callback of an old session is ignored
 
     /** The session id the callbacks of one DialLink carry. A tunnel retry that keeps the link moves it to the new session. */
@@ -68,6 +71,7 @@ class BridgeService : Service() {
             else -> {
                 bleRetry.resume()
                 tunnelRetry.resume()
+                staleBonds.reset() // a user Start begins the count again, after the user has fixed the bond
                 begin()
             }
         }
@@ -121,12 +125,11 @@ class BridgeService : Service() {
                 val id = tag.id
                 main.post { startPump(id, channel) }
             }
-            override fun onFailed(detail: String) {
-                // Also ends a running session (link lost). The dial may be asleep or out of range: try again later.
+            override fun onFailed(detail: String, kind: FailureKind) {
                 val id = tag.id
-                main.post { finish(id, Phase.FAILED, detail, bleRetry) }
+                main.post { onLinkFailed(id, detail, kind) }
             }
-        })
+        }, staleBonds)
         dialLink = link
         link.start()
     }
@@ -186,6 +189,23 @@ class BridgeService : Service() {
             SessionEnd.RETRY_LINK -> finish(mySession, Phase.CLOSED, "session ended: dial closed", bleRetry)
             SessionEnd.RETRY_TUNNEL ->
                 finish(mySession, Phase.CLOSED, "session ended: ${reason.name.lowercase()}", tunnelRetry)
+        }
+    }
+
+    /**
+     * A link attempt failed. A link failure (dial out of range, channel not open) is retried on the BLE ladder, as before:
+     * the dial may be asleep or out of range. A pairing failure or a stale bond waits for the user: no ladder, and a tunnel
+     * retry still pending from an earlier session is cancelled too, so nothing starts the link again until a user Start.
+     */
+    private fun onLinkFailed(mySession: Int, detail: String, kind: FailureKind) {
+        if (mySession != session) return
+        when (kind) {
+            FailureKind.LINK -> finish(mySession, Phase.FAILED, detail, bleRetry)
+            FailureKind.PAIRING, FailureKind.STALE_BOND -> {
+                bleRetry.stop()
+                tunnelRetry.stop()
+                finish(mySession, Phase.FAILED, detail)
+            }
         }
     }
 
