@@ -63,3 +63,21 @@ CONFIG_BT_NIMBLE_NVS_PERSIST=y
 
 # Plan C12: the controller's code runs from flash instead of IRAM. +20,288 B of internal RAM at run time.
 CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY=y
+
+# v1.1: let the chip light-sleep while a BLE connection is held. Without modem sleep (the Kconfig default is n) the controller makes a
+# no-light-sleep PM lock "btLS" and holds it for as long as it is on (ESP-IDF 5.5.6 components/bt/controller/esp32c3/bt.c:1745-1746,
+# 1781-1785, 2095-2097; the S3 builds this folder, components/bt/CMakeLists.txt:7-8). Phone mode then never slept: slp=0 slp_ms=0 on all
+# 274 alive lines, 11-14 %/h. These four lines remove that lock (sleep_mode 1 and the main XTAL with XTAL_PU: bt.c:1741-1743 sets
+# no_light_sleep only when XTAL_PU is off). Effect only when the sleep overlay (sdkconfig.defaults.sleep, DEVICE_BATTERY_SLEEP) is
+# also loaded; without it the controller still sleeps between connection events, with no CPU light sleep.
+# Low-power clock: the main XTAL. This board has no external 32 kHz crystal (the RTC clock is the internal RC: CONFIG_RTC_CLK_SRC_INT_RC
+# in the generated config), so BT_CTRL_LPCLK_SEL_EXT_32K_XTAL is not offered. BT_CTRL_LPCLK_SEL_RTC_SLOW (the 136 kHz RC) would let the
+# XTAL power down, but the Kconfig help says its accuracy is far worse than the 500 ppm a connection needs and that it must not be used
+# in a BLE connection. The price of the XTAL: it stays powered through every light sleep (a bench figure is not measured yet).
+# Light sleep wakes the controller early by the larger of 1.8 ms and 7 % of the gap when the RTC clock is the RC (bt.c:1171-1180).
+# The controller sleeps only in a gap of at least 24 half slots (7.5 ms, bt.c:120, 1149): the connection interval the phone picks
+# (15 ms, latency 1 on the Pixel; the dial makes no request) leaves such gaps.
+CONFIG_BT_CTRL_MODEM_SLEEP=y
+CONFIG_BT_CTRL_MODEM_SLEEP_MODE_1=y
+CONFIG_BT_CTRL_LPCLK_SEL_MAIN_XTAL=y
+CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP=y

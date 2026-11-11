@@ -132,12 +132,24 @@ BLE_EXPECTED = {
     'CONFIG_BT_NIMBLE_MAX_CONNECTIONS': '1',
     'CONFIG_BT_NIMBLE_ROLE_PERIPHERAL': 'y',
     'CONFIG_BT_NIMBLE_ROLE_CENTRAL': 'n',
+    # v1.1: the controller may sleep between connection events and stay under automatic light sleep. Without modem sleep the
+    # controller holds a no-light-sleep PM lock for as long as it is on (IDF components/bt/controller/esp32c3/bt.c, "btLS"), and
+    # the phone path never slept (slp=0 on every alive line). Main XTAL is the only clock this board can use for a connection:
+    # no external 32 kHz crystal (RTC clock is the internal RC), and the 136 kHz RC is too inaccurate for a connection (Kconfig help).
+    'CONFIG_BT_CTRL_MODEM_SLEEP': 'y',
+    'CONFIG_BT_CTRL_MODEM_SLEEP_MODE_1': 'y',
+    'CONFIG_BT_CTRL_LPCLK_SEL_MAIN_XTAL': 'y',
+    'CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP': 'y',   # without it the main XTAL path sets no_light_sleep = 1 (bt.c:1741-1743)
 }
 for symbol, value in BLE_EXPECTED.items():
     assert ble.get(symbol) == value, f'{symbol}: sdkconfig.defaults.ble says {ble.get(symbol)!r}, expected {value!r}'
 assert not (set(ble) & set(defaults)) or all(ble[s] == defaults[s] for s in set(ble) & set(defaults)), 'no conflict with the defaults'
 assert not [s for s in ble if 'BENCH' in s or s.startswith('CONFIG_FREERTOS_')], 'nothing bench-only'
 assert not any('BT_' in s for s in defaults), 'the default files stay Bluetooth-free'
+# v1.1: the low-power clock is never the internal RC and never the (absent) external crystal; the modem-sleep options live in the BLE overlay only.
+assert 'CONFIG_BT_CTRL_LPCLK_SEL_RTC_SLOW' not in ble and 'CONFIG_BT_CTRL_LPCLK_SEL_EXT_32K_XTAL' not in ble, 'LPCLK is the main XTAL'
+assert not [n for n in ('sdkconfig.defaults', 'sdkconfig.defaults.esp32s3', 'sdkconfig.defaults.sleep')
+            if 'MODEM_SLEEP' in (firmware / n).read_text()], 'modem sleep is set in the BLE overlay only'
 # No 2M PHY and no coded PHY, ever (finding FB1 of the phone-bridge spec): BLE 5 features off, and no symbol that turns a PHY on.
 assert ble.get('CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT') == 'n'
 assert not [s for s in ble if re.search(r'2M|CODED|_PHY|EXT_ADV|PERIODIC', s) and ble[s] == 'y'], 'no PHY or extended-advertising symbol is on'
