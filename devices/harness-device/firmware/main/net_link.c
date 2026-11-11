@@ -485,11 +485,12 @@ static void net_init_task(void *arg)
 bool net_link_start(void)
 {
     config_net_t cfg;   // app_main's stack, about 150 B; zeroed before this returns
-    if (!config_net_load(&cfg) || cfg.mode != 1) {
+    if (!config_net_load(&cfg) || (cfg.mode != 1 && cfg.mode != 3)) {   // 1 = Wi-Fi only, 3 = auto (Wi-Fi first, then the phone: the glue resolved it to this boot's Wi-Fi pick)
         zero(&cfg, sizeof cfg);
         ESP_LOGI(TAG, "USB mode (Wi-Fi mode is off, or the Wi-Fi settings are not whole)");
         return false;
     }
+    const unsigned wl_mode = cfg.mode;   // 1 or 3, for the log line (cfg is zeroed below)
     boot_t *b = heap_caps_calloc(1, sizeof *b, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!b) {
         zero(&cfg, sizeof cfg);
@@ -507,7 +508,7 @@ bool net_link_start(void)
         boot_release(b);
         return false;
     }
-    ESP_LOGI(TAG, "Wi-Fi mode (wl_mode = 1): starting the radio");
+    ESP_LOGI(TAG, "Wi-Fi mode (wl_mode = %u): starting the radio", wl_mode);
     // Internal stack, on purpose: esp_wifi_start may write the PHY calibration to NVS (wifi_sta.h).
     if (xTaskCreate(net_init_task, "net_init", NET_INIT_STACK, b, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "net_init task create failed: USB mode");

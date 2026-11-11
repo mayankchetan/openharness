@@ -171,9 +171,9 @@ static void test_mode_2_needs_the_marker_and_a_key(void)
     assert(config_net_set_ble(KEY) == CFG_NET_OK);
     assert(config_net_set_mode(2) == CFG_NET_OK);
     assert(config_load_wl_effective() == 2 && info().mode == 2);
-    assert(config_net_set_mode(3) == CFG_NET_E_MODE && config_net_set_mode(-1) == CFG_NET_E_MODE);
+    assert(config_net_set_mode(4) == CFG_NET_E_MODE && config_net_set_mode(-1) == CFG_NET_E_MODE);
     assert(config_net_check_mode(0) == CFG_NET_OK && config_net_check_mode(1) == CFG_NET_OK && config_net_check_mode(2) == CFG_NET_OK);
-    assert(config_net_check_mode(3) == CFG_NET_E_MODE && config_net_check_mode(-1) == CFG_NET_E_MODE);
+    assert(config_net_check_mode(3) == CFG_NET_OK && config_net_check_mode(4) == CFG_NET_E_MODE && config_net_check_mode(-1) == CFG_NET_E_MODE);
     // back to Wi-Fi and to USB
     assert(config_net_set_mode(1) == CFG_NET_OK && config_load_wl_effective() == 1);
     assert(config_net_set_mode(2) == CFG_NET_OK && config_net_set_mode(0) == CFG_NET_OK && config_load_wl_effective() == 0);
@@ -187,6 +187,126 @@ static void test_mode_2_needs_the_marker_and_a_key(void)
     assert(config_net_set_mode(0) == CFG_NET_OK && config_load_wl_effective() == 0 && info().mode == 0);
     // the marker is never left off by a mode change
     assert(host_nvs_has("bl_ver"));
+}
+
+// Wifi-first work (T2): wl_mode 3 = auto, Wi-Fi first and then the phone. It needs BOTH settings whole, in every read and in the write.
+static void test_mode_3_needs_both_settings(void)
+{
+    // nothing, Wi-Fi alone, phone alone: not stored, and nothing is written
+    fresh();
+    assert(config_net_set_mode(3) == CFG_NET_E_NOT_PROVISIONED && host_nvs_count() == 0);
+    provision_wifi(1);
+    const int wifi_only = host_nvs_count();
+    assert(config_net_set_mode(3) == CFG_NET_E_NOT_PROVISIONED && host_nvs_count() == wifi_only);
+    assert(config_load_wl_effective() == 1 && info().mode == 1);
+    fresh();
+    assert(config_net_set_ble(KEY) == CFG_NET_OK);
+    const int ble_only = host_nvs_count();
+    assert(config_net_set_mode(3) == CFG_NET_E_NOT_PROVISIONED && host_nvs_count() == ble_only);
+
+    // both: stored, and read back as 3 by every accessor
+    fresh();
+    provision_wifi(1);
+    assert(config_net_set_ble(KEY) == CFG_NET_OK);
+    assert(config_net_set_mode(3) == CFG_NET_OK);
+    assert(*(const uint8_t *)host_nvs_raw("wl_mode") == 3);
+    assert(config_load_wl_effective() == 3 && info().mode == 3 && info().saved && info().ble);
+    config_net_t n;
+    assert(config_net_load(&n) && n.mode == 3 && !strcmp(n.ssid, SSID) && !memcmp(n.key, KEY, 32));   // net_link_start takes 1 or 3
+    assert(host_nvs_has("wl_ver") && host_nvs_has("bl_ver"));                                           // the markers are back after the write
+    // and moves on to every other mode and back
+    assert(config_net_set_mode(1) == CFG_NET_OK && config_load_wl_effective() == 1 && config_net_load(&n) && n.mode == 1);
+    assert(config_net_set_mode(2) == CFG_NET_OK && config_load_wl_effective() == 2 && config_net_load(&n) && n.mode == 0);
+    assert(config_net_set_mode(0) == CFG_NET_OK && config_load_wl_effective() == 0);
+    assert(config_net_set_mode(3) == CFG_NET_OK && config_load_wl_effective() == 3);
+
+    // a stored 3 over one-sided settings reads 0 in every accessor (an older write, a lost marker, a later key change)
+    fresh();
+    assert(config_net_set_ble(KEY) == CFG_NET_OK);
+    put_u8("wl_mode", 3);
+    assert(config_load_wl_effective() == 0 && info().mode == 0 && config_net_load(&n) == false);
+    fresh();
+    provision_wifi(1);
+    put_u8("wl_mode", 3);
+    assert(config_load_wl_effective() == 0 && info().mode == 0 && config_net_load(&n) && n.mode == 0);   // Wi-Fi alone: not 3, and not 1 either
+    // both whole, then each marker lost, the key lost, zeroed or cut short
+    static const char *const lose[] = {"bl_ver", "wl_ver", "wl_key", "wl_ssid", "wl_host", "wl_port", "wl_pass"};
+    for (unsigned i = 0; i < sizeof lose / sizeof lose[0]; i++) {
+        fresh();
+        provision_wifi(1);
+        assert(config_net_set_ble(KEY) == CFG_NET_OK && config_net_set_mode(3) == CFG_NET_OK);
+        erase(lose[i]);
+        if (config_load_wl_effective() != 0) { fprintf(stderr, "3 over a lost %s: got %u\n", lose[i], config_load_wl_effective()); assert(0); }
+        assert(!(config_net_load(&n) && n.mode == 3));
+    }
+    fresh();
+    provision_wifi(1);
+    assert(config_net_set_ble(KEY) == CFG_NET_OK && config_net_set_mode(3) == CFG_NET_OK);
+    {
+        nvs_handle_t h;
+        assert(nvs_open("pair", NVS_READWRITE, &h) == ESP_OK);
+        assert(nvs_set_blob(h, "wl_key", ZERO_KEY, 32) == ESP_OK);
+    }
+    assert(config_load_wl_effective() == 0 && !(config_net_load(&n) && n.mode == 3));
+    {
+        nvs_handle_t h;
+        assert(nvs_open("pair", NVS_READWRITE, &h) == ESP_OK);
+        assert(nvs_set_blob(h, "wl_key", KEY, 16) == ESP_OK);
+    }
+    assert(config_load_wl_effective() == 0 && !config_net_load(&n));
+
+    // every stored byte over both whole settings: 1, 2 and 3 are targets, nothing else is
+    static const struct { uint8_t byte; uint8_t want; } t[] = {{0, 0}, {1, 1}, {2, 2}, {3, 3}, {4, 0}, {7, 0}, {128, 0}, {255, 0}};
+    for (unsigned i = 0; i < sizeof t / sizeof t[0]; i++) {
+        fresh();
+        provision_wifi(1);
+        assert(config_net_set_ble(KEY) == CFG_NET_OK);
+        put_u8("wl_mode", t[i].byte);
+        if (config_load_wl_effective() != t[i].want) { fprintf(stderr, "both whole, byte %u: got %u want %u\n", t[i].byte, config_load_wl_effective(), t[i].want); assert(0); }
+        assert(info().mode == t[i].want);
+    }
+
+    // the marker rules hold in the write: a cut anywhere in set_mode(3) leaves the old mode, no target, or 3 (never a half-written configuration), and
+    // wl_ver and bl_ver are either both back or both absent
+    fresh();
+    provision_wifi(1);
+    assert(config_net_set_ble(KEY) == CFG_NET_OK);
+    host_nvs_fail_after(-1);
+    const int before = host_nvs_mutations();
+    assert(config_net_set_mode(3) == CFG_NET_OK);
+    const int steps = host_nvs_mutations() - before;
+    assert(steps >= 3);
+    for (int cut = 0; cut < steps; cut++) {
+        fresh();
+        provision_wifi(1);
+        assert(config_net_set_ble(KEY) == CFG_NET_OK);
+        host_nvs_fail_after(cut);
+        (void)config_net_set_mode(3);
+        host_nvs_fail_after(-1);
+        const uint8_t eff = config_load_wl_effective();
+        if (eff != 0 && eff != 1 && eff != 3) { fprintf(stderr, "cut %d: effective %u\n", cut, eff); assert(0); }
+        assert(host_nvs_has("wl_ver") == host_nvs_has("bl_ver") || eff == 0);
+        if (eff == 0) assert(!host_nvs_has("wl_ver") || !host_nvs_has("bl_ver"));
+    }
+
+    // net.clear and the factory reset take it with the rest
+    fresh();
+    provision_wifi(1);
+    assert(config_net_set_ble(KEY) == CFG_NET_OK && config_net_set_mode(3) == CFG_NET_OK);
+    assert(config_net_clear() == CFG_NET_OK);
+    assert(config_load_wl_effective() == 0 && !host_nvs_has("wl_mode") && info().mode == 0);
+    fresh();
+    provision_wifi(1);
+    assert(config_net_set_ble(KEY) == CFG_NET_OK && config_net_set_mode(3) == CFG_NET_OK);
+    assert(config_clear_all());
+    assert(config_load_wl_effective() == 0 && !host_nvs_has("wl_mode"));
+
+    // a new Wi-Fi form over a dial in auto writes its own mode (0 or 1): auto is set again by net.mode 3
+    fresh();
+    provision_wifi(1);
+    assert(config_net_set_ble(KEY) == CFG_NET_OK && config_net_set_mode(3) == CFG_NET_OK);
+    provision_wifi(1);
+    assert(config_load_wl_effective() == 1);
 }
 
 static void test_the_full_form_still_refuses_mode_2(void)
@@ -386,6 +506,7 @@ int main(void)
     test_power_cut_leaves_the_marker_absent();
     test_the_marker_is_written_last();
     test_mode_2_needs_the_marker_and_a_key();
+    test_mode_3_needs_both_settings();
     test_the_full_form_still_refuses_mode_2();
     test_wl_effective_for_every_stored_byte();
     test_both_configurations_share_one_key();

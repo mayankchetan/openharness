@@ -203,16 +203,17 @@ assert 'MS_WL_BLE' not in code('config_store.c') and 'MS_MODE_BLE' not in code('
 # ── 3. no way to strand a dial ──────────────────────────────────────────────────────────────────────
 store = code('config_store.c')
 # B6: wl_mode 2 (the phone) is storable, but only with the phone settings: the full Wi-Fi form still refuses it, and config_net_set_mode(2) needs bl_ver and a key.
-assert re.search(r'config_net_err_t config_net_check_mode\(long mode\) \{ return \(mode == 0 \|\| mode == 1 \|\| mode == 2\) \? CFG_NET_OK : CFG_NET_E_MODE; \}', store)
+# wifi-first work (T2): wl_mode 3 (auto, Wi-Fi first then the phone) is storable only with BOTH settings; 0 to 3 are the modes, anything else is refused.
+assert re.search(r'config_net_err_t config_net_check_mode\(long mode\) \{ return \(mode >= 0 && mode <= 3\) \? CFG_NET_OK : CFG_NET_E_MODE; \}', store)
 assert 'mode != 0 && mode != 1' in body(store, 'config_net_check'), 'net.set (the Wi-Fi form) refuses mode 2'
 mode_set = body(store, 'config_net_set_mode')
-assert 'config_net_check_mode(mode)' in mode_set and 'mode == 2 ? info.ble' in mode_set and 'mode == 1 ? info.saved' in mode_set, 'mode 2 needs the phone settings, 1 the Wi-Fi settings'
+assert 'config_net_check_mode(mode)' in mode_set and 'mode == 2 ? info.ble' in mode_set and 'mode == 1 ? info.saved' in mode_set and 'mode == 3 ? (info.saved && info.ble)' in mode_set, 'mode 2 needs the phone settings, 1 the Wi-Fi settings, 3 (auto) both'
 assert len(re.findall(r'nvs_set_u8\(h, K_WL_MODE', store)) == 2, 'wl_mode is written by config_net_set and config_net_set_mode, and by nothing else'
 assert 'nvs_set_u8(h, K_WL_MODE' in body(store, 'config_net_set') and 'nvs_set_u8(h, K_WL_MODE' in mode_set
-assert 'out->mode = mode == 1 ? 1 : 0;' in body(store, 'config_net_load'), 'whatever byte is stored, only 1 loads as Wi-Fi'
-assert 'out->mode = (mode == 1 && wifi) ? 1 : (mode == 2 && ble) ? 2 : 0;' in body(store, 'config_net_info'), 'each mode reads only over its own whole settings'
+assert 'out->mode = mode == 1 ? 1 : (mode == 3 && bl_version == BL_VERSION && config_net_check_key(out->key) == CFG_NET_OK) ? 3 : 0;' in body(store, 'config_net_load'), 'whatever byte is stored, only 1 loads as Wi-Fi, and 3 (auto) only over whole phone settings too'
+assert 'out->mode = (mode == 1 && wifi) ? 1 : (mode == 2 && ble) ? 2 : (mode == 3 && wifi && ble) ? 3 : 0;' in body(store, 'config_net_info'), 'each mode reads only over its own whole settings (3: both)'
 eff = body(store, 'config_load_wl_effective')
-assert 'info.mode == 1' in eff and 'info.mode == 2' in eff and 'config_ble_load(&b)' in eff
+assert 'info.mode == 1' in eff and 'info.mode == 2 || info.mode == 3' in eff and 'config_ble_load(&b)' in eff
 # the phone settings are written by one function, whose marker is last and first out, and which the cable handler reaches only through the store task
 ble_set = body(store, 'config_net_set_ble')
 assert ble_set.index('markers_off(') < ble_set.index('nvs_set_blob(h, K_WL_KEY') < ble_set.index('markers_on('), 'bl_ver comes off first and goes back last'

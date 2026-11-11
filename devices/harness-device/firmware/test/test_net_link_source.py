@@ -114,7 +114,7 @@ assert 'atomic_load(&s_state)' in body(code('net_link.c'), 'net_link_state'), 'n
 net = code('net_link.c')
 start_fn = body(net, 'net_link_start')
 guard = start_fn.index('return false')
-assert re.search(r'if \(!config_net_load\(&cfg\) \|\| cfg\.mode != 1\)', start_fn[:guard + 20]), 'the first thing net_link_start does is the mode check'
+assert re.search(r'if \(!config_net_load\(&cfg\) \|\| \(cfg\.mode != 1 && cfg\.mode != 3\)\)', start_fn[:guard + 20]), 'the first thing net_link_start does is the mode check (1: Wi-Fi, 3: auto)'
 for first_use in ('heap_caps_calloc', 'xTaskCreate', 'xSemaphoreTake'):
     assert start_fn.find(first_use) > guard, f'{first_use} is missing or comes before the USB-mode return'
 for never in ('nwifi_', 'esp_wifi_', 'cable_xport_tcp', 'cable_xport_tls', 'ui_'):
@@ -269,7 +269,7 @@ assert "log_ring_write(r, &slot, line);\n    log_ring_commit(r, &slot);" in ring
 
 # ── 6. the lines the bench reads ────────────────────────────────────────────────────────────────────
 raw = text('net_link.c') + text('wifi_sta.c') + text('cable_xport_tcp.c')
-for line in ('USB mode (', 'Wi-Fi mode (wl_mode = 1)', 'state %s -> %s', 'retry in %u ms (attempt %u, %s, state %s)', 'link up #%u handshake_ms=%d boot_ms=%d',
+for line in ('USB mode (', 'Wi-Fi mode (wl_mode = %u)', 'state %s -> %s', 'retry in %u ms (attempt %u, %s, state %s)', 'link up #%u handshake_ms=%d boot_ms=%d',
              'link down after %u ms (%s)', 'stacks %s: net_link free_min=%u B cable_link free_min=%d B', 'net_init done ok=%d stack free_min=%u B',
              'ram_telemetry_checkpoint("net_link_up")', 'ram_telemetry_checkpoint("wifi_started")', 'got ip " IPSTR " ms_to_ip=%d', 'disconnected reason=%d',
              'associated channel=%u authmode=%d', 'ap rssi=%d channel=%u', 'config ssid_len=%u pass_len=%u authmode_min=%s storage=ram hostname=%s',

@@ -94,7 +94,7 @@ typedef struct {
     char    host[CFG_NET_HOST_MAX + 1];
     uint16_t port;
     uint8_t key[CFG_NET_KEY_LEN];
-    uint8_t mode;                // wl_mode: 1 = join Wi-Fi when the USB cable is unplugged, 0 = USB only
+    uint8_t mode;                // wl_mode: 1 = join Wi-Fi when the USB cable is unplugged, 3 = Wi-Fi first and then the phone (only over whole phone settings too), else 0 = USB only
 } config_net_t;
 bool config_net_load(config_net_t *out);
 
@@ -104,7 +104,7 @@ typedef struct {
     char     ssid[CFG_NET_SSID_MAX + 1];
     char     host[CFG_NET_HOST_MAX + 1];
     uint16_t port;
-    uint8_t  mode;               // 0, 1 (Wi-Fi: only with `saved`) or 2 (phone: only with `ble`); anything else, and a mode whose settings are not whole, reads 0
+    uint8_t  mode;               // 0, 1 (Wi-Fi: only with `saved`), 2 (phone: only with `ble`) or 3 (auto, Wi-Fi first then the phone: only with both); anything else, and a mode whose settings are not whole, reads 0
     bool     ble;                // the phone settings are whole (bl_ver and a 32-byte wl_key), config_net_set_ble
 } config_net_info_t;
 void config_net_info(config_net_info_t *out);
@@ -117,12 +117,12 @@ bool config_net_key_decode(const char *b64, uint8_t out[CFG_NET_KEY_LEN]);
 config_net_err_t config_net_check(const char *ssid, const char *pass, const char *host, long port, const uint8_t *key, long mode);
 config_net_err_t config_net_check_key(const uint8_t *key);   // present and not all zero
 config_net_err_t config_net_check_host(const char *host, long port);
-config_net_err_t config_net_check_mode(long mode);   // 0, 1 or 2. The full Wi-Fi form (config_net_check) still takes 0 and 1 only.
+config_net_err_t config_net_check_mode(long mode);   // 0, 1, 2 or 3. The full Wi-Fi form (config_net_check) still takes 0 and 1 only.
 
 // Check every field, then write all of them, wl_ver last. `port` and `mode` are -1 when the message had none. A refusal names the
 // FIRST bad field in the order ssid, pass, host, port, key, mode and writes nothing.
 config_net_err_t config_net_set(const char *ssid, const char *pass, const char *host, long port, const uint8_t *key, long mode);
-// These three need a whole configuration (CFG_NET_E_NOT_PROVISIONED otherwise). The mode: 0 needs either configuration, 1 needs the Wi-Fi settings,
+// These three need a whole configuration (CFG_NET_E_NOT_PROVISIONED otherwise). The mode: 0 needs either configuration, 1 needs the Wi-Fi settings, 3 (auto) both,
 // and 2 (the phone) needs the phone settings (config_net_set_ble).
 config_net_err_t config_net_set_key(const uint8_t *key);
 config_net_err_t config_net_set_host(const char *host, long port);
@@ -146,7 +146,7 @@ config_net_err_t config_net_set_ble(const uint8_t *key);
 //
 // NO STORED VALUE MAY LEAVE A DIAL UNABLE TO REACH USB, so every read here fails toward the default behaviour:
 //   - stay_wl and boot_usb are true only for the byte 1. A corrupt byte, a byte of the wrong type, an absent key and a failed read are false.
-//   - config_load_wl_effective() is the wireless target the mode switch sees. It is Wi-Fi (1) only when the Wi-Fi settings are WHOLE (the commit
+//   - config_load_wl_effective() is the wireless target the mode switch sees (3, auto, is resolved to 1 or 2 by mode_glue.c first). It is Wi-Fi (1) only when the Wi-Fi settings are WHOLE (the commit
 //     marker and every key, config_net_info) AND wl_mode is exactly 1, and the phone (2) only when the phone settings are whole (bl_ver and a good
 //     key, config_ble_load) AND wl_mode is exactly 2. Anything else is 0 = no wireless target: the dial boots USB and never leaves it. That covers
 //     wl_mode with no credentials, a corrupt wl_mode, wl_mode 2 over Wi-Fi settings alone (or 1 over phone settings alone) and a lost marker.
@@ -159,7 +159,7 @@ bool config_save_stay_wl(bool on);
 // (one flash write per mode change, none per boot) and says false when NVS refused the write.
 bool config_load_boot_usb(void);
 bool config_save_boot_usb(bool on);
-uint8_t config_load_wl_effective(void);   // 1 = Wi-Fi is a usable wireless target, 2 = the phone is, 0 = none (the numbers of MS_WL_WIFI, MS_WL_BLE, MS_WL_UNSET)
+uint8_t config_load_wl_effective(void);   // 1 = Wi-Fi is a usable wireless target, 2 = the phone is, 3 = auto (both, Wi-Fi first), 0 = none. 3 is NOT a mode of mode_switch.h: mode_glue.c resolves it (wl_resolved) before any mg_* call
 
 // Factory reset (BOOT held at power-on, or Settings → Reset): forget all of the above, and the Wi-Fi settings.
 bool config_clear_all(void);

@@ -1600,7 +1600,7 @@ static void handle_net(const char *t, const cJSON *p)
     } else if (!strcmp(op, "mode")) {
         kind = 'm';
         err = config_net_check_mode(mode);
-        feature_refused = err == CFG_NET_OK && mode == 2 && !ble_provisioning_allowed();
+        feature_refused = err == CFG_NET_OK && (mode == 2 || mode == 3) && !ble_provisioning_allowed();   // 3 (auto) uses the phone too
     } else if (!strcmp(op, "key")) {
         kind = 'k';
         err = config_net_key_decode(key_text, key) ? config_net_check_key(key) : CFG_NET_E_KEY;

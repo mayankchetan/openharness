@@ -363,12 +363,17 @@ bool config_net_load(config_net_t *out)
         && wl_get_str(h, K_WL_HOST, out->host, sizeof out->host)
         && nvs_get_u16(h, K_WL_PORT, &out->port) == ESP_OK
         && nvs_get_blob(h, K_WL_KEY, out->key, &key_len) == ESP_OK && key_len == sizeof out->key;
-    if (ok) nvs_get_u8(h, K_WL_MODE, &mode);   // absent reads as USB only
+    uint8_t bl_version = 0;
+    if (ok) {
+        nvs_get_u8(h, K_WL_MODE, &mode);   // absent reads as USB only
+        nvs_get_u8(h, K_BL_VER, &bl_version);
+    }
     nvs_close(h);
     ok = ok && text_ok(out->ssid, 1, CFG_NET_SSID_MAX)
         && (out->pass[0] == 0 || text_ok(out->pass, 8, CFG_NET_PASS_MAX))
         && host_port_check(out->host, out->port) == CFG_NET_OK;
-    out->mode = mode == 1 ? 1 : 0;
+    // 1 = Wi-Fi only, 3 = Wi-Fi first and then the phone (auto): 3 counts only over whole phone settings as well (bl_ver and a key that is not all zero).
+    out->mode = mode == 1 ? 1 : (mode == 3 && bl_version == BL_VERSION && config_net_check_key(out->key) == CFG_NET_OK) ? 3 : 0;
     if (!ok) scrub(out, sizeof *out);
     return ok;
 }
@@ -402,7 +407,8 @@ void config_net_info(config_net_info_t *out)
     out->saved = wifi;
     if (wifi) out->port = port;
     // Each mode counts only with its own whole settings: the Wi-Fi mode over phone settings alone, or the phone mode over Wi-Fi settings alone, is 0.
-    out->mode = (mode == 1 && wifi) ? 1 : (mode == 2 && ble) ? 2 : 0;
+    // 3 (auto: Wi-Fi first, then the phone) needs BOTH.
+    out->mode = (mode == 1 && wifi) ? 1 : (mode == 2 && ble) ? 2 : (mode == 3 && wifi && ble) ? 3 : 0;
 }
 
 /** A key that is not there is not an error to erase. */
@@ -462,7 +468,7 @@ static bool markers_on(nvs_handle_t h, bool wl, bool bl)
 
 config_net_err_t config_net_check_host(const char *host, long port) { return host_port_check(host, port); }
 
-config_net_err_t config_net_check_mode(long mode) { return (mode == 0 || mode == 1 || mode == 2) ? CFG_NET_OK : CFG_NET_E_MODE; }
+config_net_err_t config_net_check_mode(long mode) { return (mode >= 0 && mode <= 3) ? CFG_NET_OK : CFG_NET_E_MODE; }
 
 config_net_err_t config_net_set(const char *ssid, const char *pass, const char *host, long port, const uint8_t *key, long mode)
 {
@@ -525,8 +531,9 @@ config_net_err_t config_net_set_mode(long mode)
     if (config_net_check_mode(mode) != CFG_NET_OK) return CFG_NET_E_MODE;
     config_net_info_t info;
     config_net_info(&info);
-    // Each mode needs its own settings: 1 the Wi-Fi settings, 2 the phone settings, 0 (USB only) either. Mode 2 is never stored without bl_ver and a key.
-    const bool allowed = mode == 1 ? info.saved : mode == 2 ? info.ble : (info.saved || info.ble);
+    // Each mode needs its own settings: 1 the Wi-Fi settings, 2 the phone settings, 3 (auto) BOTH, 0 (USB only) either. Mode 2 is never stored without
+    // bl_ver and a key, and mode 3 never without the Wi-Fi settings as well.
+    const bool allowed = mode == 1 ? info.saved : mode == 2 ? info.ble : mode == 3 ? (info.saved && info.ble) : (info.saved || info.ble);
     if (!allowed) return CFG_NET_E_NOT_PROVISIONED;
     nvs_handle_t h;
     if (open_rw(&h) != ESP_OK) return CFG_NET_E_STORAGE;
@@ -655,14 +662,14 @@ bool config_save_boot_usb(bool on) { return flag_save(K_BOOT_USB, on); }
 uint8_t config_load_wl_effective(void)
 {
     config_net_info_t info;
-    config_net_info(&info);                       // mode: 1 only over whole Wi-Fi settings, 2 only over whole phone settings, else 0
+    config_net_info(&info);                       // mode: 1 only over whole Wi-Fi settings, 2 only over whole phone settings, 3 only over both, else 0
     if (info.mode == 1) return 1;
-    if (info.mode == 2) {
+    if (info.mode == 2 || info.mode == 3) {
         // The phone's key is read here (and wiped) so that a marker over an all-zero key is not a target either.
         config_ble_t b;
         const bool ok = config_ble_load(&b);
         scrub(&b, sizeof b);
-        return ok ? 2 : 0;
+        return ok ? info.mode : 0;
     }
     return 0;
 }
