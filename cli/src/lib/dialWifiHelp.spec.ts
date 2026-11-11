@@ -72,3 +72,19 @@ describe('harness dial wifi set: the closing advice (W16)', () => {
     expect(text).not.toContain('correct horse battery')
   })
 })
+
+describe('harness help: the dial net auto entry (wifi-first work)', () => {
+  it('is exactly this text, and sits before the phone entry so the phone and Wi-Fi blocks are unchanged', () => {
+    const run = spawnSync(process.execPath, [TSX, join(CLI_ROOT, 'src', 'cli.ts'), 'help'], { encoding: 'utf8', timeout: 60_000 })
+    expect(run.status).toBe(0)
+    const lines = run.stdout.split(/\r?\n/)
+    const start = lines.findIndex((line) => line.startsWith('  harness dial net '))
+    expect(start).toBeGreaterThan(-1)
+    expect(lines.slice(start, start + 4)).toEqual([
+      '  harness dial net auto [--dial <MAC>]',
+      '                               the unplugged dial tries Wi-Fi first and falls back to the phone. Both must be set up',
+      '                               (`harness dial wifi set`, `harness dial phone set`); pair the phone in phone-only mode first',
+      '  harness dial phone <set|show|forget|on|off>',
+    ])
+  }, 90_000)
+})

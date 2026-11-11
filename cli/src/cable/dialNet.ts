@@ -8,7 +8,8 @@
 //   net.set   {ssid, pass, host, port, key (base64, 32 bytes), mode}   all six, or none (the commit marker is written last)
 //   net.get   {}                                                        the state, below
 //   net.clear {}                                                        forget the network, the address and the key
-//   net.mode  {mode}                                                    0 = USB only at boot, 1 = join Wi-Fi when unplugged
+//   net.mode  {mode}                                                    0 = USB only at boot, 1 = join Wi-Fi when unplugged, 2 = the phone,
+//                                                                       3 = auto: Wi-Fi first, then the phone (needs the Wi-Fi AND the phone settings)
 //   net.key   {key}                                                     a new key for a dial that is already set (rotate)
 //   net.host  {host, port}                                              a new address for the listener, same network and key
 //
@@ -25,7 +26,7 @@
 // that is no longer waited for and is dropped, so it can never be taken for the answer to the next one.
 //
 // Nothing here logs a value. The lines carry the op, the id and the outcome, and that is all.
-import { NET_KEY_BYTES, NET_SSID_MAX, validHost, validKeyBytes, validPort } from '../lib/dialNetRules.js'
+import { NET_KEY_BYTES, NET_SSID_MAX, validAutoMode, validHost, validKeyBytes, validPort } from '../lib/dialNetRules.js'
 
 /** How long the dial has to answer. A write to its flash takes tens of milliseconds; this is for a dead link. */
 export const NET_TIMEOUT_MS = 5_000
@@ -34,7 +35,7 @@ export type NetRequest =
   | { op: 'set'; ssid: string; pass: string; host: string; port: number; key: Buffer; mode: 0 | 1 }
   | { op: 'get' }
   | { op: 'clear' }
-  | { op: 'mode'; mode: 0 | 1 | 2 }
+  | { op: 'mode'; mode: 0 | 1 | 2 | 3 }
   /** The key-only form of net.set (B6): the phone needs the key and nothing else. */
   | { op: 'set_ble'; key: Buffer }
   | { op: 'key'; key: Buffer }
@@ -46,7 +47,7 @@ export interface NetState {
   ssid?: string
   host?: string
   port?: number
-  mode?: 0 | 1 | 2
+  mode?: 0 | 1 | 2 | 3
   /** The dial holds whole phone-mode settings (a marker and a key; the key never leaves it). */
   ble?: boolean
 }
@@ -97,7 +98,7 @@ function readState(msg: { [key: string]: unknown }): NetState {
   if (typeof msg.ssid === 'string' && msg.ssid.length > 0 && Buffer.byteLength(msg.ssid) <= NET_SSID_MAX && PRINTABLE.test(msg.ssid)) state.ssid = msg.ssid
   if (validHost(msg.host)) state.host = msg.host
   if (validPort(msg.port)) state.port = msg.port
-  if (msg.mode === 0 || msg.mode === 1 || msg.mode === 2) state.mode = msg.mode
+  if (msg.mode === 0 || msg.mode === 1 || msg.mode === 2 || msg.mode === 3) state.mode = msg.mode
   // Only a state that says so (the field is new: a firmware before B6 sends none) carries the key; absent reads as false.
   if ('ble' in msg) state.ble = msg.ble === true
   return state
@@ -162,9 +163,9 @@ export class DialNet {
       case 'set_ble': return { message: { t: 'net.set', key: request.key.toString('base64') } }
       case 'get': return { message: { t: 'net.get' } }
       case 'clear': return { message: { t: 'net.clear' } }
-      case 'mode': return request.mode === 0 || request.mode === 1 || request.mode === 2
+      case 'mode': return request.mode === 0 || request.mode === 1 || request.mode === 2 || validAutoMode(request.mode)
         ? { message: { t: 'net.mode', mode: request.mode } }
-        : { error: 'the mode is 0, 1 or 2' }
+        : { error: 'the mode is 0, 1, 2 or 3' }
       case 'key': return { message: { t: 'net.key', key: request.key.toString('base64') } }
       case 'host': return { message: { t: 'net.host', host: request.host, port: request.port } }
     }

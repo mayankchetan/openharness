@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { NET_FIELD_MESSAGES, isLanIPv4, validDial, validHost, validMode, validPass, validPort, validSsid } from './dialNetRules.js'
+import { NET_FIELD_MESSAGES, isLanIPv4, validAutoMode, validDial, validHost, validMode, validPass, validPort, validSsid } from './dialNetRules.js'
 
 describe('the rules for a dial\'s Wi-Fi fields (the same ones the firmware applies in config_net_check)', () => {
   it('an SSID is 1 to 32 bytes with no control characters', () => {
@@ -68,5 +68,15 @@ describe('the rules for a dial\'s Wi-Fi fields (the same ones the firmware appli
       expect(message.startsWith(field), field).toBe(true)
       expect(message).not.toMatch(/\$\{/)
     }
+  })
+})
+
+describe('the mode of "Wi-Fi first, then the phone" (wifi-first work)', () => {
+  it('is 3 and nothing else; the Wi-Fi switch (0 or 1) and the phone switch (0 or 2) do not take it', async () => {
+    const { validMode, validPhoneMode } = await import('./dialNetRules.js')
+    expect(validAutoMode(3)).toBe(true)
+    for (const other of [0, 1, 2, 4, -1, 3.5, '3', null, undefined, true]) expect(validAutoMode(other), String(other)).toBe(false)
+    expect(validMode(3)).toBe(false)
+    expect(validPhoneMode(3)).toBe(false)
   })
 })

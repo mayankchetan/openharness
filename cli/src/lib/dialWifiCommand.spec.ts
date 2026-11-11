@@ -153,6 +153,76 @@ describe('harness dial wifi set', () => {
   })
 })
 
+describe('harness dial net auto (wifi-first)', () => {
+  it('posts one request to /api/dial/net/auto, asks nothing, and says what the dial does and what to do first', async () => {
+    const r = rig({ reply: { status: 200, body: { ok: true, dial: MAC, mode: 3, note: 'Pair the phone first, in phone-only mode (`harness dial phone on`): with Wi-Fi working the phone stack never starts.' } } })
+    expect(await r.run('net', 'auto')).toBe(0)
+    expect(r.asked).toHaveLength(0)
+    expect(r.askedSecret).toHaveLength(0)
+    expect(r.calls).toEqual([{ path: '/api/dial/net/auto', body: {} }])
+    const text = everything(r)
+    expect(text).toContain(MAC)
+    expect(text).toMatch(/Wi-Fi first/i)
+    expect(text).toMatch(/phone/i)
+    expect(text).toContain('harness dial phone on')
+    expect(text).not.toMatch(/tap to talk/i)   // voice starts with the BOOT button only
+  })
+
+  it('sends --dial in either spelling', async () => {
+    const a = rig()
+    await a.run('net', 'auto', '--dial', MAC)
+    const b = rig()
+    await b.run('net', 'auto', `--dial=${MAC}`)
+    expect(a.calls).toEqual([{ path: '/api/dial/net/auto', body: { dial: MAC } }])
+    expect(b.calls).toEqual(a.calls)
+  })
+
+  it('knows nothing else under `net`: usage with exit 2, and the usage names every family', async () => {
+    for (const argv of [['net'], ['net', 'wifi'], ['net', 'auto', 'extra'], ['net', 'auto', '--host', '10.0.0.1'], ['net', 'auto', '--dial'], ['net', 'auto', '--dial', MAC, '--dial', MAC]]) {
+      const r = rig()
+      expect(await r.run(...argv), argv.join(' ')).toBe(2)
+      expect(r.calls).toEqual([])
+      expect(r.err.join('\n')).toMatch(/Usage: harness dial net/)
+    }
+    const none = rig()
+    await none.run()
+    expect(none.err.join('\n')).toMatch(/Usage: harness dial net/)
+    expect(none.err.join('\n')).toMatch(/Usage: harness dial wifi/)
+    expect(none.err.join('\n')).toMatch(/Usage: harness dial phone/)
+  })
+
+  it('refuses a --dial that is not a plausible name, without echoing it', async () => {
+    const r = rig()
+    expect(await r.run('net', 'auto', '--dial', 'x'.repeat(70))).toBe(2)
+    expect(everything(r)).not.toContain('xxxxxxxx')
+    expect(r.calls).toEqual([])
+  })
+
+  it('prints the daemon\'s refusal (it names the missing `wifi set` or `phone set`) and the hint for the kind', async () => {
+    const r = rig({ reply: { status: 400, body: { kind: 'bad_request', error: 'This dial holds no phone settings. Run `harness dial phone set` first (and pair the phone), then `harness dial net auto`.' } } })
+    expect(await r.run('net', 'auto')).toBe(1)
+    expect(r.err.join('\n')).toContain('harness dial phone set')
+    const gone = rig({ reply: { status: 404, body: { kind: 'no_dial', error: 'No dial is connected on the USB cable.' } } })
+    expect(await gone.run('net', 'auto')).toBe(1)
+    expect(gone.err.join('\n')).toMatch(/Plug the dial in/)
+  })
+
+  it('an older dial that answers `mode` is told to update its firmware', async () => {
+    const r = rig({ reply: { status: 502, body: { kind: 'device', err: 'mode', error: 'the dial refused: mode' } } })
+    expect(await r.run('net', 'auto')).toBe(1)
+    expect(r.err.join('\n')).toMatch(/update/i)
+    expect(r.err.join('\n')).toMatch(/firmware/i)
+  })
+
+  it('says the daemon is not running when it cannot be reached, and that an old daemon lacks the route', async () => {
+    const down = rig({ reply: null })
+    expect(await down.run('net', 'auto')).toBe(1)
+    expect(down.err.join('\n')).toMatch(/daemon is not running/)
+    const old = rig({ reply: { status: 404, body: { error: 'not found' } } })
+    expect(await old.run('net', 'auto')).toBe(1)
+  })
+})
+
 describe('the other verbs', () => {
   it('show asks the daemon and prints the keystore, the dial on the cable and this computer\'s address', async () => {
     const r = rig({ reply: { status: 200, body: {
@@ -164,6 +234,13 @@ describe('the other verbs', () => {
     expect(r.calls).toEqual([{ path: '/api/dial/net/status', body: { dial: MAC } }])
     const text = r.out.join('\n')
     for (const part of [MAC, 'home-net', '192.168.1.20:18480', '192.168.1.40', 'on']) expect(text).toContain(part)
+  })
+
+  it('show says "auto: Wi-Fi first, then phone" for a dial in mode 3', async () => {
+    const r = rig({ reply: { status: 200, body: { ok: true, lan: '192.168.1.20', port: 18480, keyed: [], usb: { dial: MAC, keyed: true, saved: true, ssid: 'home-net', host: '192.168.1.20', port: 18480, ble: true, mode: 3 } } } })
+    expect(await r.run('wifi', 'show')).toBe(0)
+    expect(r.out.join('\n')).toContain('auto: Wi-Fi first, then phone')
+    expect(r.out.join('\n')).not.toMatch(/off \(USB only\)/)
   })
 
   it('show says so when nothing is set, nothing is on the cable, and why a dial could not be read', async () => {

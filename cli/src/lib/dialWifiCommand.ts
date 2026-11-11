@@ -1,4 +1,7 @@
 /**
+ * `harness dial net auto [--dial <MAC>]` (wifi-first work, below): the unplugged dial tries Wi-Fi first and falls back to the phone. It needs both the
+ * Wi-Fi settings and the phone settings; the daemon reads the dial first and names the command that is missing (cable/netProvision.ts `auto`).
+ *
  * `harness dial phone set|show|forget|on|off` (task B6, below): the phone mode's key, over the same cable and the same daemon route, with
  * no password to ask.
  *
@@ -54,6 +57,12 @@ const PHONE_USAGE = [
   '  on | off [--dial <MAC>]  whether the dial uses the phone when its USB cable is unplugged',
 ]
 
+const NET_USAGE = [
+  'Usage: harness dial net <command>',
+  '  auto [--dial <MAC>]      the unplugged dial tries Wi-Fi first, and the phone if Wi-Fi does not work. The dial must be plugged in by USB',
+  '                           and hold both settings: run `harness dial wifi set` and `harness dial phone set` first, and pair the phone',
+]
+
 /** The one command, scoped to private networks and the local subnet. Printed, never run. */
 const firewallCommand = (port: number): string =>
   `netsh advfirewall firewall add rule name="Harness dial" dir=in action=allow protocol=TCP localport=${port} profile=private remoteip=LocalSubnet`
@@ -95,6 +104,8 @@ const HINTS: Record<string, string> = {
 /** The dial's own word for why it refused, when a person can act on it. */
 const ERR_HINTS: Record<string, string> = {
   feature: 'This dial\'s firmware has no phone mode (it needs a build with the Bluetooth link), or the daemon is too old to offer it.',
+  // The dial refused the mode number: a firmware from before "Wi-Fi first, then the phone" knows 0, 1 and 2 only.
+  mode: 'This dial\'s firmware does not know the auto mode. Update the dial\'s firmware, then run this again.',
 }
 
 /**
@@ -108,8 +119,9 @@ export async function dialCommand(args: string[], plain: DialWifiDeps): Promise<
   const deps: DialWifiDeps = { ...plain, out: (line) => plain.out(printable(line)), err: (line) => plain.err(printable(line)) }
   const usage = (): number => { for (const line of USAGE) deps.err(line); return 2 }
   if (args[0] === 'phone') return phoneCommand(args.slice(2), args[1], deps)
-  // Neither family named: both are listed.
-  if (args[0] !== 'wifi') { for (const line of USAGE) deps.err(line); for (const line of PHONE_USAGE) deps.err(line); return 2 }
+  if (args[0] === 'net') return netCommand(args.slice(2), args[1], deps)
+  // No family named: all are listed.
+  if (args[0] !== 'wifi') { for (const line of USAGE) deps.err(line); for (const line of PHONE_USAGE) deps.err(line); for (const line of NET_USAGE) deps.err(line); return 2 }
   const verb = args[1]
   const rest = args.slice(2)
 
@@ -208,6 +220,42 @@ async function phoneCommand(rest: string[], verb: string | undefined, deps: Dial
   return 0
 }
 
+/**
+ * `harness dial net auto`. The daemon (cable/netProvision.ts) reads the dial, refuses it unless it holds the Wi-Fi settings and the phone settings
+ * (naming the missing `wifi set` or `phone set`), then sends net.mode 3. No password, no key. Pairing cannot be checked: the dial reports no bonds
+ * while Bluetooth is off, so the answer carries a reminder, printed as it is.
+ */
+async function netCommand(rest: string[], verb: string | undefined, deps: DialWifiDeps): Promise<number> {
+  const usage = (): number => { for (const line of NET_USAGE) deps.err(line); return 2 }
+  if (verb !== 'auto') return usage()
+  const options = parseOptions(rest, ['--dial'])
+  if (!options) return usage()
+  const body: Record<string, unknown> = {}
+  if (options['--dial'] !== undefined) {
+    if (!validDial(options['--dial'])) { deps.err(`  ✗ ${NET_FIELD_MESSAGES.dial}`); return 2 }
+    body.dial = options['--dial']
+  }
+  const reply = await deps.call('/api/dial/net/auto', body)
+  if (!reply) { deps.err('  ✗ The Harness daemon is not running. Start it with: harness start'); return 1 }
+  if (reply.status !== 200 || reply.body.ok !== true) {
+    const kind = typeof reply.body.kind === 'string' ? reply.body.kind : ''
+    const code = typeof reply.body.err === 'string' ? reply.body.err : ''
+    const error = typeof reply.body.error === 'string' ? reply.body.error
+      : reply.status === 404 ? 'This daemon does not support the auto mode (update it).' : 'The daemon sent back something unexpected.'
+    deps.err(`  ✗ ${error}`)
+    if (ERR_HINTS[code]) deps.err(`    ${ERR_HINTS[code]}`)
+    if (HINTS[kind]) deps.err(`    ${HINTS[kind]}`)
+    return 1
+  }
+  const dial = typeof reply.body.dial === 'string' ? reply.body.dial : 'the dial'
+  deps.out('')
+  deps.out(`  ✓ Auto mode is on for ${dial}: when the USB cable is unplugged it tries Wi-Fi first, and uses the phone if Wi-Fi does not work.`)
+  deps.out('    Every wake starts with Wi-Fi again. The link icon on the dial shows which one runs: a Wi-Fi mark or a phone mark.')
+  if (typeof reply.body.note === 'string') deps.out(`    ${reply.body.note}`)
+  deps.out('')
+  return 0
+}
+
 /** What each phone verb says when it worked. */
 function printPhone(verb: string, answer: Record<string, unknown>, deps: DialWifiDeps): void {
   const dial = typeof answer.dial === 'string' ? answer.dial : 'the dial'
@@ -228,7 +276,7 @@ function printPhone(verb: string, answer: Record<string, unknown>, deps: DialWif
         out(`  On the cable          ${String(usb.dial ?? 'a dial')}`)
         if (usb.ble === true) {
           out('    Phone settings      held')
-          out(`    Phone mode          ${usb.mode === 2 ? 'on (the dial uses the phone when the cable is unplugged)' : 'off (USB only)'}`)
+          out(`    Phone mode          ${usb.mode === 2 ? 'on (the dial uses the phone when the cable is unplugged)' : usb.mode === 3 ? 'auto: Wi-Fi first, then phone' : 'off (USB only)'}`)
           if (usb.mode === 1) out('    The dial is in Wi-Fi mode now. Turn the phone mode on with `harness dial phone on`.')
           out(`    Key on this computer  ${usb.keyed === true ? 'yes' : 'no'}`)
           if (usb.keyed === false) out('    This computer holds no key for it. Set it again with `harness dial phone set`.')
@@ -288,7 +336,7 @@ function print(verb: string, answer: Record<string, unknown>, deps: DialWifiDeps
         if (usb.saved === true) {
           out(`    network       ${String(usb.ssid ?? '?')}`)
           out(`    daemon        ${String(usb.host ?? '?')}:${String(usb.port ?? '?')}`)
-          out(`    Wi-Fi         ${usb.mode === 1 ? 'on (joins when the cable is unplugged)' : 'off (USB only)'}`)
+          out(`    Wi-Fi         ${usb.mode === 1 ? 'on (joins when the cable is unplugged)' : usb.mode === 3 ? 'auto: Wi-Fi first, then phone' : 'off (USB only)'}`)
           if (usb.keyed === false) out('    This computer holds no key for it. Set it again with `harness dial wifi set`.')
         } else out('    No Wi-Fi settings. Run `harness dial wifi set`.')
       } else if (answer.usbProblem && typeof (answer.usbProblem as { message?: unknown }).message === 'string') {

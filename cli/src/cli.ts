@@ -187,6 +187,9 @@ Machine:
                                neither touches a local install-cli.sh build without --force)
   harness flash [flags]        re-flash a plugged-in circle device over USB. Flags go straight to the
                                flasher: --detect-only, --port, --version, --yes, --erase-nvs
+  harness dial net auto [--dial <MAC>]
+                               the unplugged dial tries Wi-Fi first and falls back to the phone. Both must be set up
+                               (\`harness dial wifi set\`, \`harness dial phone set\`); pair the phone in phone-only mode first
   harness dial phone <set|show|forget|on|off>
                                give a plugged-in dial a key for the phone mode: Bluetooth to the Harness phone app, then a tunnel to
                                this computer. No password is asked. The tunnel endpoint stays off until CABLE_TUNNEL_ENABLE=true

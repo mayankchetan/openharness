@@ -29,6 +29,7 @@ describe('the messages sent to the dial', () => {
     [{ op: 'get' } as NetRequest, { t: 'net.get' }],
     [{ op: 'clear' } as NetRequest, { t: 'net.clear' }],
     [{ op: 'mode', mode: 0 } as NetRequest, { t: 'net.mode', mode: 0 }],
+    [{ op: 'mode', mode: 3 } as NetRequest, { t: 'net.mode', mode: 3 }],
     [{ op: 'key', key: KEY } as NetRequest, { t: 'net.key', key: KEY.toString('base64') }],
     [{ op: 'host', host: '10.0.0.5', port: 18480 } as NetRequest, { t: 'net.host', host: '10.0.0.5', port: 18480 }],
   ])('%j goes out as one flat message with an id', async (request, wire) => {
@@ -172,22 +173,28 @@ describe('the phone-mode forms (B6)', () => {
     expect(await pending).toEqual({ ok: true, saved: false, ble: true, mode: 0 })
   })
 
-  it('net.mode accepts 2 (the phone) and refuses 3', async () => {
+  it('net.mode accepts 2 (the phone) and 3 (auto) and refuses 4', async () => {
     const { net, sent } = rig()
     const pending = net.request({ op: 'mode', mode: 2 })
     await vi.advanceTimersByTimeAsync(0)
     expect(sent).toEqual([{ t: 'net.mode', mode: 2, id: 10 }])
     net.message({ t: 'net.state', id: 10, ok: true, saved: false, ble: true, mode: 2 })
     expect(await pending).toEqual({ ok: true, saved: false, ble: true, mode: 2 })
-    expect(failure(await net.request({ op: 'mode', mode: 3 } as unknown as NetRequest))).toMatchObject({ kind: 'bad_request' })
+    expect(failure(await net.request({ op: 'mode', mode: 4 } as unknown as NetRequest))).toMatchObject({ kind: 'bad_request' })
     expect(sent).toHaveLength(1)
+    // 3 (wifi-first work): sent as it is, and the dial's answer carries it back
+    const auto = net.request({ op: 'mode', mode: 3 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(sent[1]).toMatchObject({ t: 'net.mode', mode: 3 })
+    net.message({ t: 'net.state', id: sent[1].id, ok: true, saved: true, ssid: 'home-net', ble: true, mode: 3 })
+    expect(await auto).toEqual({ ok: true, saved: true, ssid: 'home-net', ble: true, mode: 3 })
   })
 
-  it('reads ble only when it is true, and a mode only when it is 0, 1 or 2', async () => {
+  it('reads ble only when it is true, and a mode only when it is 0, 1, 2 or 3', async () => {
     const { net } = rig()
     let pending = net.request({ op: 'get' })
     await vi.advanceTimersByTimeAsync(0)
-    net.message({ t: 'net.state', id: 10, ok: true, saved: false, ble: 'yes', mode: 3 })
+    net.message({ t: 'net.state', id: 10, ok: true, saved: false, ble: 'yes', mode: 4 })
     expect(await pending).toEqual({ ok: true, saved: false, ble: false })
     pending = net.request({ op: 'get' })
     await vi.advanceTimersByTimeAsync(0)

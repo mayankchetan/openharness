@@ -26,6 +26,27 @@ describe('the dial Wi-Fi routes: what is asked', () => {
     expect(a.mock.calls.map(([payload]) => payload)).toEqual([{ op }, { op, dial: 'serial-1' }])
   })
 
+  it('auto (net auto) takes no body but a dial; a key, a network or another mode in the body is not carried on', async () => {
+    const a = ask()
+    await dialNetRequest('auto', undefined, a)
+    await dialNetRequest('auto', { dial: ' serial-1 ', mode: 3, ssid: 'x', pass: PASS, key: 'abc', extra: 1 }, a)
+    expect(a.mock.calls.map(([payload]) => payload)).toEqual([{ op: 'auto' }, { op: 'auto', dial: 'serial-1', mode: undefined }].map((p) => JSON.parse(JSON.stringify(p))))
+    expect(a.mock.calls[1][1]).toBe(DIAL_NET_WAIT_MS)
+  })
+
+  it('auto answers with the mode and the pairing reminder, and still no key', async () => {
+    const reply = await dialNetRequest('auto', {}, async () => ({ ok: true, dial: 'B8:1F:3F:CA:E5:58', mode: 3, note: 'Pair the phone first.', key: 'AAAA', pass: 'x' }))
+    expect(reply).toEqual({ status: 200, body: { ok: true, dial: 'B8:1F:3F:CA:E5:58', mode: 3, note: 'Pair the phone first.' } })
+  })
+
+  it('auto passes a refusal through with its kind, and an older dial\'s `mode` word', async () => {
+    const reply = await dialNetRequest('auto', {}, async () => ({ ok: false, kind: 'device', err: 'mode', message: 'the dial refused: mode' }))
+    expect(reply.status).toBe(502)
+    expect(reply.body).toMatchObject({ kind: 'device', err: 'mode' })
+    const bad = await dialNetRequest('auto', {}, async () => ({ ok: false, kind: 'bad_request', message: 'This dial holds no phone settings.' }))
+    expect(bad.status).toBe(400)
+  })
+
   it('mode needs 0 or 1', async () => {
     const a = ask()
     await dialNetRequest('mode', { mode: 1 }, a)
@@ -181,6 +202,9 @@ describe('the dial phone routes (B6)', () => {
     ['phone-mode', { mode: 1 }, 'mode'],
     ['phone-mode', { mode: 3 }, 'mode'],
     ['phone-forget', { dial: 'a\nb' }, 'dial'],
+    ['auto', { dial: 'a\nb' }, 'dial'],
+    ['auto', { mode: 2 }, 'mode'],
+    ['auto', { mode: '3' }, 'mode'],
   ])('%s %j is a 400 for %s before anyone is asked', async (op, body, field) => {
     const a = ask()
     const reply = await dialNetRequest(op, body, a)

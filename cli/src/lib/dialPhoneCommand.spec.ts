@@ -110,6 +110,13 @@ describe('harness dial phone show', () => {
     expect(lacks.out.join('\n')).toMatch(/phone mode\s+off/i)
   })
 
+  it('says "auto: Wi-Fi first, then phone" for a dial in mode 3, and does not call the phone mode off', async () => {
+    const r = rig({ status: 200, body: { ok: true, port: 18480, keyed: [], usb: { dial: MAC, keyed: true, saved: true, ssid: 'home-net', ble: true, mode: 3 } } })
+    await r.run('phone', 'show')
+    expect(r.out.join('\n')).toContain('auto: Wi-Fi first, then phone')
+    expect(r.out.join('\n')).not.toMatch(/phone mode\s+off/i)
+  })
+
   it('says when the dial is in Wi-Fi mode, and when none is on the cable', async () => {
     const wifi = rig({ status: 200, body: { ok: true, port: 18480, keyed: [], usb: { dial: MAC, keyed: true, saved: true, ssid: 'home-net', ble: true, mode: 1 } } })
     await wifi.run('phone', 'show')

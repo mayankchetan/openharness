@@ -67,5 +67,8 @@ export const validMode = (value: unknown): value is 0 | 1 => value === 0 || valu
 /** The phone mode's switch: 2 = use the phone when the cable is out, 0 = USB only. (1 is Wi-Fi's.) */
 export const validPhoneMode = (value: unknown): value is 0 | 2 => value === 0 || value === 2
 
+/** The unplugged mode "Wi-Fi first, then the phone": mode 3. The dial stores it only with the Wi-Fi settings AND the phone settings (config_net_set_mode). */
+export const validAutoMode = (value: unknown): value is 3 => value === 3
+
 export const validDial = (value: unknown): value is string =>
   typeof value === 'string' && value.length >= 1 && value.length <= 64 && !CONTROL.test(value)

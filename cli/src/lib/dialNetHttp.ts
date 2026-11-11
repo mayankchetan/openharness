@@ -1,6 +1,7 @@
 /**
- * POST /api/dial/net/{provision,status,forget,rotate,mode,phone-set,phone-mode,phone-forget}: a dial's Wi-Fi or phone settings and key, on the daemon's local API
- * (hookServer.ts), for `harness dial wifi ...` (lib/dialWifiCommand.ts). The settings reach the dial over its USB cable and
+ * POST /api/dial/net/{provision,status,forget,rotate,mode,phone-set,phone-mode,phone-forget,auto}: a dial's Wi-Fi or phone settings and key, on the daemon's local API
+ * (hookServer.ts), for `harness dial wifi ...` and `harness dial net auto` (lib/dialWifiCommand.ts). `auto` turns on "Wi-Fi first, then the phone" (net.mode 3);
+ * it takes no body but the optional `dial`. The settings reach the dial over its USB cable and
  * nowhere else (cable/dialNet.ts); the daemon keeps the dial's key in its keystore (cable/dialKeys.ts) once the dial has
  * taken it. See docs/specs/cable-wifi-link.md section 5.
  *
@@ -15,14 +16,14 @@
  * The route logs nothing but its path (hookServer.ts).
  */
 import {
-  NET_FIELD_MESSAGES, isLanIPv4, validDial, validHost, validMode, validPass, validPhoneMode, validPort, validSsid, type NetField,
+  NET_FIELD_MESSAGES, isLanIPv4, validAutoMode, validDial, validHost, validMode, validPass, validPhoneMode, validPort, validSsid, type NetField,
 } from './dialNetRules.js'
 
-export type DialNetOp = 'provision' | 'status' | 'forget' | 'rotate' | 'mode' | 'phone_set' | 'phone_mode' | 'phone_forget'
+export type DialNetOp = 'provision' | 'status' | 'forget' | 'rotate' | 'mode' | 'phone_set' | 'phone_mode' | 'phone_forget' | 'auto'
 /** The route names (the last path segment). The phone ones are hyphenated; the payload to the devices uses underscores. */
 const ROUTES: Record<string, DialNetOp> = {
   provision: 'provision', status: 'status', forget: 'forget', rotate: 'rotate', mode: 'mode',
-  'phone-set': 'phone_set', 'phone-mode': 'phone_mode', 'phone-forget': 'phone_forget',
+  'phone-set': 'phone_set', 'phone-mode': 'phone_mode', 'phone-forget': 'phone_forget', auto: 'auto',
 }
 
 /** A status and a body. */
@@ -69,6 +70,8 @@ function payloadFor(op: DialNetOp, body: unknown): Record<string, unknown> | Dia
     if (!validPhoneMode(input.mode)) return bad('mode')
     payload.mode = input.mode
   }
+  // auto: the mode is fixed (3) and is the devices' to send; a body that names another one is not carried on, and a `mode` that is not 3 is refused.
+  if (op === 'auto' && input.mode !== undefined && !validAutoMode(input.mode)) return bad('mode')
   if (op !== 'provision') return payload
   if (!validSsid(input.ssid)) return bad('ssid')
   if (!validPass(input.pass)) return bad('pass')
@@ -94,7 +97,7 @@ const unavailable = (): DialNetReply => ({ status: 503, body: { error: 'The devi
 /** The only fields a reply carries, at any depth. None of them is a secret. */
 const ANSWER_FIELDS = new Set([
   'ok', 'dial', 'saved', 'ssid', 'host', 'port', 'mode', 'cleared', 'removed', 'rotated', 'keyed', 'createdAt', 'lastSeen', 'lastAddr',
-  'usb', 'usbProblem', 'kind', 'message', 'lan', 'hostPinned', 'ble',
+  'usb', 'usbProblem', 'kind', 'message', 'lan', 'hostPinned', 'ble', 'note',
 ])
 
 function scrub(value: unknown, depth = 0): unknown {

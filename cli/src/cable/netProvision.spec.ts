@@ -35,7 +35,7 @@ function rig(over: { net?: Net; lan?: () => Promise<string | null>; keys?: DialK
   const seen: Array<{ op: string; hadKey: boolean }> = []
   const lines: string[] = []
   // A dial that holds nothing until it is set, as the firmware does.
-  const held: { ssid?: string; host?: string; port?: number; mode?: 0 | 1 | 2; ble?: boolean } = {}
+  const held: { ssid?: string; host?: string; port?: number; mode?: 0 | 1 | 2 | 3; ble?: boolean } = {}
   const net: Net = over.net ?? (async (dial, request) => {
     calls.push({ dial, request })
     seen.push({ op: request.op, hadKey: keys.has(MAC) })
@@ -44,7 +44,7 @@ function rig(over: { net?: Net; lan?: () => Promise<string | null>; keys?: DialK
       case 'get': return { ok: true, saved: !!held.ssid, ...held, dial: MAC }
       case 'set_ble': held.ble = true; held.mode ??= 0; return { ok: true, saved: !!held.ssid, ...held, dial: MAC }
       case 'clear': for (const k of Object.keys(held)) delete held[k as keyof typeof held]; return { ok: true, saved: false, dial: MAC }
-      case 'mode': return (request.mode === 2 ? held.ble : held.ssid || held.ble) ? (held.mode = request.mode, { ok: true, saved: !!held.ssid, ...held, dial: MAC }) : { ok: false, kind: 'device', err: 'not_provisioned', message: 'the dial refused: not_provisioned', saved: false, dial: MAC }
+      case 'mode': return request.mode > 3 ? { ok: false, kind: 'device', err: 'mode', message: 'the dial refused: mode', saved: !!held.ssid, dial: MAC } : (request.mode === 2 ? held.ble : request.mode === 3 ? held.ssid && held.ble : held.ssid || held.ble) ? (held.mode = request.mode, { ok: true, saved: !!held.ssid, ...held, dial: MAC }) : { ok: false, kind: 'device', err: 'not_provisioned', message: 'the dial refused: not_provisioned', saved: false, dial: MAC }
       case 'key': return held.ssid ? { ok: true, saved: true, ...held, dial: MAC } : { ok: false, kind: 'device', err: 'not_provisioned', message: 'the dial refused: not_provisioned', saved: false, dial: MAC }
       case 'host': Object.assign(held, { host: request.host, port: request.port }); return { ok: true, saved: true, ...held, dial: MAC }
     }
@@ -677,6 +677,106 @@ describe('the phone mode (B6)', () => {
       expect(await prov.handle({ op: 'phone_mode', mode: 1 })).toMatchObject({ ok: false, kind: 'bad_request', field: 'mode' })
       expect(await prov.handle({ op: 'phone_mode' })).toMatchObject({ ok: false, kind: 'bad_request', field: 'mode' })
       expect(calls).toEqual([])
+    })
+  })
+
+  describe('auto (wifi-first: net auto)', () => {
+    const both = async (r: ReturnType<typeof rig>) => { await r.prov.handle(provision); await r.prov.handle({ ...phoneSet, mode: 0 }); r.calls.length = 0 }
+
+    it('reads the dial first and sends mode 3 only when it holds the Wi-Fi settings AND the phone settings', async () => {
+      const r = rig()
+      await both(r)
+      const answer = await r.prov.handle({ op: 'auto' })
+      expect(answer).toMatchObject({ ok: true, dial: MAC, mode: 3 })
+      expect(lastOps(r.calls)).toEqual(['get', 'mode'])
+      expect(r.calls[1].request).toEqual({ op: 'mode', mode: 3 })
+      expect(r.held.mode).toBe(3)
+    })
+
+    it('refuses a dial with Wi-Fi settings only, and names the missing `phone set`', async () => {
+      const r = rig()
+      await r.prov.handle(provision)
+      r.calls.length = 0
+      const answer = await r.prov.handle({ op: 'auto' })
+      expect(answer).toMatchObject({ ok: false, kind: 'bad_request' })
+      expect(String(answer.message)).toContain('harness dial phone set')
+      expect(String(answer.message)).not.toContain('harness dial wifi set')
+      expect(lastOps(r.calls)).toEqual(['get'])
+      expect(r.held.mode).toBe(1)
+    })
+
+    it('refuses a dial with phone settings only, and names the missing `wifi set`', async () => {
+      const r = rig()
+      await r.prov.handle({ ...phoneSet, mode: 0 })
+      r.calls.length = 0
+      const answer = await r.prov.handle({ op: 'auto' })
+      expect(answer).toMatchObject({ ok: false, kind: 'bad_request' })
+      expect(String(answer.message)).toContain('harness dial wifi set')
+      expect(lastOps(r.calls)).toEqual(['get'])
+    })
+
+    it('refuses a dial with nothing, and says which of the two to run first', async () => {
+      const r = rig()
+      const answer = await r.prov.handle({ op: 'auto' })
+      expect(answer).toMatchObject({ ok: false, kind: 'bad_request' })
+      expect(String(answer.message)).toContain('harness dial wifi set')
+      expect(lastOps(r.calls)).toEqual(['get'])
+    })
+
+    it('reminds the person to pair the phone first: the dial cannot report its bonds while Bluetooth is off', async () => {
+      const r = rig()
+      await both(r)
+      const answer = await r.prov.handle({ op: 'auto' })
+      expect(String(answer.note)).toMatch(/pair/i)
+      expect(String(answer.note)).toContain('harness dial phone on')
+    })
+
+    it('an older dial answers `mode` (it does not know 3): the refusal passes through with its word', async () => {
+      const r = rig({ net: async (_dial, request) => request.op === 'get' ? { ok: true, saved: true, ble: true, mode: 1, ssid: SSID, host: LAN, port: 18480, dial: MAC } : { ok: false, kind: 'device', err: 'mode', message: 'the dial refused: mode', dial: MAC } })
+      expect(await r.prov.handle({ op: 'auto' })).toMatchObject({ ok: false, kind: 'device', err: 'mode' })
+    })
+
+    it('passes a failure to read the dial through (no dial on the cable) and sends nothing else', async () => {
+      const r = rig({ net: async () => ({ ok: false, kind: 'no_dial', message: 'no dial is on the wire' }) })
+      expect(await r.prov.handle({ op: 'auto' })).toMatchObject({ ok: false, kind: 'no_dial' })
+      expect(r.calls).toHaveLength(1)
+    })
+
+    it('carries the dial named by --dial, and touches no key or keystore entry', async () => {
+      const r = rig()
+      await both(r)
+      const before = r.keys.get(MAC)
+      await r.prov.handle({ op: 'auto', dial: MAC })
+      expect(r.calls.every((c) => c.dial === MAC)).toBe(true)
+      expect(r.keys.get(MAC)).toEqual(before)
+    })
+
+    it('`phone off` is refused for a dial in auto, as it is for one in Wi-Fi mode (that is `harness dial wifi off`)', async () => {
+      const r = rig()
+      await both(r)
+      await r.prov.handle({ op: 'auto' })
+      r.calls.length = 0
+      const answer = await r.prov.handle({ op: 'phone_mode', mode: 0 })
+      expect(answer).toMatchObject({ ok: false, kind: 'bad_request' })
+      expect(String(answer.message)).toContain('harness dial wifi off')
+      expect(r.held.mode).toBe(3)
+      expect(lastOps(r.calls)).toEqual(['get'])
+    })
+
+    it('`phone on` and `wifi on` still move a dial out of auto (to phone only, to Wi-Fi only)', async () => {
+      const r = rig()
+      await both(r)
+      await r.prov.handle({ op: 'auto' })
+      expect(await r.prov.handle({ op: 'phone_mode', mode: 2 })).toMatchObject({ ok: true, mode: 2 })
+      await r.prov.handle({ op: 'auto' })
+      expect(await r.prov.handle({ op: 'mode', mode: 1 })).toMatchObject({ ok: true, mode: 1 })
+    })
+
+    it('status carries mode 3 and both settings', async () => {
+      const r = rig()
+      await both(r)
+      await r.prov.handle({ op: 'auto' })
+      expect(await r.prov.handle({ op: 'status' })).toMatchObject({ ok: true, usb: { dial: MAC, saved: true, ble: true, mode: 3 } })
     })
   })
 

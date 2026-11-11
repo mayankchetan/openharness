@@ -94,8 +94,13 @@ describe('docs for the dial on Wi-Fi (W16)', () => {
     // The labels the screen still draws (the gallery build): the note does not promise them.
     const render = ui.slice(ui.indexOf('static void render_link('), ui.indexOf('WHAT THE APP ASKED FOR'))
     const labels = [...render.matchAll(/"((?:Link|Keep Wi-Fi)[^"]*)"/g)].map((m) => m[1])
-    expect(labels.sort()).toEqual(['Keep Wi-Fi: off', 'Keep Wi-Fi: on', 'Link: Phone', 'Link: USB only', 'Link: Wi-Fi'])
+    expect(labels.sort()).toEqual(['Keep Wi-Fi: off', 'Keep Wi-Fi: on'])
+    // The mode row comes from net_state_link_label (net_state.c): since the wifi-first work it also says the auto mode, and the radio that runs.
     const state = read(NET_STATE_C)
+    const rows = state.slice(state.indexOf('const char *net_state_link_label'), state.indexOf('const char *net_state_phone_caption'))
+    expect([...rows.matchAll(/"(Link: [^"]+)"/g)].map((m) => m[1]).sort())
+      .toEqual(['Link: Auto - Phone', 'Link: Auto - Wi-Fi', 'Link: Phone', 'Link: USB only', 'Link: Wi-Fi'])
+    expect(state).toContain('return "Using phone";')
     expect([...state.slice(state.indexOf('const char *net_state_line')).matchAll(/return "(Wi-Fi: [^"]+)";/g)]).toHaveLength(6)
   })
 

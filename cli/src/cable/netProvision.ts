@@ -11,8 +11,10 @@
 // The phone mode (task B6; docs/specs/cable-ble-link.md). The same dial, key and keystore, with no network:
 //   phone_set     {dial?, mode?}   a fresh key, the key-only net.set, the key into the keystore AFTER ok:true (so the tunnel endpoint
 //                                  accepts the dial's identity), then net.mode 2 (mode 0 leaves the phone mode off)
-//   phone_mode    {dial?, mode}    net.mode 2 (on) or 0 (off); off is refused for a dial that is in Wi-Fi mode
+//   phone_mode    {dial?, mode}    net.mode 2 (on) or 0 (off); off is refused for a dial that is in Wi-Fi mode or in auto
 //   phone_forget  {dial?}          net.clear and the key leaves the keystore; refused while the dial also holds Wi-Fi settings
+//   auto          {dial?}          net.mode 3: Wi-Fi first, then the phone (wifi-first work). The dial is read first: it must hold the Wi-Fi settings AND the
+//                                  phone settings (the message names the `wifi set` or `phone set` that is missing). The key is not touched.
 // The Wi-Fi settings and the phone settings share ONE key on the dial (wl_key): setting the phone key rotates the Wi-Fi key too, and the
 // keystore, which holds one key per dial, stays right for both. A clear takes both, which is why phone_forget refuses a dial that has Wi-Fi.
 //
@@ -88,6 +90,7 @@ export class NetProvisioner {
       case 'phone_set': return this.phoneSet(dial, payload)
       case 'phone_mode': return this.phoneMode(dial, payload.mode)
       case 'phone_forget': return this.phoneForget(dial)
+      case 'auto': return this.auto(dial)
       default: return bad(undefined, 'That is not a Wi-Fi request the devices know.')
     }
   }
@@ -179,10 +182,34 @@ export class NetProvisioner {
       const state = await this.deps.net(dial, { op: 'get' })
       if (!state.ok) return failure(state)
       if (state.mode === 1) return bad(undefined, 'This dial is in Wi-Fi mode, not phone mode. To turn Wi-Fi off run `harness dial wifi off`.')
+      if (state.mode === 3) return bad(undefined, 'This dial is in auto mode (Wi-Fi first, then the phone), not phone mode. To turn it off run `harness dial wifi off`.')
     }
     const result = await this.deps.net(dial, { op: 'mode', mode })
     if (!result.ok) return failure(result)
     return { ok: true, ...(result.dial ? { dial: normalizePskIdentity(result.dial) } : {}), mode: result.mode ?? mode }
+  }
+
+  /**
+   * `harness dial net auto`: the unplugged mode "Wi-Fi first, then the phone" (net.mode 3). The dial stores it only with BOTH settings, and says
+   * `not_provisioned` otherwise; reading it first lets the refusal name the command that is missing instead. The dial cannot say how many phones it is
+   * paired with while Bluetooth is off (the BLE stack does not run in Wi-Fi mode), so this cannot check for a bond: the answer carries the reminder to
+   * pair in phone-only mode first. A dial whose firmware does not know 3 answers `mode`, which passes through (the CLI says to update the firmware).
+   */
+  private async auto(dial: string | undefined): Promise<Answer> {
+    const state = await this.deps.net(dial, { op: 'get' })
+    if (!state.ok) return failure(state)
+    if (!state.saved && state.ble !== true) {
+      return bad(undefined, 'This dial holds no Wi-Fi settings and no phone settings. Run `harness dial wifi set` and `harness dial phone set` first, then `harness dial net auto`.')
+    }
+    if (!state.saved) return bad(undefined, 'This dial holds no Wi-Fi settings. Run `harness dial wifi set` first, then `harness dial net auto`.')
+    if (state.ble !== true) return bad(undefined, 'This dial holds no phone settings. Run `harness dial phone set` first (and pair the phone), then `harness dial net auto`.')
+    const result = await this.deps.net(dial, { op: 'mode', mode: 3 })
+    if (!result.ok) return failure(result)
+    this.deps.log(`cable: net: ${result.dial ? normalizePskIdentity(result.dial) : 'a dial'} was set to auto (Wi-Fi first, then the phone)`)
+    return {
+      ok: true, ...(result.dial ? { dial: normalizePskIdentity(result.dial) } : {}), mode: result.mode ?? 3,
+      note: 'Pair the phone first, in phone-only mode (`harness dial phone on`): with Wi-Fi working the phone stack never starts, and the dial cannot report its pairings while Bluetooth is off.',
+    }
   }
 
   private async phoneForget(dial: string | undefined): Promise<Answer> {
