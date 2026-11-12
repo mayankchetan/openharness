@@ -11,13 +11,16 @@ enum class LinkRate { HIGH, BALANCED }
  * - A downgrade to BALANCED waits until `minGapMs` after the last request, so the rate cannot flap.
  * - The idle clock runs only while a channel is up. Setup (before the channel) stays HIGH.
  * - stop() cancels every timer, and nothing is requested after it.
+ * - A request that returns false changes nothing: `current` stays as it was, so the next traffic report asks for HIGH again and a refused downgrade is
+ *   tried again after another idle period.
  *
  * Not thread-safe: the caller runs it on the main thread (activity from other threads is posted there).
  */
 class LinkRatePolicy(
     private val clock: Clock,
     private val scheduler: Scheduler,
-    private val request: (LinkRate) -> Unit,
+    /** Asks the link for the rate. False: the platform did not take the request (no live link, GATT busy), so the policy keeps what it had. */
+    private val request: (LinkRate) -> Boolean,
     private val idleMs: Long = IDLE_MS,
     private val minGapMs: Long = MIN_GAP_MS,
 ) {
@@ -115,9 +118,12 @@ class LinkRatePolicy(
     }
 
     private fun send(rate: LinkRate) {
-        current = rate
-        lastRequestMs = clock.nowMs()
-        request(rate)
+        if (request(rate)) {
+            current = rate
+            lastRequestMs = clock.nowMs()
+        } else if (rate == LinkRate.BALANCED && channelUp && !stopped) {
+            armIdle(idleMs) // not taken: still HIGH, so look again after another idle period
+        }
     }
 
     private fun cancelGap() {

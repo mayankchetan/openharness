@@ -41,7 +41,8 @@ private class LinkTime : Clock, Scheduler {
 class LinkRatePolicyTest {
     private val time = LinkTime()
     private val sent = mutableListOf<Pair<Long, LinkRate>>()
-    private val policy = LinkRatePolicy(time, time, { rate -> sent.add(time.nowMs() to rate) })
+    private var accept = true
+    private val policy = LinkRatePolicy(time, time, { rate -> if (accept) sent.add(time.nowMs() to rate) else false })
 
     @Test
     fun startsAtHighAndRequestsNothingBeforeTheChannelIsUp() {
@@ -186,6 +187,37 @@ class LinkRatePolicyTest {
         assertEquals(0, time.live())
         time.advance(10_000)
         assertEquals(2, sent.size)
+    }
+
+    @Test
+    fun aRefusedHighRequestKeepsBalancedSoTheNextTrafficAsksAgain() {
+        policy.channelUp()
+        time.advance(5_000)                     // BALANCED taken
+        assertEquals(listOf(5_000L to LinkRate.BALANCED), sent)
+        accept = false
+        policy.onTraffic()                      // HIGH is refused (gatt busy)
+        assertEquals(LinkRate.BALANCED, policy.currentRate())
+        policy.onTraffic()                      // the next report asks again, and is refused again
+        assertEquals(LinkRate.BALANCED, policy.currentRate())
+        accept = true
+        policy.onTraffic()
+        assertEquals(LinkRate.HIGH, policy.currentRate())
+        assertEquals(listOf(5_000L to LinkRate.BALANCED, 5_000L to LinkRate.HIGH), sent)
+    }
+
+    @Test
+    fun aRefusedBalancedRequestStaysHighAndIsTriedAgainAfterAnotherIdlePeriod() {
+        policy.channelUp()
+        accept = false
+        time.advance(5_000)                     // the downgrade is refused
+        assertEquals(LinkRate.HIGH, policy.currentRate())
+        assertTrue(sent.isEmpty())
+        accept = true
+        time.advance(5_000)                     // another idle period: asked again, taken
+        assertEquals(LinkRate.BALANCED, policy.currentRate())
+        assertEquals(listOf(10_000L to LinkRate.BALANCED), sent)
+        policy.stop()
+        assertEquals(0, time.live())
     }
 }
 
