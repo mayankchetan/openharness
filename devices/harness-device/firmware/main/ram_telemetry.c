@@ -167,7 +167,7 @@ void ram_telemetry_checkpoint(const char *tag)
 
     ESP_LOGI(TAG,
              "RAM tag=%s int_free=%u int_min=%u int_largest=%u psram_free=%u psram_largest=%u "
-             "json_fb=%u/%lluB psram_fail=%u/%lluB task=%s stack_free_min=%uB",
+             "json_fb=%u/%uB psram_fail=%u/%uB task=%s stack_free_min=%uB",
              tag ? tag : "unknown",
              (unsigned)heap_caps_get_free_size(APP_INTERNAL_CAPS),
              (unsigned)heap_caps_get_minimum_free_size(APP_INTERNAL_CAPS),
@@ -175,9 +175,9 @@ void ram_telemetry_checkpoint(const char *tag)
              (unsigned)heap_caps_get_free_size(APP_PSRAM_CAPS),
              (unsigned)heap_caps_get_largest_free_block(APP_PSRAM_CAPS),
              (unsigned)json_fallbacks,
-             (unsigned long long)json_fallback_bytes,
+             (unsigned)json_fallback_bytes,
              (unsigned)psram_failures,
-             (unsigned long long)psram_failure_bytes,
+             (unsigned)psram_failure_bytes,
              pcTaskGetName(NULL),
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
     if (tag_wants_regions(tag)) ram_telemetry_regions(tag);
@@ -204,7 +204,7 @@ void ram_telemetry_hwm(void)
         if (len < 0 || (size_t)len >= sizeof(line) - n) break;
         n += (size_t)len;
     }
-    ESP_LOGI(TAG, "HWM up=%llus%s", (unsigned long long)(esp_timer_get_time() / 1000000), line);
+    ESP_LOGI(TAG, "HWM up=%lus%s", (unsigned long)(esp_timer_get_time() / 1000000), line);
 }
 
 bool ram_flash_mmap_remain(void)

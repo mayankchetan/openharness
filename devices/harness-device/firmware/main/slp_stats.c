@@ -25,7 +25,7 @@ int32_t slp_percentile(const int32_t *v, int n, int pct)
 int slp_format_ms(char *out, size_t size, int32_t us)
 {
     int64_t a = us < 0 ? -(int64_t)us : us;
-    return snprintf(out, size, "%s%lld.%03lld", us < 0 ? "-" : "", (long long)(a / 1000), (long long)(a % 1000));
+    return snprintf(out, size, "%s%ld.%03ld", us < 0 ? "-" : "", (long)(a / 1000), (long)(a % 1000));
 }
 
 int slp_format_summary(char *out, size_t size, int first_cycle, int last_cycle, const int32_t *wake_us,

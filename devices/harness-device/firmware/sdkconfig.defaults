@@ -34,6 +34,10 @@ CONFIG_FREERTOS_HZ=1000
 # (config_clear_all, a BOOT press at power-on) and the NVS erase on a bad partition; both are a few NVS calls.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
 
+# --- printf ---
+# Newlib nano printf saves ~31 KB of flash code; it cannot print %ll*, %j, %z, %t, %L or %a (test_nano_formats.py checks main/), but still prints floats.
+CONFIG_LIBC_NEWLIB_NANO_FORMAT=y
+
 # --- Log level ---
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 

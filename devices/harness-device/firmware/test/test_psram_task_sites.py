@@ -54,5 +54,8 @@ net_c = (main / 'net_link.c').read_text()
 assert re.search(r'xTaskCreate\(net_init_task, "net_init", NET_INIT_STACK', net_c), 'net_init has an internal stack'
 assert 'net_init' not in ''.join(re.findall(r'task_create_psram\([^;]*;', net_c))
 
+# voice_capture keeps its internal stack at 4096 B (was 5120): worst measured use 2,592 B (dial logs 2026-11-10/11), 1,504 B of margin; the task never calls into the link.
+assert re.search(r'xTaskCreatePinnedToCore\(capture, "voice_capture", 4096,', (main / 'audio_client_habitat.c').read_text()), 'voice_capture stack is 4096'
+
 print('PSRAM task sites: ' + ', '.join(task for _, task, _, _ in MOVED + [READER]) + ' use task_create_psram under their macros '
       '(cable_link only with OTA compiled out), the latency-bound tasks keep internal stacks PASS')

@@ -311,8 +311,11 @@ void audio_client_init(void)
         return;
     }
     voice_buffer_init(&buffer, storage, ring_bytes);
+    // voice_capture is an internal stack: 4096 (was 5120) frees 1,024 B of DIRAM. Worst use 2,592 B (HWM free-min 2,528 of 5,120 over the dial logs of
+    // 2026-11-10 and -11, two dials; uxTaskGetStackHighWaterMark is the smallest FREE space ever seen), so 1,504 B of margin remain. The task never
+    // calls into the link (it reads the microphone and fills the ring), so the USB-only logs also cover Wi-Fi and Bluetooth mode.
     BaseType_t a =
-        xTaskCreatePinnedToCore(capture, "voice_capture", 5120, NULL, 6, &capture_task, 0);
+        xTaskCreatePinnedToCore(capture, "voice_capture", 4096, NULL, 6, &capture_task, 0);
 #if TASK_STACK_PSRAM_FLASH_OPS
     // Stack in PSRAM (task_util.h). send_audio reads config from NVS and sends PCM frames over the cable; it maps no
     // flash and its stack buffers never go to DMA (call graph and grep, 2026-10-28). voice_capture stays internal:

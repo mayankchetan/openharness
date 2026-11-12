@@ -167,8 +167,8 @@ static bool stream_capture_cable(uint8_t *tmp)
             if (len > remain) len = (size_t)remain;
             if (len > CABLE_VOICE_CHUNK) len = CABLE_VOICE_CHUNK;
             if (!audio_stream_pcm(s_buf + pos, len)) {
-                ESP_LOGW(TAG, "voice(cable): chunk stalled at %lluKB — aborting the utterance",
-                         (unsigned long long)(sent / 1024));
+                ESP_LOGW(TAG, "voice(cable): chunk stalled at %uKB — aborting the utterance",
+                         (unsigned)(sent / 1024));
                 audio_stream_abort("cable stalled");
                 return false;
             }
@@ -185,7 +185,7 @@ static bool stream_capture_cable(uint8_t *tmp)
         if (len > remain) len = (size_t)remain;
         if (len > CABLE_VOICE_CHUNK) len = CABLE_VOICE_CHUNK;
         if (!audio_stream_pcm(s_buf + pos, len)) {
-            ESP_LOGW(TAG, "voice(cable): tail stalled at %lluKB", (unsigned long long)(sent / 1024));
+            ESP_LOGW(TAG, "voice(cable): tail stalled at %uKB", (unsigned)(sent / 1024));
             audio_stream_abort("cable stalled");
             return false;
         }
@@ -209,8 +209,8 @@ static void voice_task(void *arg)
 
     audio_capture_stop();
     const double secs = (double)(esp_timer_get_time() - t_rec0) / 1e6;
-    ESP_LOGI(TAG, "voice %s: %.1fs, %lluKB", ok ? "sent" : "ABORTED", secs,
-             (unsigned long long)(s_prod_off / 1024));
+    ESP_LOGI(TAG, "voice %s: %.1fs, %uKB", ok ? "sent" : "ABORTED", secs,
+             (unsigned)(s_prod_off / 1024));
 
     s_recording = false;
     s_active = false;
@@ -294,8 +294,8 @@ bool audio_client_active(void)
     if (!since_us) { since_us = now; warned_us = now; }
     if (now - warned_us >= (int64_t)VOICE_LONG_MS * 1000) {
         warned_us = now;
-        ESP_LOGW(TAG, "voice turn active for %llu min (recording=%d stop_req=%d abort_req=%d) — touch is held off LVGL",
-                 (unsigned long long)((now - since_us) / 60000000), s_recording, s_stop_req, s_abort_req);
+        ESP_LOGW(TAG, "voice turn active for %u min (recording=%d stop_req=%d abort_req=%d) — touch is held off LVGL",
+                 (unsigned)((now - since_us) / 60000000), s_recording, s_stop_req, s_abort_req);
     }
     return true;
 }

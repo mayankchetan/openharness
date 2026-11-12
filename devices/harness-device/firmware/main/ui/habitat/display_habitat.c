@@ -733,7 +733,7 @@ static void render_task(void *arg)
             if (force) {   // the full repaint after a wake is on the glass: how long since the touch interrupt woke the chip?
                 const int64_t isr_us = touch_sleep_take_isr_us();
                 if (isr_us)
-                    ESP_LOGI("habitat", "wake isr to frame %lld us", (long long)(esp_timer_get_time() - isr_us));
+                    ESP_LOGI("habitat", "wake isr to frame %ld us", (long)(esp_timer_get_time() - isr_us));
             }
 #endif
 #ifdef DEVICE_OCTOPUS_BENCH

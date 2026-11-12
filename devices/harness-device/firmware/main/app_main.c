@@ -337,7 +337,16 @@ void app_main(void)
     const ms_mode_t boot_mode = mode_glue_boot();
     const bool wifi_mode = boot_mode == MS_MODE_WIFI && net_link_start();
     const bool ble_mode = boot_mode == MS_MODE_BLE && ble_link_start();
-    if (!cable_client_start_with(wifi_mode ? net_link_xport() : ble_mode ? ble_link_xport() : cable_xport_usb())) {
+    const cable_xport_t *const xport = wifi_mode ? net_link_xport() : ble_mode ? ble_link_xport() : cable_xport_usb();
+    bool linked = cable_client_start_with(xport);
+    if (!linked) {
+        // A failed start cleans up after itself (cable_client_start_with: the failed label; cable_link_start_with frees what it made), so one retry is safe;
+        // a transient shortage often clears.
+        ESP_LOGW(TAG, "cable link did not start — retrying once");
+        vTaskDelay(pdMS_TO_TICKS(200));
+        linked = cable_client_start_with(xport);
+    }
+    if (!linked) {
         // A dial with no link still runs, still lights up, and still says so on screen. A device stuck in a
         // boot loop is not diagnosable from across the room; one showing "Not connected" is.
         ESP_LOGE(TAG, "cable link did not start — the dial will show no machine");
