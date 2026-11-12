@@ -28,7 +28,7 @@ import type { FleetRouting } from '../services/fleet.js'
 import { ServiceUnavailableError } from '../core/serviceHost.js'
 
 import { PLAYER_STATES, type PlayerSession } from './playerLibrary.js'
-import { RunningOrder, isRunning, type RankFn } from './runningAgents.js'
+import { RunningOrder, isRunning, sortByRank, type RankFn } from './runningAgents.js'
 import type { LeadRecap, SwarmCard } from '../superTabs/cards.js'
 import type { ActivitySnapshot, AppSwarms, SuperTabAsk, CableAgent, CableHost, CableMachine, CableMachineSource, CableSwarm, CableTile, DialStatus, OpenReason, RouteDecision } from './cableSession.js'
 import type { WindowRoute } from './windowRoute.js'
@@ -523,8 +523,8 @@ export class DaemonCableHost implements CableHost {
     return { agents: out, tab, total: this.viaFleet((r) => r.agentTotal()) }
   }
 
-  /** The running agents of THIS computer, as the stable order lists them. The flat list was just read. */
-  private async reconcileRunning(): Promise<string[]> {
+  /** This computer's running rows, and how to rank them: the last transcript or hook activity, then the last open. */
+  private runningRows(): { rows: RegisteredSession[]; rank: RankFn } {
     const rows = this.wiring.sessions().filter(isRunning)
     const byId = new Map(rows.map((r) => [r.agentId, r]))
     const rank: RankFn = async (ids) => {
@@ -534,7 +534,29 @@ export class DaemonCableHost implements CableHost {
         return [id, { activity: times?.get(id) ?? (s ? s.lastHookAt || s.boundAt || s.registeredAt || 0 : 0), openedAt: s?.lastOpenedAt ?? 0 }]
       }))
     }
+    return { rows, rank }
+  }
+
+  /** The running agents of THIS computer, as the stable order lists them. The flat list was just read. */
+  private async reconcileRunning(): Promise<string[]> {
+    const { rows, rank } = this.runningRows()
     return this.runningOrder.reconcile(rows.map((r) => ({ id: r.agentId, registeredAt: r.registeredAt })), rank)
+  }
+
+  /**
+   * Every running agent on THIS computer, newest first, whatever the window shows and not capped: the
+   * "All agents" list, which the dial reads four rows at a time. A plain sort on every call; the stable
+   * order belongs to the tile list.
+   */
+  async listRunning(): Promise<Array<{ id: string; name: string; engine: string; machineId: string }>> {
+    const flat = await this.listAgentsFlat()
+    const byId = new Map(flat.map((a) => [a.id, a]))
+    const { rows, rank } = this.runningRows()
+    const ids = await sortByRank(rows.map((r) => r.agentId), rank)
+    return ids.flatMap((id) => {
+      const a = byId.get(id)
+      return a ? [{ id, name: a.name, engine: a.engine ?? '', machineId: a.machineId ?? '' }] : []
+    })
   }
 
   /** How many agents the account has across every machine — the overview's number, sent beside the

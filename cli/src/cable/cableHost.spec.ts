@@ -1106,3 +1106,50 @@ describe('DaemonCableHost running list (no window)', () => {
     expect(again).not.toContain('late')
   })
 })
+
+describe('DaemonCableHost.listRunning (the All agents list)', () => {
+  const set = (rows: Array<Record<string, unknown> & { agentId: string }>): void => {
+    AGENTS.length = 0
+    for (const r of rows) AGENTS.push({ engine: 'claude', active: true, terminalAvailable: true, registeredAt: 1, ...r } as never)
+  }
+  const many = (n: number) => Array.from({ length: n }, (_, i) => ({ agentId: `a${String(i).padStart(2, '0')}`, registeredAt: 100 + i, lastHookAt: 1000 + i }))
+
+  it('is not capped at 16 and is newest first', async () => {
+    set(many(30))
+    const host = new DaemonCableHost(wiring())
+    const rows = await host.listRunning()
+    expect(rows).toHaveLength(30)
+    expect(rows[0]).toMatchObject({ id: 'a29', name: 'a29', engine: 'claude', machineId: 'mine' })
+    expect(rows[29].id).toBe('a00')
+  })
+
+  it('leaves out held, stopped, cloud and remote rows, keeps a terminal', async () => {
+    set([
+      { agentId: 'ok', lastHookAt: 10 },
+      { agentId: 'held', lastHookAt: 20, admissionHold: 'pending' },
+      { agentId: 'stopped', lastHookAt: 30, active: false },
+      { agentId: 'cloud', lastHookAt: 40, engine: 'cursor-cloud' },
+      { agentId: 'shell', lastHookAt: 5, engine: 'terminal' },
+    ])
+    const fleet = fleetOf([REMOTE])
+    fleet.listAgents = vi.fn(async () => [{ id: 'r1', name: 'api' }] as never)
+    const host = new DaemonCableHost(wiring(), fleet)
+    await host.listAgentsFlat(); await new Promise((r) => setTimeout(r, 0))
+    expect((await host.listRunning()).map((r) => r.id)).toEqual(['ok', 'shell'])
+  })
+
+  it('works with a window open, and ignores the tab', async () => {
+    set(many(5))
+    const host = new DaemonCableHost(wiring())
+    onTab(host, ['a01'])
+    expect((await host.listRunning()).map((r) => r.id)).toEqual(['a04', 'a03', 'a02', 'a01', 'a00'])
+  })
+
+  it('does not move on a stable order the way the tile list does: it re-sorts every call', async () => {
+    set(many(3))
+    const host = new DaemonCableHost(wiring())
+    expect((await host.listRunning())[0].id).toBe('a02')
+    AGENTS.find((a) => a.agentId === 'a00')!.lastHookAt = 99999
+    expect((await host.listRunning())[0].id).toBe('a00')
+  })
+})

@@ -34,10 +34,11 @@ import { planPetSync } from './pets/sync.js'
 import type { PetStore } from './pets/store.js'
 import type { PetDialState } from './pets/sync.js'
 import { SerialLink, findDialPort } from './serial.js'
-import { PLAYER_PAGE_SIZE, playerPage, type PlayerSession } from './playerLibrary.js'
+import { PLAYER_PAGE_SIZE, playerLabel, playerPage, type PlayerSession } from './playerLibrary.js'
 import { PassageCarry, withCarriedPassage, type CarryRead } from './passageCarry.js'
 import { VoiceDraft, type DraftPin } from './voiceDraft.js'
 import { SUPER_TAB_REQUEST_PREFIX } from '../core/api.js'
+import { runningPage, type RunningPageRow, type RunningStatus } from './runningAgents.js'
 import { QuestionInbox, type ReviewedAnswer, type AnswerReceipt, type QuestionSpeech } from './questionInbox.js'
 import { notificationReadToken, type UnreadNotification } from '../lib/notificationRead.js'
 
@@ -380,6 +381,8 @@ export interface CableHost {
   activitySnapshot?(agentId: string): Promise<ActivitySnapshot | null>
   /** Every session the library can page through, in the order to show them. Absent: no library. */
   playerLibrary?(): Promise<PlayerSession[]>
+  /** Every running agent on this computer, newest first and not capped: the dial's "All agents" list, paged by the session. */
+  listRunning?(): Promise<Array<{ id: string; name: string; engine: string; machineId: string }>>
   sendTurn(agentId: string, text: string): void | { ok: true } | { ok: false; machine?: string; reason?: string }
   stopTurn(agentId: string): void
   /**
@@ -712,6 +715,9 @@ export class CableSession {
   private playerCapable = false
   /** `running: 'v1'`: with no window the list holds this computer's running agents, and `agents.end` says so. */
   private runningCapable = false
+  private runningOffset = 0
+  /** The newest `running.get`'s serial: a reply for any other is dropped. 0 = none yet. */
+  private runningRequest = 0
   /** `superTab: 'wait-v1'`: a `question` with `superTab` and `attention` is shown as a Super Tab wait, which nobody
    *  answers on the device. Any other device is not sent one: the round dial would open a question screen for it that
    *  cannot load. */
@@ -750,6 +756,7 @@ export class CableSession {
     this.playerOffset = this.playerRequest = 0
     this.playerLibraryKey = ''
     this.playerLibraryAt = 0
+    this.runningOffset = this.runningRequest = 0
   }
   /** Bytes and frames seen since this port opened — the evidence for the foreign-dial verdict. */
   private bytesSinceOpen = 0
@@ -1407,6 +1414,8 @@ export class CableSession {
             'voice.draft',
             'agents.refresh',
             ...(this.playerCapable && this.host.playerLibrary ? ['player.library'] : []),
+            // The paged list of every running agent, only for a dial that said `running: 'v1'` (hello).
+            ...(this.runningCapable && this.host.listRunning ? ['running.list'] : []),
             // Only a Pro numbers its frames and asks for `resync`; a round dial's feature list stays as it was.
             ...(this.seqOn ? ['resync'] : []),
             ...(this.host.form ? ['form'] : []),
@@ -1603,6 +1612,17 @@ export class CableSession {
         this.playerOffset = msg.offset as number
         this.playerRequest = msg.request as number
         await this.syncPlayerLibrary(true)
+        return
+      }
+      case 'running.get': {
+        // The newest request wins, so a reply that comes back late is dropped (syncRunningPage). Not a pick:
+        // reading a page never moves the desktop or the dial.
+        if (!this.runningCapable || !Number.isSafeInteger(msg.offset) || (msg.offset as number) < 0 ||
+            (msg.offset as number) > 1_000_000 || !Number.isSafeInteger(msg.request) ||
+            (msg.request as number) < 1 || (msg.request as number) > 0x7fffffff) return
+        this.runningOffset = msg.offset as number
+        this.runningRequest = msg.request as number
+        await this.syncRunningPage()
         return
       }
       case 'agent.open':
@@ -2732,6 +2752,35 @@ export class CableSession {
     return this.host.listAgentSnapshot ? await this.host.listAgentSnapshot({ running: this.runningCapable }) : {
       agents: await this.host.listAgents(), tab: this.host.activeSwarm(), total: this.host.agentTotal(),
     }
+  }
+
+  /** One page of every running agent, for the `running.get` the dial last sent. */
+  private async syncRunningPage(): Promise<void> {
+    if (!this.runningCapable || !this.host.listRunning) return
+    const offset = this.runningOffset, request = this.runningRequest
+    // Read outside the push queue: a slow read must not hold a focus frame behind it.
+    const listed = await this.host.listRunning()
+    // The dial has asked for another page while this one was being read; its reply is the one that counts.
+    if (request !== this.runningRequest) return
+    // Every id is an action target on the dial, which keeps 47 bytes of it. Names and engines are cut on a
+    // character boundary, as the Pro's library does.
+    const rows: RunningPageRow[] = listed.filter((r) => r.id && Buffer.byteLength(r.id) < 48 && Buffer.byteLength(r.machineId) < 48)
+      .map((r) => ({ id: r.id, name: playerLabel(r.name, 95), engine: playerLabel(r.engine, 15), machineId: r.machineId, status: this.runningStatus(r) }))
+    const page = runningPage(rows, offset)
+    return this.queued(async () => {
+      if (request !== this.runningRequest) return
+      if (await this.send({ t: 'running.page', request, ...page })) this.runningOffset = page.offset
+    })
+  }
+
+  /** Needs you (a live or reviewed question, or an unread notice), else working (a live turn), else idle. */
+  private runningStatus(row: { id: string; engine: string }): RunningStatus {
+    // A shell has no turn and no question; the code reads no "command is running" signal for it.
+    if (row.engine === 'terminal') return 'idle'
+    const live = this.liveTurns.get(row.id)
+    if (live === 'question' || this.questionInbox.open().some((q) => q.agentId === row.id) ||
+        this.host.listUnread().some((n) => n.agentId === row.id)) return 'question'
+    return live === 'working' ? 'working' : 'idle'
   }
 
   private async syncAgentsNow(force: boolean): Promise<void> {

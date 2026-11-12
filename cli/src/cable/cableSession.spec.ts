@@ -4761,3 +4761,150 @@ describe('running list', () => {
     } finally { await session.stop() }
   })
 })
+
+describe('running page (All agents)', () => {
+  type Row = { id: string; name: string; engine: string; machineId: string }
+  const row = (i: number, over: Partial<Row> = {}): Row => ({ id: `p${i}`, name: `Agent ${i}`, engine: 'claude', machineId: 'mac-local', ...over })
+  const rows = (n: number) => Array.from({ length: n }, (_, i) => row(i))
+  const HELLO = { t: 'hello', product: 'harness', mac: 'aa:bb', running: 'v1' }
+  const pages = (port: LoopbackPort) => port.sent.filter((m) => m.t === 'running.page')
+
+  async function start(host: CableHost, hello: Record<string, unknown> = HELLO) {
+    const c = await connect(host)
+    c.port.say(hello)
+    await vi.waitFor(() => expect(c.port.types()).toContain('notif.replace'))
+    return c
+  }
+
+  it('returns 4 rows a page with total and echoes the request', async () => {
+    const { session, port } = await start(makeHost({ listRunning: async () => rows(10) }))
+    try {
+      port.say({ t: 'running.get', offset: 0, request: 7 })
+      await vi.waitFor(() => expect(pages(port)).toHaveLength(1))
+      expect(pages(port)[0]).toMatchObject({ t: 'running.page', request: 7, offset: 0, total: 10 })
+      expect((pages(port)[0].rows as Array<{ id: string; status: string }>).map((r) => r.id)).toEqual(['p0', 'p1', 'p2', 'p3'])
+      expect(pages(port)[0].rows).toEqual(rows(10).slice(0, 4).map((r) => ({ ...r, status: 'idle' })))
+      port.say({ t: 'running.get', offset: 999, request: 8 })
+      await vi.waitFor(() => expect(pages(port)).toHaveLength(2))
+      expect(pages(port)[1]).toMatchObject({ request: 8, offset: 6, total: 10 })
+      expect((pages(port)[1].rows as unknown[]).length).toBe(4)
+    } finally { await session.stop() }
+  })
+
+  it('does not send the reply for a superseded request', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    const { session, port } = await start(makeHost({ listRunning: async () => { await gate; return rows(10) } }))
+    try {
+      port.say({ t: 'running.get', offset: 0, request: 1 })
+      port.say({ t: 'running.get', offset: 4, request: 2 })
+      await settle()
+      release()
+      await vi.waitFor(() => expect(pages(port).length).toBeGreaterThan(0))
+      await settle()
+      expect(pages(port).map((m) => m.request)).toEqual([2])
+      expect(pages(port)[0]).toMatchObject({ offset: 4 })
+    } finally { await session.stop() }
+  })
+
+  it('says working, question or idle for each row', async () => {
+    const host = makeHost({
+      listRunning: async () => [row(0), row(1), row(2), row(3, { engine: 'terminal' }), row(4)],
+      listUnread: () => [{ agentId: 'p2', machineId: 'mac-local', text: 'Done.', question: false, readToken: 't' }] as never,
+    })
+    const { session, port } = await start(host)
+    const statuses = () => Object.fromEntries((pages(port).at(-1)!.rows as Array<{ id: string; status: string }>).map((r) => [r.id, r.status]))
+    try {
+      await session.turnStarted('p0')
+      await session.question('p1', 'q1', [{ key: 'k', q: 'Go?', options: ['Yes'] }])
+      await session.turnStarted('p3')       // a terminal is always idle: no command-running signal exists
+      port.say({ t: 'running.get', offset: 0, request: 1 })
+      await vi.waitFor(() => expect(pages(port)).toHaveLength(1))
+      expect(statuses()).toEqual({ p0: 'working', p1: 'question', p2: 'question', p3: 'idle' })
+      port.say({ t: 'running.get', offset: 4, request: 2 })
+      await vi.waitFor(() => expect(pages(port)).toHaveLength(2))
+      // Five rows and a page of four: offset 4 clamps to the last full page, which starts at 1.
+      expect(pages(port)[1]).toMatchObject({ offset: 1, total: 5 })
+      expect(statuses()).toEqual({ p1: 'question', p2: 'question', p3: 'idle', p4: 'idle' })
+    } finally { await session.stop() }
+  })
+
+  it.each([
+    [{ offset: -1, request: 1 }], [{ offset: 1_000_001, request: 1 }], [{ offset: 0, request: 4294967296 }],
+    [{ offset: 1.5, request: 1 }], [{ offset: 0 }], [{ offset: 0, request: 0 }], [{ offset: 0, request: 2147483648 }],
+    [{ offset: '0', request: 1 }],
+  ])('ignores a malformed request %j', async (bad) => {
+    const { session, port } = await start(makeHost({ listRunning: async () => rows(10) }))
+    try {
+      port.say({ t: 'running.get', ...bad })
+      await settle(); await settle()
+      expect(pages(port)).toEqual([])
+    } finally { await session.stop() }
+  })
+
+  it('is not served to a dial without running v1, and the capability resets with the port', async () => {
+    const old = await start(makeHost({ listRunning: async () => rows(10) }), { t: 'hello', product: 'harness', mac: 'aa:bb' })
+    try {
+      old.port.say({ t: 'running.get', offset: 0, request: 1 })
+      await settle(); await settle()
+      expect(pages(old.port)).toEqual([])
+    } finally { await old.session.stop() }
+    const { session, port } = await start(makeHost({ listRunning: async () => rows(10) }))
+    try {
+      expect(session['runningCapable']).toBe(true)
+      await port.close('reconnect')
+      await settle()
+      expect(session['runningCapable']).toBe(false)
+    } finally { await session.stop() }
+  })
+
+  it('lists running.list in the features only with the capability and a host that can list', async () => {
+    const withBoth = await connect(makeHost({ listRunning: async () => rows(1) }))
+    try {
+      withBoth.port.say(HELLO)
+      await vi.waitFor(() => expect(withBoth.port.sent[0]?.features).toBeDefined())
+      expect(withBoth.port.sent[0].features).toContain('running.list')
+    } finally { await withBoth.session.stop() }
+    const noHost = await connect(makeHost())
+    try {
+      noHost.port.say(HELLO)
+      await vi.waitFor(() => expect(noHost.port.sent[0]?.features).toBeDefined())
+      expect(noHost.port.sent[0].features).not.toContain('running.list')
+    } finally { await noHost.session.stop() }
+    const noCap = await connect(makeHost({ listRunning: async () => rows(1) }))
+    try {
+      noCap.port.say({ t: 'hello', product: 'harness', mac: 'aa:bb' })
+      await vi.waitFor(() => expect(noCap.port.sent[0]?.features).toBeDefined())
+      expect(noCap.port.sent[0].features).not.toContain('running.list')
+    } finally { await noCap.session.stop() }
+  })
+
+  it('keeps four 95-byte multibyte names under CABLE_MAX_FRAME', async () => {
+    const long = 'é'.repeat(80) + 'x'.repeat(40)        // longer than 95 bytes, multibyte
+    const { session, port } = await start(makeHost({
+      listRunning: async () => Array.from({ length: 4 }, (_, i) => row(i, { name: long, engine: 'ü'.repeat(20) })),
+    }))
+    try {
+      port.say({ t: 'running.get', offset: 0, request: 1 })
+      await vi.waitFor(() => expect(pages(port)).toHaveLength(1))
+      const sent = pages(port)[0].rows as Array<{ name: string; engine: string }>
+      for (const r of sent) {
+        expect(Buffer.byteLength(r.name)).toBeLessThanOrEqual(95)
+        expect(Buffer.byteLength(r.engine)).toBeLessThanOrEqual(15)
+      }
+      expect(Math.max(...port.frames.map((f) => f.length))).toBeLessThan(CABLE_MAX_FRAME)
+    } finally { await session.stop() }
+  })
+
+  it('never opens, focuses, selects or sends a turn (C4)', async () => {
+    const host = makeHost({ listRunning: async () => rows(10) })
+    const { session, port } = await start(host)
+    try {
+      port.say({ t: 'running.get', offset: 0, request: 1 })
+      port.say({ t: 'running.get', offset: 4, request: 2 })
+      await vi.waitFor(() => expect(pages(port).length).toBeGreaterThan(0))
+      await settle()
+      for (const fn of [host.openAgent, host.focus, host.selectSwarm, host.sendTurn]) expect(fn).not.toHaveBeenCalled()
+    } finally { await session.stop() }
+  })
+})

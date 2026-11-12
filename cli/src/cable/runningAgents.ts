@@ -79,13 +79,18 @@ export class RunningOrder {
     this.known = new Set()
   }
 
-  private async ranked(ids: string[], rank: RankFn): Promise<string[]> {
-    if (ids.length === 0) return []
-    const ranks = await rank(ids)
-    const of = (id: string) => ranks.get(id) ?? NO_RANK
-    return [...ids].sort((a, b) =>
-      of(b).activity - of(a).activity || of(b).openedAt - of(a).openedAt || (a < b ? -1 : a > b ? 1 : 0))
+  private ranked(ids: string[], rank: RankFn): Promise<string[]> {
+    return sortByRank(ids, rank)
   }
+}
+
+/** The ids newest first: activity, then openedAt, both descending, then id ascending. No stability rule. */
+export async function sortByRank(ids: string[], rank: RankFn): Promise<string[]> {
+  if (ids.length === 0) return []
+  const ranks = await rank(ids)
+  const of = (id: string) => ranks.get(id) ?? NO_RANK
+  return [...ids].sort((a, b) =>
+    of(b).activity - of(a).activity || of(b).openedAt - of(a).openedAt || (a < b ? -1 : a > b ? 1 : 0))
 }
 
 export interface RunningPageRow { id: string; name: string; engine: string; machineId: string; status: RunningStatus }
