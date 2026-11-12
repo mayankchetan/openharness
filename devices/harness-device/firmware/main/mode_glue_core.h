@@ -84,6 +84,7 @@ typedef struct {
     bool     link_up;               // Wi-Fi: net_state == NET_UP AND the daemon's welcome came (cable_client_is_connected()); phone: the session is up
     uint8_t  noap_scans;            // Wi-Fi: scans in a row that found no access point
     bool     alert_seen;            // Wi-Fi: the daemon answered a handshake with a TLS alert in this boot
+    bool     link_hold;             // Wi-Fi: the radio is parked on purpose (S2 wifi-off) or waking from the park: the lost-link clock does not run (link_auto.h)
 } mg_world_t;
 
 // What the glue can do. `ctx` goes to every call. All of them are called from the one task that calls mg_step.

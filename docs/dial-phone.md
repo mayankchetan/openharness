@@ -110,7 +110,8 @@ What the dial does, in this order:
 - On the phone: if the phone link drops, the dial waits 30 seconds and then restarts to try Wi-Fi again. The second drop waits 60 seconds and
   the third 120 seconds. If the phone never connects, it tries Wi-Fi again 2 minutes after the phone link started. That is at most 3 returns to
   Wi-Fi; after the third the dial stays on the phone until the next start. A phone link that holds for 10 minutes clears the count.
-- On Wi-Fi: if the link was up and then stays down for 2 minutes, the dial restarts on the phone. It does not go back to Wi-Fi by itself
+- On Wi-Fi: if the link was up and then stays down for 2 minutes, the dial restarts on the phone. The time the radio is switched off to save the battery
+  (after 5 minutes with the screen dark) does not count; the 2 minutes start when the radio is back on and the link is still not up. It does not go back to Wi-Fi by itself
   later, except by the rules above.
 - Plugging the cable in works as before: after about 5 seconds, and 30 seconds after your last touch if a page, a question or a picker is open.
   It never restarts in the middle of a voice message, a draft, a firmware update or a pet upload. While a pairing number is on the glass it waits.

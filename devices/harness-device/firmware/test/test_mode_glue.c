@@ -88,6 +88,7 @@ typedef struct {
     uint64_t phone_from, phone_to;  // the same for the phone session
     uint8_t noap_scans;             // Wi-Fi: scans in a row that found no access point (seen from 2 s of uptime, while the link is not up)
     bool alert_seen;                // Wi-Fi: the daemon answered a handshake with an alert (seen from 4 s of uptime)
+    uint64_t hold_from, hold_to;    // Wi-Fi: the radio is parked on purpose / waking (net_link_radio_waking) from this uptime (0 = never) until hold_to (0 = for ever)
     unsigned la_events;             // the OR of every event the auto_event op was given
     int la_seals;                   // la_seal op calls
     la_view_t la_last_sealed;
@@ -217,6 +218,7 @@ static ms_mode_t boot(void)
     bool live_auto = false;
     mg_init(&D.mg, D.running, out.flaps, mg_resolve_wl(wl_eff(), MG_RESOLVE_LIVE, false, D.running, &live_auto), config_load_stay_wl());
     mg_auto_start(&D.mg, out.auto_on, &out.la, D.t);
+    if (out.auto_on && !ms_mode_is_wireless(D.running)) mode_record_la_clear();   // mode_glue_start: the picked radio did not start (review M2)
     mg_note_crashes(&D.mg, out.crashes);
     D.reset_sw = false;
     D.reset_cls = MS_RESET_POWERON;
@@ -257,6 +259,7 @@ static bool run(uint64_t ms)
             w.link_up = D.wifi_from && D.t >= D.wifi_from && (!D.wifi_to || D.t < D.wifi_to);
             w.noap_scans = (!w.link_up && D.t >= 2000) ? D.noap_scans : 0;
             w.alert_seen = D.alert_seen && D.t >= 4000;
+            w.link_hold = D.hold_from && D.t >= D.hold_from && (!D.hold_to || D.t < D.hold_to);
         } else if (D.running == MS_MODE_BLE) {
             w.link_up = D.phone_from && D.t >= D.phone_from && (!D.phone_to || D.t < D.phone_to);
         }
@@ -1811,8 +1814,8 @@ static void test_auto_no_access_point_goes_at_once_and_an_alert_holds_wifi(void)
     assert(boot() == MS_MODE_WIFI);
     D.alert_seen = true;                               // seen from 4 s: the daemon is reachable and it says no
     assert(!run(10000) && D.reboots == 0 && (D.la_events & LA_EV_HOLD_ALERT));
-    D.noap_scans = 5;                                  // the access point goes away afterwards: still held (the phone has the same key)
-    assert(!run(600000) && D.reboots == 0);
+    D.noap_scans = 5;                                  // the access point goes away afterwards (out of range): two scans win, the hold means nothing (review M1)
+    assert(run(1000) && D.reboot_to[0] == MS_MODE_BLE);
 }
 
 static void test_auto_the_busy_gate_and_the_notice_hold_the_edge_and_nothing_is_counted_meanwhile(void)
@@ -1904,6 +1907,48 @@ static void test_auto_a_radio_that_does_not_start_runs_usb_without_the_rules(voi
     assert(D.edge_logs == 0);
 }
 
+// review H1: the S2 radio park (wifi off after 5 min dark) is not a lost Wi-Fi link
+static void test_auto_the_s2_radio_park_is_not_a_lost_link(void)
+{
+    // dark for 7 minutes with the radio parked: no edge
+    fresh();
+    provision_auto();
+    assert(boot() == MS_MODE_WIFI);
+    D.wifi_from = 3000;
+    D.wifi_to = 300000;                                 // the session ends at 5 min: bye, radio off
+    D.hold_from = 300000;                               // net_link_radio_waking(): parked
+    D.asleep = true;
+    assert(!run(300000 + 7 * 60000) && D.reboots == 0);
+    // the wake, and the join fails: the hold ends 30 s later, then the 120 s run, then the phone
+    D.hold_to = 300000 + 8 * 60000;
+    assert(!run(60000 + 119000) && D.reboots == 0);
+    assert(run(3000) && D.reboot_to[0] == MS_MODE_BLE && rec_is(true, 0, 1));
+    // the wake, and the join works: no edge, ever
+    fresh();
+    provision_auto();
+    assert(boot() == MS_MODE_WIFI);
+    D.wifi_from = 3000;
+    D.hold_from = 300000;
+    D.hold_to = 330000;                                 // waking ends when the link is up
+    assert(!run(300000) );
+    D.wifi_to = 0;
+    assert(!run(1000000) && D.reboots == 0);
+}
+
+static void test_auto_a_pick_whose_radio_did_not_start_clears_the_record(void)
+{
+    // review M2: stored 3, a trusted record says phone, the phone stack does not start: the boot is USB and the record is cleared, so the unplug starts Wi-Fi first
+    fresh();
+    provision_auto();
+    seed_record(true, 1, 2);
+    D.radio_fails = true;
+    assert(boot() == MS_MODE_USB && !D.mg.la.active);
+    assert(rec_is(false, 0, 0));
+    assert(run(75000) && D.reboot_to[0] == MS_MODE_WIFI);
+    D.radio_fails = false;
+    assert(boot() == MS_MODE_WIFI && !D.mg.la.phone_boot);
+}
+
 static void test_auto_the_panic_loop_beats_it(void)
 {
     fresh();
@@ -1979,6 +2024,8 @@ int main(void)
     test_auto_usb_entry_has_priority_and_a_host_without_a_daemon_does_not_strand_the_dial();
     test_auto_a_usb_boot_clears_the_record_and_so_does_a_stored_mode_that_is_not_auto();
     test_auto_a_radio_that_does_not_start_runs_usb_without_the_rules();
+    test_auto_the_s2_radio_park_is_not_a_lost_link();
+    test_auto_a_pick_whose_radio_did_not_start_clears_the_record();
     test_auto_the_panic_loop_beats_it();
     test_auto_going_off_or_on_at_runtime();
     test_auto_a_table_written_before_the_link_auto_ops_still_works();

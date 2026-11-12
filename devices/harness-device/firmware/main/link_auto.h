@@ -13,10 +13,12 @@
 //              at once (the PMIC power-off keeps the RTC memory alive, so an old phone_boot must not be believed by a later software reset).
 //   Wi-Fi boot works = the link is up AND the daemon's welcome came (the glue builds `up`). First true row wins:
 //              works                          -> stay on Wi-Fi, the attempt rules stop for this boot
+//              two scans without the SSID     -> phone at once (this beats the alert hold below: the access point is gone, so the daemon cannot be
+//                                                reached either, and a held dial would sit without any link until a wake)
 //              a TLS alert seen (sticky)      -> HOLD on Wi-Fi: no edge (the phone uses the same key)
-//              two scans without the SSID     -> phone at once
 //              LA_TRY_MS not works            -> phone
-//              Wi-Fi lost after it worked for LA_WIFI_LOST_MS -> phone (not a retry)
+//              Wi-Fi lost after it worked for LA_WIFI_LOST_MS -> phone (not a retry). The clock does not run while the radio is parked on purpose
+//              (S2: wifi off after 5 min dark) or waking from that park (la_in_t.hold): it starts when the hold ends and the link is still down.
 //   phone boot  makes no Wi-Fi attempt. retries counts the returns to Wi-Fi (0-based, LA_RETRY_MAX of them per wake):
 //              the session was up, then down for LA_DROP_WAIT_MS[retries]   -> Wi-Fi, retries + 1
 //              the session never came for LA_NEVER_MS from the start        -> Wi-Fi, retries + 1
@@ -102,6 +104,7 @@ typedef struct {
     bool     up;           // Wi-Fi: net_state == NET_UP AND the daemon's welcome came; phone: the session is up
     uint8_t  noap_scans;   // Wi-Fi: scans in a row that found no access point (reset by a join)
     bool     alert_seen;   // Wi-Fi: the daemon answered a handshake with a TLS alert in this boot (net_link.c keeps it)
+    bool     hold;         // Wi-Fi: the radio is parked on purpose (S2 wifi-off) or waking from the park (net_link_radio_waking): the link is down for a reason that is not a loss
 } la_in_t;
 
 #define LA_EV_WORKS           (1u << 0)   // Wi-Fi: the first step that was up; la_out_t.waited_ms = ms from the start

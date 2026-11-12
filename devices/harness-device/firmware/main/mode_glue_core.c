@@ -127,7 +127,7 @@ void mg_step(mg_t *g, const mg_world_t *w, const mg_ops_t *ops)
     la_out_t lo;
     memset(&lo, 0, sizeof lo);
     if (g->auto_on && g->la.active && ms_mode_is_wireless(g->ms.mode)) {
-        const la_in_t li = {.now_ms = w->now_ms, .up = w->link_up, .noap_scans = w->noap_scans, .alert_seen = w->alert_seen};
+        const la_in_t li = {.now_ms = w->now_ms, .up = w->link_up, .noap_scans = w->noap_scans, .alert_seen = w->alert_seen, .hold = w->link_hold};
         la_step(&g->la, &li, &lo);
         if (lo.events && ops->auto_event) ops->auto_event(ops->ctx, lo.events, &g->la, &lo, w->now_ms);
         // A stable session cleared the retries and the edges: the record says so (a restart that is no switch must not find the old counts).

@@ -20,6 +20,7 @@
 #include "net_link.h"
 #include "net_state.h"
 #include "power_sleep.h"
+#include "s2_switches.h"
 #include "store_gate.h"
 #include "ui/display.h"
 #include "ui/ui_screens.h"
@@ -360,6 +361,11 @@ static void sample(mg_world_t *w, uint64_t now)
                 const unsigned scans = net_link_noap_scans();
                 w->noap_scans = scans > 255u ? 255u : (uint8_t)scans;
                 w->alert_seen = net_link_alert_seen();
+#if S2_WIFI_OFF
+                // The S2 radio park (net_link.c: wifi off after 5 min of dark battery time) and the wake from it are not a lost link: the rule of link_auto.h
+                // starts its 120 s only when the radio is back and the reconnect has not come up.
+                w->link_hold = net_link_radio_waking();
+#endif
             }
         }
     }
@@ -435,6 +441,9 @@ void mode_glue_start(ms_mode_t running)
     // The rules of "Wi-Fi first, else phone" run only when the stored mode is 3 AND a wireless mode really started (a radio that did not come up is USB, in this
     // boot, and the existing USB-to-wireless rule moves the dial). The clock starts here: net_link_start() / ble_link_start() returned a moment ago.
     mg_auto_start(&s_mg, s_boot.auto_on, &s_boot.la, uptime_ms());
+    // Stored 3 but the picked radio did not start: this boot is USB. The record must not keep the pick (a phone pick that failed would be picked again after the
+    // unplug): clear it, so the ordinary USB-to-wireless rule moves the dial to Wi-Fi first.
+    if (s_boot.auto_on && !ms_mode_is_wireless(s_running)) mode_record_la_clear();
     if (s_mg.auto_on) {
         if (!s_mg.la.phone_boot) ESP_LOGW(TAG, "auto: wifi try start, window %u ms", (unsigned)LA_TRY_MS);
         else ESP_LOGW(TAG, "auto: phone start, never-connected window %u ms, retries used %u of %u", (unsigned)LA_NEVER_MS, (unsigned)s_mg.la.retries, (unsigned)LA_RETRY_MAX);

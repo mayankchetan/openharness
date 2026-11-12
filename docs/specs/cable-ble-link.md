@@ -229,9 +229,9 @@ pick is Wi-Fi. A USB boot clears it.
 |---|---|---|
 | Wi-Fi works | link up AND the daemon's `welcome` came | stay on Wi-Fi |
 | Network not found | 2 scans in a row (`LA_NOAP_SCANS`) | restart on the phone at once |
-| TLS alert from the daemon | seen once in the attempt (sticky) | hold on Wi-Fi: no fallback (the phone has the same key) |
+| TLS alert from the daemon | seen once in the attempt (sticky) | hold on Wi-Fi: no fallback (the phone has the same key). Two no-AP scans still win: the network is gone |
 | Not working | 30 s (`LA_TRY_MS`: 15 s join + 5 s TCP + 5 s TLS = 25 s, plus 20 percent) | restart on the phone |
-| Wi-Fi lost after it worked | 120 s (`LA_WIFI_LOST_MS`) | restart on the phone (not a retry) |
+| Wi-Fi lost after it worked | 120 s (`LA_WIFI_LOST_MS`), not counted while the radio is parked on purpose (S2 wifi-off) or waking from the park: the clock starts when the radio is back and the link is still down | restart on the phone (not a retry) |
 | Phone link dropped (it had been up) | 30, 60, 120 s by retry (`LA_DROP_WAIT_LIST`) | restart to try Wi-Fi: retry + 1 |
 | Phone never connected | 120 s from the BLE start (`LA_NEVER_MS`) | restart to try Wi-Fi: retry + 1 |
 | Retries | 3 per wake (`LA_RETRY_MAX`), tested before the wait table is read | then the dial stays on the phone until the next wake |

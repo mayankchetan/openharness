@@ -112,6 +112,11 @@ assert 'mode_record_la_clear()' in boot and 's_boot.la_clear' in boot, 'a USB bo
 assert 'mg_auto_start(&s_mg, s_boot.auto_on, &s_boot.la,' in body(glue, 'mode_glue_start')
 assert 'mg_set_auto(&s_mg, auto_on, now)' in body(glue, 'mode_sw_task') and 'if (wl != MS_WL_UNSET)' in body(glue, 'mode_sw_task'), 'a read that says "no target" leaves the automatic rules alone'
 assert 'MS_MODE_BLE' not in glue and 'MS_WL_BLE' not in glue, 'the glue stays mode-agnostic: the resolver is in the core'
+# wifi-first review fixes: H1 the S2 radio park (and the wake from it) is handed to the lost-link rule as a hold; M2 a pick whose radio did not start clears the record
+assert 'w->link_hold = net_link_radio_waking();' in body(glue, 'sample') and '#if S2_WIFI_OFF' in raw_glue and '#include "s2_switches.h"' in raw_glue
+start_fn = body(glue, 'mode_glue_start')
+assert re.search(r'if \(s_boot\.auto_on && !ms_mode_is_wireless\(s_running\)\) mode_record_la_clear\(\);', start_fn) and start_fn.index('mg_auto_start(') < start_fn.index('mode_record_la_clear()')
+assert '.hold = w->link_hold' in code('mode_glue_core.c')
 assert 'config_save_boot_usb(s_boot.boot_usb_new)' in boot and 's_boot.write_boot_usb' in boot, 'boot_usb is rewritten only when the plan says so'
 assert re.search(r'_Static_assert\(MS_FOCUS_MAX == ID_MAX', raw_glue), 'the record holds an agent id: same size as cable_client.h'
 assert re.search(r'#define ID_MAX\s+48\b', text('cable_client.h')) and re.search(r'#define MS_FOCUS_MAX\s+48\b', text('mode_switch.h'))

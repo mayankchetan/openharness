@@ -29,6 +29,14 @@ static la_out_t step(la_t *a, uint64_t now, bool up, unsigned noap, bool alert)
     return out;
 }
 
+static la_out_t step_h(la_t *a, uint64_t now, bool up, bool hold)
+{
+    la_in_t in = {.now_ms = now, .up = up, .hold = hold};
+    la_out_t out;
+    la_step(a, &in, &out);
+    return out;
+}
+
 static void start(la_t *a, la_target_t running, bool phone_boot, unsigned retries, unsigned edges, uint64_t at)
 {
     la_view_t v = {.phone_boot = phone_boot, .retries = (uint8_t)retries, .edges = (uint8_t)edges};
@@ -195,8 +203,13 @@ static int test_wifi_attempt(void)
     CHECK(o.target == LA_TARGET_NONE);
     o = step(&a, LA_TRY_MS + 1, false, 0, true);
     CHECK(o.target == LA_TARGET_NONE);
-    o = step(&a, 600000, false, 5, true);
+    o = step(&a, 600000, false, 0, true);
     CHECK(o.target == LA_TARGET_NONE);
+    // review M1: the access point goes away after an alert (out of range): the hold means nothing without a daemon to reach, so two scans in a row win
+    o = step(&a, 600250, false, 1, true);
+    CHECK(o.target == LA_TARGET_NONE);
+    o = step(&a, 600500, false, 2, true);
+    CHECK(o.target == LA_TARGET_PHONE && o.why == LA_WHY_NO_AP);
     // an alert seen in the very step of the deadline holds it
     start(&a, LA_TARGET_WIFI, false, 0, 0, 0);
     o = step(&a, LA_TRY_MS, false, 0, true);
@@ -237,6 +250,46 @@ static int test_wifi_attempt(void)
     CHECK(o.target == LA_TARGET_NONE);
     o = step(&a, LA_TRY_MS + 5000, false, 5, false);
     CHECK(o.target == LA_TARGET_NONE);
+
+    // review H1: the S2 radio park (wifi off after 5 min dark) is not a lost link. `hold` is net_link_radio_waking(): true while the radio is parked and
+    // while it wakes, until the link is up again or 30 s have passed.
+    {
+        // dark for 7 minutes: the link is down because the radio is off. No edge, and no clock.
+        start(&a, LA_TARGET_WIFI, false, 0, 0, 0);
+        step_h(&a, 5000, true, false);                                  // Wi-Fi works
+        o = step_h(&a, 300000, false, true);                            // parked at 5 min
+        CHECK(o.target == LA_TARGET_NONE);
+        for (uint64_t t = 300250; t <= 300000 + 7 * 60000; t += 250) {
+            o = step_h(&a, t, false, true);
+            CHECK(o.target == LA_TARGET_NONE);
+        }
+        // park -> wake -> join ok: the hold ends with the link up, and nothing ever fires
+        o = step_h(&a, 800000, false, true);                            // waking
+        o = step_h(&a, 806000, true, false);                            // the session is up again
+        CHECK(o.target == LA_TARGET_NONE);
+        o = step_h(&a, 806000 + LA_WIFI_LOST_MS * 2, true, false);
+        CHECK(o.target == LA_TARGET_NONE);
+        // park -> wake -> the reconnect fails: the 120 s start when the hold ends (30 s after the wake), not before
+        start(&a, LA_TARGET_WIFI, false, 0, 0, 0);
+        step_h(&a, 5000, true, false);
+        step_h(&a, 300000, false, true);
+        step_h(&a, 700000, false, true);                                // the wake
+        step_h(&a, 700000 + 29750, false, true);
+        o = step_h(&a, 730000, false, false);                           // 30 s of waking are over, still no link: the lost clock starts here
+        CHECK(o.target == LA_TARGET_NONE);
+        o = step_h(&a, 730000 + LA_WIFI_LOST_MS - 1, false, false);
+        CHECK(o.target == LA_TARGET_NONE);
+        o = step_h(&a, 730000 + LA_WIFI_LOST_MS, false, false);
+        CHECK(o.target == LA_TARGET_PHONE && o.why == LA_WHY_WIFI_LOST && o.next.retries == 0);
+        // a hold that comes back inside the 120 s freezes it again and restarts the count
+        start(&a, LA_TARGET_WIFI, false, 0, 0, 0);
+        step_h(&a, 1000, true, false);
+        step_h(&a, 10000, false, false);
+        o = step_h(&a, 10000 + 100000, false, true);
+        CHECK(o.target == LA_TARGET_NONE);
+        o = step_h(&a, 10000 + 100000 + 119999, false, false);
+        CHECK(o.target == LA_TARGET_NONE);
+    }
 
     // the edge cap: a Wi-Fi attempt that failed at 8 edges does not fire
     start(&a, LA_TARGET_WIFI, false, 0, LA_EDGE_CAP, 0);

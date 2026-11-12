@@ -148,7 +148,9 @@ void la_step(la_t *a, const la_in_t *in, la_out_t *out)
         }
     } else {
         a->stable_on = false;
-        if (a->up_ever && !a->down_on) {
+        if (in->hold) {
+            a->down_on = false;   // parked on purpose or waking from the park: not a loss, and no clock; it starts when the hold ends with the link still down
+        } else if (a->up_ever && !a->down_on) {
             a->down_on = true;
             a->down_since = now;
         }
@@ -170,16 +172,17 @@ void la_step(la_t *a, const la_in_t *in, la_out_t *out)
             }
         } else {
             if (in->alert_seen) a->alert_latched = true;
-            if (a->alert_latched) {
+            if (in->noap_scans >= LA_NOAP_SCANS) {
+                // The access point is gone (out of range): the alert hold means nothing without a daemon to reach, so this wins.
+                want = LA_TARGET_PHONE;
+                why = LA_WHY_NO_AP;
+                waited = since_start;
+            } else if (a->alert_latched) {
                 // The daemon answered a handshake with an alert: it is reachable and it says no. The phone has the same key, so no fallback and no edge.
                 if (!a->said_alert) {
                     a->said_alert = true;
                     out->events |= LA_EV_HOLD_ALERT;
                 }
-            } else if (in->noap_scans >= LA_NOAP_SCANS) {
-                want = LA_TARGET_PHONE;
-                why = LA_WHY_NO_AP;
-                waited = since_start;
             } else if (since_start >= LA_TRY_MS) {
                 want = LA_TARGET_PHONE;
                 why = LA_WHY_WINDOW;
