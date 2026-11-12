@@ -156,6 +156,7 @@ typedef struct {
     uint32_t generation;
     int total;
     bool window;
+    bool running;   // agents.end said `running: true`: no window, and the rows are the running agents of this computer
 } cable_agent_snapshot_t;
 // A complete roster and its workspace identity are copied under the same lock.
 // Returns -1 while a new roster is being assembled, leaving the UI intact.

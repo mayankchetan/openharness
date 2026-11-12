@@ -25,16 +25,21 @@ code = r'''
 '''
 code += defines('ID_MAX','CABLE_NAME_MAX') + typedef('cable_agent_t',source) + typedef('project_t') + typedef('cable_agent_snapshot_t')
 code += r'''
-typedef struct { int valueint; const char *tab; bool number; } cJSON;
+typedef struct { int valueint; const char *tab; bool number; bool run; bool truth; } cJSON;
+static const cJSON run_item = { .truth = true };
 static cable_agent_t rows[4], *s_agents=rows;
 static int s_agents_lock=1, held, reloads, s_agent_count, s_agents_total;
-static bool s_agents_building,s_has_window;
+static bool s_agents_building,s_has_window,s_agents_running;
 static char s_agents_tab[ID_MAX];
 static uint32_t s_agents_generation;
 static void xSemaphoreTake(int lock,int wait) { (void)wait; assert(lock && !held); held++; }
 static void xSemaphoreGive(int lock) { assert(lock && held==1); held--; }
-static const cJSON *cJSON_GetObjectItemCaseSensitive(const cJSON *p,const char *key) { assert(!strcmp(key,"total")); return p; }
+static const cJSON *cJSON_GetObjectItemCaseSensitive(const cJSON *p,const char *key) {
+    if (!strcmp(key,"running")) return p->run ? &run_item : NULL;   // the marker is present only when the daemon sent it
+    assert(!strcmp(key,"total")); return p;
+}
 static bool cJSON_IsNumber(const cJSON *p) { return p && p->number; }
+static bool cJSON_IsTrue(const cJSON *p) { return p && p->truth; }
 static const char *str_of(const cJSON *p,const char *key) { assert(!strcmp(key,"tab")); return p->tab; }
 static void ui_request_agent_reload(void) { assert(!held); reloads++; }
 '''
@@ -62,7 +67,17 @@ int main(void) {
     assert(!strcmp(snapshot.tab,"empty-tab") && snapshot.window && snapshot.generation==3);
     handle_agents_begin(); next.tab=""; handle_agents_end(&next);
     assert(cable_client_list_agents_snapshot(out,4,&snapshot)==0);
-    assert(!snapshot.window && !snapshot.tab[0] && snapshot.generation==4);
+    assert(!snapshot.window && !snapshot.running && !snapshot.tab[0] && snapshot.generation==4);
+    // The running marker (U1): no window, tab "" and running:true is the dial's own running list, not "the app is shut".
+    handle_agents_begin(); next.tab=""; next.run=true; handle_agents_end(&next);
+    assert(cable_client_list_agents_snapshot(out,4,&snapshot)==0);
+    assert(snapshot.running && !snapshot.window && !snapshot.tab[0] && snapshot.generation==5 && !held);
+    // A later end without the marker clears it, and a window end never carries it.
+    handle_agents_begin(); next.tab=""; next.run=false; handle_agents_end(&next);
+    assert(cable_client_list_agents_snapshot(out,4,&snapshot)==0 && !snapshot.running && !snapshot.window);
+    handle_agents_begin(); next.tab="a-tab"; next.run=false; handle_agents_end(&next);
+    assert(cable_client_list_agents_snapshot(out,4,&snapshot)==0 && snapshot.window && !snapshot.running);
+    next.tab="";
     s_agents_generation=UINT32_MAX; handle_agents_begin(); handle_agents_end(&next);
     assert(cable_client_agent_generation()==0 && !held);
     puts("agent snapshot: production reader rejects partial streams; exact roster/tab/count/generation, empty tabs and wrap PASS");

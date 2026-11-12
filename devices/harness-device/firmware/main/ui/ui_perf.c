@@ -97,7 +97,7 @@ static void run_case(const char *name, int kind)
         counters(&b0, &f0, &ignored);
         int64_t t = esp_timer_get_time();
         if (kind == 0)
-            ui_fleet_set(16 + ((i + 1) & 1), true);
+            ui_fleet_set(16 + ((i + 1) & 1), true, false);
         else if (kind == 1) {
             char id[32];
             snprintf(id, sizeof(id), "perf-%d", i & 1);
@@ -165,7 +165,7 @@ void ui_perf_run(void)
             "Ready for a look.");
     }
     ui_projects_bulk_end();
-    ui_fleet_set(16, true);
+    ui_fleet_set(16, true, false);
     ui_land_after_reload();
     vTaskDelay(pdMS_TO_TICKS(600));
     ESP_LOGI("PERF", "memory int_free=%u int_largest=%u psram_free=%u",

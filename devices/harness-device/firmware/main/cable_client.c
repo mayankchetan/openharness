@@ -361,6 +361,9 @@ static void send_hello(void)
     // This dial reads `welcome.keepaliveMs` (cable_keepalive.h, W13). The daemon sends the field only to a dial that says so: an older firmware
     // would call a ping slower than 5 s a dead daemon.
     msg_string(&root, "keepalive", "v1");
+    // This dial draws the daemon's list of RUNNING agents when no desktop window is open (agents.end carries `running: true`, tab ""). The daemon
+    // builds that list only for a dial that says so; every other dial keeps today's empty list with no window.
+    msg_string(&root, "running", "v1");
     // The Swarms (handle_supertab) and their Super Tab waits (handle_question). Without the second the daemon holds
     // a wait back from this dial, which once had to: a wait is never an answer screen here.
     msg_string(&root, "swarmCard", "v1");
@@ -872,6 +875,7 @@ const char *cable_client_machine_name(void) { return s_machine_name; }
 // Set by `agents.end`, read by the refresh that applies the list — see ui_fleet_set.
 static int  s_agents_total;
 static bool s_has_window;
+static bool s_agents_running;   // the last agents.end said `running: true`: the list is the running agents of this computer, not a window's tab
 static char s_agents_tab[ID_MAX];
 static uint32_t s_agents_generation;
 
@@ -923,6 +927,7 @@ int cable_client_list_agents_snapshot(project_t *out, int max, cable_agent_snaps
     if (snapshot) {
         snprintf(snapshot->tab,sizeof snapshot->tab,"%s",s_agents_tab);
         snapshot->generation=s_agents_generation; snapshot->total=s_agents_total; snapshot->window=s_has_window;
+        snapshot->running=s_agents_running;
     }
     for (int i = 0; i < s_agent_count && n < max; i++) {
         memset(&out[n], 0, sizeof(out[n]));
@@ -1174,7 +1179,7 @@ static void session_down(const char *why)
     if (s_agents_lock) {
         xSemaphoreTake(s_agents_lock, portMAX_DELAY);
         s_agent_count = 0;
-        s_agents_total = 0; s_has_window = false;
+        s_agents_total = 0; s_has_window = false; s_agents_running = false;
         s_agents_tab[0] = 0; s_agents_generation++;
         s_agents_building = false;
         xSemaphoreGive(s_agents_lock);
@@ -1259,10 +1264,12 @@ static void handle_agents_end(const cJSON *p)
     const char *tab = p ? str_of(p, "tab") : NULL;
     s_agents_total = cJSON_IsNumber(total) ? (total->valueint > 0 ? total->valueint : 0) : n;
     s_has_window = tab && tab[0];
+    // `running: true` comes only with no window (tab ""): the rows are the running agents, so the empty page reads "No running agents".
+    s_agents_running = cJSON_IsTrue(p ? cJSON_GetObjectItemCaseSensitive(p, "running") : NULL);
     snprintf(s_agents_tab,sizeof s_agents_tab,"%s",tab ? tab : "");
     s_agents_generation++;
     xSemaphoreGive(s_agents_lock);
-    ESP_LOGI(TAG, "agents: %d of %d%s", n, s_agents_total, s_has_window ? "" : " (no window)");
+    ESP_LOGI(TAG, "agents: %d of %d%s%s", n, s_agents_total, s_has_window ? "" : " (no window)", s_agents_running ? " (running)" : "");
     // app_main's refresh reads the list and rebuilds the tiles. Going through the same request the
     // backend path used means the carousel's landing, naming and removal logic has one implementation.
     ui_request_agent_reload();

@@ -252,7 +252,7 @@ static EXT_RAM_BSS_ATTR struct {
     pane_memory_t memory[PANE_MEMORY_MAX];
     uint32_t memory_serial;
     int count, active, total;
-    bool connected, window, loading, ready, dirty;
+    bool connected, window, running, loading, ready, dirty;
     int bulk, offset, reader_rows;   // reader_rows: the reader's text in rows, from its last render (0 = unknown)
     view_t view, voice_return;
     bool quiet, nap, focus_face, straight_title;
@@ -1762,14 +1762,18 @@ static void render_focus_panes(ht_scene_t *f)
          */
         enum { LINE = 52, BUTTON_X = 103, BUTTON_Y = 333, BUTTON_W = 260, BUTTON_H = 64 };
         const ht_font_t *big = &ht_lv_inter_44.base, *pf = &ht_lv_inter_28.base;
+        // With no window (agents.end running:true, U1) the list is the running agents, so the empty page says so and offers no tab to choose.
+        const bool running = s.running && !here;
         static const char *const empty[2] = {"No panes in", "this tab."};
+        static const char *const none_running[2] = {"No running", "agents."};
         bool loading = s.loading && !here;
         int lines = loading ? 1 : 2, top = 233 - lines * LINE / 2;
         for (int n = 0; n < 2; n++) {
-            const char *text = n >= lines ? "" : loading ? "Loading..." : empty[n];
+            const char *text = n >= lines ? "" : loading ? "Loading..." : running ? none_running[n] : empty[n];
             int w = text[0] ? ht_measure(big, text) : 1;
             ht_text(f, (HT_WIDTH - w) / 2, top + n * LINE + (LINE - big->height) / 2, w, big, FG, BG, text);
         }
+        if (running) return;
         int n = s.hit_count++, w = ht_measure(pf, "Choose a tab");
         s.hits[n] = (hit_t){{BUTTON_X - 20, BUTTON_Y - 12, BUTTON_W + 40, BUTTON_H + 24}, A_TABS, 0, s.connected};
         uint16_t pill = n == s.pressed ? pressed_fill : color(0x171718);
@@ -1795,8 +1799,8 @@ static void render_agents(ht_scene_t *f)
     if (s.offset > last) s.offset = last;
     if (s.offset < 0) s.offset = 0;
     if (!s.count) {
-        center(f, 192, s.loading ? "Loading..." : "No panes in this tab.", FG);
-        control(f, FACE_CX(204), 283, 204, "Choose a tab", A_TABS, 0, s.connected);
+        center(f, 192, s.loading ? "Loading..." : s.running ? "No running agents." : "No panes in this tab.", FG);
+        if (!s.running) control(f, FACE_CX(204), 283, 204, "Choose a tab", A_TABS, 0, s.connected);
         return;
     }
     for (int row = 0; row < TAB_ROWS && s.offset + row < s.count; row++) {
@@ -5336,11 +5340,12 @@ void ui_cancel_acked(const char *session)
         }
     display_unlock();
 }
-void ui_fleet_set(int total, bool window)
+void ui_fleet_set(int total, bool window, bool running)
 {
     display_lock();
     s.total = total;
     s.window = window;
+    s.running = running;
     change();
     display_unlock();
 }

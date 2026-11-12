@@ -316,8 +316,9 @@ bool ui_peek_agent_reload_req(void);   // non-consuming check (a slow per-agent 
 // in — ui_project_set_name appends — and once that disagrees with the list there is no path back.
 // What the list just pushed was cut from: how many agents the account has in all (the overview's number —
 // the dial holds one tab, never the fleet) and whether a window is open at the far end (an empty list
-// with one is an empty tab; without one it is a shut app — see no_agents_apply).
-void ui_fleet_set(int total, bool has_window);
+// with one is an empty tab; without one it is a shut app — see no_agents_apply). `running` is the daemon's marker that the list is the running
+// agents of this computer (no window): an empty list then reads "No running agents" and offers no tab to choose.
+void ui_fleet_set(int total, bool has_window, bool running);
 
 // Tell the window where the dial is looking, on purpose. ONLY for a move a person made through something
 // other than a swipe (a notification): those go through code, and code-driven moves are

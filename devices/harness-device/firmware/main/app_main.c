@@ -181,7 +181,7 @@ static int refresh_projects(void)
     if (n > 1) ui_project_apply_order(ids, n);
     // The fleet behind the list: the overview's count, and whether the empty page means "no window" or
     // "empty tab".
-    ui_fleet_set(snapshot.total, snapshot.window);
+    ui_fleet_set(snapshot.total, snapshot.window, snapshot.running);
     ui_workspace_applied(snapshot.tab, snapshot.generation);
 
     // The list is built. If a landing is pending, LAND: drop the loading spinner and focus agent 1 (or the
