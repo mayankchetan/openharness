@@ -172,6 +172,10 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
    -o "$out/test_terminal" "$here/test_terminal.c" \
    "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c"
 "$out/test_terminal"
+# Greek pi in both skins' fonts (dial-reach T12). _POSIX_C_SOURCE: terminal.c uses strnlen, which the plain -std=c11 line above does not declare on glibc.
+cc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
+   -o "$out/test_font_pi" "$here/test_font_pi.c" "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" "$here/../main/ui/habitat/focus_faces.c"
+"$out/test_font_pi"
 
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -o "$out/test_arc_pixels" "$here/test_arc_pixels.c" \

@@ -17,10 +17,11 @@ pixel = root.parent / 'prototype/habitat/assets/unscii-8.ttf'
 # dot below (U+0323) — so 64 of them cannot be built from it at all. Geist-Regular, already vendored
 # beside it, has all 98 precomposed. Same superfamily, drawn into the same fixed cell.
 viet = root / 'fonts/Geist-Regular.ttf'
-# The eight Vietnamese letters that live outside 0x1EA0-0x1EF9. They are appended to that block rather
-# than given four two-glyph atlases of their own, so the range stays contiguous and ht_font_t keeps its
-# single first/last pair; terminal.c aliases them onto the tail. Order is load-bearing.
-VIET_TAIL = '\u0102\u0103\u0110\u0111\u01a0\u01a1\u01af\u01b0'
+# The eight Vietnamese letters that live outside 0x1EA0-0x1EF9, and Greek small letter pi (a pi-engine agent's title starts
+# with it; Geist-Regular has it). They are appended to that block rather than given atlases of their own, so the range
+# stays contiguous and ht_font_t keeps its single first/last pair; terminal.c aliases them onto the tail. Order is
+# load-bearing: new letters go at the END (pi is the ninth, U+1F02).
+VIET_TAIL = '\u0102\u0103\u0110\u0111\u01a0\u01a1\u01af\u01b0\u03c0'
 # THE ENGINE MARKS, in the order their codepoints run from U+E020. The order is load-bearing: it is
 # the same list focus.c maps an engine name onto, and renumbering it renames every badge at once.
 # Lifted from the deleted ui/icons_engine.c — see assets/README.md for how, and why some of them

@@ -34,19 +34,20 @@ static int imax(int a, int b) { return a > b ? a : b; }
  * not — a name that promises a swap it no longer always performs is worse than no name at all.
  */
 static uint16_t panel16(uint16_t v) { return (uint16_t)((v << 8) | (v >> 8)); }
-// The eight Vietnamese letters outside 0x1EA0-0x1EF9, mapped onto the tail the generator appends
-// to that block. Returns 0 for anything that is not Vietnamese. Order matches VIET_TAIL in
+// The eight Vietnamese letters outside 0x1EA0-0x1EF9 and Greek small letter pi (a pi-engine agent's title starts with it), mapped onto the tail the
+// generator appends to that block. Returns 0 for anything that is not Vietnamese or pi. Order matches VIET_TAIL in
 // scripts/gen_habitat_fonts.py; the two must be changed together.
 static uint32_t viet_codepoint(uint32_t cp)
 {
-    // 0x1EFA..0x1F01 is the tail itself: the raster path aliases, then asks again with the result,
+    // 0x1EFA..0x1F02 is the tail itself: the raster path aliases, then asks again with the result,
     // so this has to answer the same thing twice.
-    if (cp >= 0x1ea0 && cp <= 0x1f01) return cp;
+    if (cp >= 0x1ea0 && cp <= 0x1f02) return cp;
     switch (cp) {
     case 0x102: return 0x1efa; case 0x103: return 0x1efb;
     case 0x110: return 0x1efc; case 0x111: return 0x1efd;
     case 0x1a0: return 0x1efe; case 0x1a1: return 0x1eff;
     case 0x1af: return 0x1f00; case 0x1b0: return 0x1f01;
+    case 0x3c0: return 0x1f02;   // Greek small letter pi
     default: return 0;
     }
 }

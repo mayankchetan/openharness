@@ -59,7 +59,7 @@ static void vietnamese_checks(void)
     // Every codepoint Vietnamese needs beyond Latin-1: the 0x1EA0 block and the eight that live
     // outside it. Each must be one cell, must not fall back to '?', and must keep its exact bytes
     // in the scene — the wire text is never rewritten, only the cell it is drawn from changes.
-    static const uint32_t scattered[]={0x102,0x103,0x110,0x111,0x1a0,0x1a1,0x1af,0x1b0};
+    static const uint32_t scattered[]={0x102,0x103,0x110,0x111,0x1a0,0x1a1,0x1af,0x1b0,0x3c0};   // the last is Greek pi, the ninth tail letter (T12)
     const ht_font_t *fonts[]={&ht_mono_16,&ht_mono_20,&ht_mono_24,&ht_mono_28};
     for (unsigned f=0;f<sizeof fonts/sizeof fonts[0];f++) {
         for (unsigned i=0;i<0x5a+sizeof scattered/sizeof scattered[0];i++) {

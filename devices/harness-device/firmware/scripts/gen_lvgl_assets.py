@@ -30,8 +30,9 @@ LVGL = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.home() / (
 MONT = ['montserrat_22', 'montserrat_14']
 USE = {'montserrat_22': 'the close cross', 'montserrat_14': 'the bell glyph in the pill'}
 # Text codepoints kept: Latin-1, Latin Extended-A, the Vietnamese horn letters and the precomposed
-# Vietnamese block, a little punctuation, ✓ ✗. Inter (gen_focus_faces.py) is cut to this set.
-TEXT = (set(range(0x20, 0x7F)) | set(range(0xA0, 0x180)) | {0x1A0, 0x1A1, 0x1AF, 0x1B0} |
+# Vietnamese block, a little punctuation, ✓ ✗, and Greek small letter pi (U+03C0: a pi-engine agent's title starts with it).
+# Inter (gen_focus_faces.py) is cut to this set.
+TEXT = (set(range(0x20, 0x7F)) | set(range(0xA0, 0x180)) | {0x1A0, 0x1A1, 0x1AF, 0x1B0, 0x3C0} |
         set(range(0x1EA0, 0x1EFA)) |
         {0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2026, 0x2039, 0x203A, 0x2713, 0x2717})
 BELL, CROSS = 0xF0F3, 0xF00D

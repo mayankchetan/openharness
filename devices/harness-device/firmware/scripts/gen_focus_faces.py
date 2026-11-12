@@ -21,8 +21,9 @@ wght 450), -Medium26 (opsz 14, wght 520) and -Bold48 (opsz 28, wght 700) are sta
 mockup/fonts-inter/Inter.ttf (github.com/google/fonts ofl/inter, Inter[opsz,wght].ttf), each
 cut down to the TEXT codepoints and kern feature, its kerning lookups unwrapped from GPOS Extension (type 9)
 subtables, which lv_font_conv does not read (without them the face comes out unkerned). `--inter-instance`
-re-cuts them (INTER). The default run reads the vendored files and needs node and fontTools (pip install
-fonttools: it reads each font's coverage).
+re-cuts them (INTER): it needs the variable font at mockup/fonts-inter/Inter.ttf (gitignored), and TEXT now holds Greek pi
+(U+03C0), which the cuts made before 2026-11-12 do not have. The default run reads the vendored files and needs node
+and fontTools (`uv run --with fonttools`: it reads each font's coverage).
 """
 import re
 import subprocess
@@ -144,6 +145,7 @@ def main():
             missing = (covered(source) | MARKS) - codes
             assert not missing, (name, sorted(missing))
             assert len(set(range(0x1EA0, 0x1EFA)) & codes) == 90 and {0x1A0, 0x1A1, 0x1AF, 0x1B0} <= codes
+            assert 0x3C0 in codes, (name, 'Greek pi')   # a pi-engine agent's title starts with it; without it the face draws "?"
             assert 0 < font['line'] - font['base'] < font['line'], name
             total += size
             print(f'{name}: {len(codes)} glyphs, line {font["line"]}, ascent {font["line"] - font["base"]},'
