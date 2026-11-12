@@ -222,8 +222,8 @@ for a in ('A_PLINK_SYNC', 'A_PLINK_CYCLE', 'A_RESTART_GO', 'A_PREFS_SAVE'):
     assert re.search(r'case ' + a + r':\n(?:\s*case A_\w+:\n)*\s*break;', dispatch), a + ' is the worker\'s alone'
 
 # The Settings row, in the list of the controls, always enabled (it is local, like Inbox and Nap). The Phone row MOVED out of that list.
-items = function('settings_item', ui)
-assert re.search(r'\{"Settings", A_PREFS, 0\}', items), 'the row'
+items = re.search(r'menu_items\[\] = \{.*?\n\};', ui, re.S).group(0)   # the table (dial-reach T10: it is file-scope, with a group field)
+assert '{"Settings", A_PREFS, 0, MENU_GROUP_DIAL}' in items, 'the row'
 assert 'A_PHONE' not in items and '"Phone"' not in items, 'Phone is no longer a row of the controls list'
 assert re.search(r'action == A_PHONE \|\| action == A_PREFS \|\|', function('render_settings', ui)), 'enabled without a daemon'
 
@@ -256,7 +256,7 @@ for want in ('esp_app_get_description()->version', 'battery_pct()', 'link_icon_k
 assert re.search(r'case A_PREFS: \{\s*int keep = 0;\s*if \(s\.view == SETTINGS\) s\.list_offset = s\.offset;\s*else if \(a\.value\) keep = s\.prefs_offset;\s*view\(PREFS\);\s*s\.offset = keep;\s*queue\(\(action_t\)\{\.kind = A_PLINK_SYNC\}\);', ui), 'A_PREFS'
 assert re.search(r'case A_BRIGHT:\s*s\.prefs_offset = s\.offset;\s*view\(BRIGHT\);\s*break;', ui), 'A_BRIGHT'
 assert re.search(r'case A_ABOUT:\s*s\.prefs_offset = s\.offset;\s*s\.about_at = ms\(\) \+ 10000;\s*view\(ABOUT\);', ui), 'A_ABOUT'
-assert re.search(r'case A_SETTINGS: \{\s*const int keep = a\.value \? s\.list_offset : 0;\s*view\(SETTINGS\);\s*s\.offset = keep;', ui), 'back lands on the row it left'
+assert re.search(r'case A_SETTINGS: \{\s*const int keep = a\.value \? s\.list_offset : 0;[^\n]*\n\s*menu_line_t lines\[MENU_MAX_LINES\];\s*const int n = settings_lines\(lines\);\s*view\(SETTINGS\);\s*s\.offset = menu_clamp\(lines, n, TAB_ROWS, keep\);', ui), 'back lands on the row it left, kept valid by the model'
 sound = dispatch[dispatch.index('case A_SOUND:'):dispatch.index('case A_PLINK:')]
 assert 's.muted = !s.muted;' in sound and 'UI_SETTING_MUTED' in sound and 'settings_save_queue()' in sound and 'config_' not in sound, 'Sound: the muted flag through A_SETTINGS_SAVE'
 screen_off = dispatch[dispatch.index('case A_SCREEN_OFF:'):dispatch.index('case A_NIGHT:')]

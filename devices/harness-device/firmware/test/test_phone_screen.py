@@ -59,7 +59,8 @@ items = body(raw, 'prefs_item')
 assert re.search(r'#ifdef DEVICE_BLE_LINK\n\s*\{"Phone", A_PHONE\},[^\n]*\n#endif', items), 'the Phone row is inside #ifdef DEVICE_BLE_LINK'
 assert items.count('DEVICE_BLE_LINK') == 1 and 'feature' not in items
 assert '"Phone", A_PHONE}' in items and 'CABLE_FEATURE' not in items, 'no daemon feature gates the row'
-assert '"Phone"' not in body(raw, 'settings_item') and 'A_PHONE' not in body(raw, 'settings_item'), 'and it is gone from the controls list'
+menu_table = re.search(r'menu_items\[\] = \{.*?\n\};', raw, re.S).group(0)   # the controls list's table (dial-reach T10: file-scope, grouped)
+assert '"Phone"' not in menu_table and 'A_PHONE' not in menu_table and '"Phone"' not in body(raw, 'settings_item'), 'and it is gone from the controls list'
 prefs_rows = body(ui, 'render_prefs')
 assert 'enabled' not in prefs_rows and 'true};' in prefs_rows, 'every Settings row is a plain tap with no daemon'
 settings = body(ui, 'render_settings')

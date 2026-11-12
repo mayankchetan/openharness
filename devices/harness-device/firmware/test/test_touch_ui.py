@@ -36,6 +36,7 @@ code = r'''
 #include "workspace.h"
 #include "supertab.h"
 #include "command_face.h"
+#include "menu_list.h"
 #include "arc_geometry.inc"
 #include <assert.h>
 #include <limits.h>
@@ -219,7 +220,8 @@ static bool scroll_emit(ht_scroll_phase_t phase, int dy, int velocity, void *ctx
 }
 '''
 code += function('color')
-code += function('settings_item') + function('settings_count') + function('hit_contains')
+code += re.search(r'static const struct \{[^}]*\} menu_items\[\] = \{.*?\n\};', source, re.S).group(0) + '\n'
+code += function('settings_lines') + function('settings_count') + function('hit_contains')
 code += function('find')
 code += 'static void notice_expire(uint32_t now);\n'
 swarm_core = source[source.index('/*\n * THE SWARMS'):source.index('static void tabs_open(void)')]
@@ -229,9 +231,10 @@ swarm_parts = {
     # with the last `swarms` list it keeps beside it
     'swarms_apply': source[source.index('// The last `swarms` list as it came'):source.index('void ui_swarms_replace(')],
 }
-for name in ['copy', 'recap_preview', 'notice_unread', 'notice_was_read', 'notice_forget_read', 'notice_flush_reads', 'notice_mark_read', 'habitat_scene_receipt', 'habitat_scene_presented', 'pane_memory', 'pane_memory_apply', 'dismiss_result', 'activity_text', 'ensure', 'input_cancel', 'view', 'notice_open', 'workspace_index', 'swarm_core', 'voice_lead', 'tabs_open', 'workspace_failed', 'tab_request', 'tabs_sync', 'ui_scroll_reportable', 'focus_skin', 'focus_face_for', 'focus_chord', 'focus_put', 'focus_span', 'focus_take', 'focus_rows', 'ui_rows', 'ui_can_display', 'ui_wrap', 'text_in', 'control', 'home_footer', 'footer_control', 'text', 'center', 'render_brand', 'heading', 'question_view', 'question_rows', 'question_move', 'question_text', 'render_question', 'render_choices', 'render_answer_review', 'question_answer', 'send_answer', 'make_action', 'character_mood', 'voice_status', 'home_caption_rotates', 'home_caption_tick', 'status_animated', 'status_speed', 'status_wake_ms', 'surface_tick', 'command_face', 'render_workspace_preview', 'question_prompt', 'focus_bell', 'render_swarm_face', 'render_home', 'render_voice', 'render_selection', 'render_form', 'draft_move', 'render_draft', 'render_draft_options', 'swarms_apply', 'ui_swarms_replace', 'ui_workspace_applied', 'ui_land_after_reload']:
+for name in ['copy', 'recap_preview', 'notice_unread', 'notice_was_read', 'notice_forget_read', 'notice_flush_reads', 'notice_mark_read', 'habitat_scene_receipt', 'habitat_scene_presented', 'pane_memory', 'pane_memory_apply', 'dismiss_result', 'activity_text', 'ensure', 'input_cancel', 'view', 'notice_open', 'workspace_index', 'swarm_core', 'voice_lead', 'tabs_open', 'workspace_failed', 'tab_request', 'tabs_sync', 'ui_scroll_reportable', 'focus_skin', 'focus_face_for', 'focus_chord', 'focus_put', 'focus_span', 'focus_take', 'focus_rows', 'ui_rows', 'ui_can_display', 'ui_wrap', 'text_in', 'control', 'home_footer', 'footer_control', 'text', 'center', 'render_brand', 'heading', 'question_view', 'question_rows', 'question_move', 'question_text', 'render_question', 'render_choices', 'render_answer_review', 'question_answer', 'send_answer', 'make_action', 'character_mood', 'voice_status', 'home_caption_rotates', 'home_caption_tick', 'status_animated', 'status_speed', 'status_wake_ms', 'surface_tick', 'command_face', 'render_workspace_preview', 'question_prompt', 'focus_bell', 'render_swarm_face', 'render_home', 'render_voice', 'render_selection', 'form_title_shown', 'render_form', 'draft_move', 'render_draft', 'render_draft_options', 'swarms_apply', 'ui_swarms_replace', 'ui_workspace_applied', 'ui_land_after_reload']:
     code += swarm_parts[name] if name in swarm_parts else function(name)
-code += function('render_settings') + function('ui_visit_state')
+code += 'static void focus_header(ht_scene_t *f, const char *title);\n'   # defined below; render_settings draws the MENU heading with it
+code += function('menu_label') + function('render_settings') + function('ui_visit_state')
 code += function('ui_project_known') + function('ui_focus_project') + function('ui_apply_pending_focus')
 code += function('focus_centred') + function('focus_header') + function('focus_clipped') + function('tabs_move') + function('tab_name') + function('tab_split') + function('tab_fade') + function('tab_neighbour') + function('focus_carousel') + function('tab_label') + function('render_focus_tabs') + function('pane_label') + function('render_focus_panes') + function('render_agents') + function('render_tabs') + function('page_controls') + function('render_notice') + function('css_line') + function('inbox_line') + function('inbox_page') + function('render_focus_inbox') + function('render_list')
 for name in ['notice_remove', 'notice_sync_view', 'notice_selection', 'notice_restore_selection', 'notice_add', 'notice_expire', 'on_face', 'notice_read_now', 'ui_notify_summary', 'ui_turn_error', 'ui_notif_seen', 'ui_notif_read', 'ui_notif_replace', 'ui_notif_open', 'ui_question_close', 'ui_answer_receipt',
@@ -1860,8 +1863,8 @@ int main(int argc, char **argv) {
     assert(ht_visit_reply(&visit,visit.id,visit.request,true,"Different reading"));
     int sends=visit_sends; habitat_touch(false,173,410,1150);
     assert(!visit.pending && visit.available && visit_sends==sends && carry.active);
-    reset(); s.view=SETTINGS; s.offset=6; scene_take(); assert(action_enabled(A_LATEST)); portrait(dir,"reading-controls");
-    tap(1000,233,272); assert(visit.pending && visit.op==HT_VISIT_LATEST && visit_sends==1 && !starts);
+    reset(); s.view=SETTINGS; s.offset=0; scene_take(); assert(action_enabled(A_LATEST)); portrait(dir,"reading-controls");
+    tap(1000,233,TAB_TOP+3*TAB_ROW_HEIGHT+20); assert(visit.pending && visit.op==HT_VISIT_LATEST && visit_sends==1 && !starts);
     action_t old_visit=visit_queued; visit_work(old_visit); assert(visit_wire==1 && !strcmp(visit_wire_op,"latest"));
     char visit_request[32]; snprintf(visit_request,sizeof visit_request,"visit-%lu",(unsigned long)visit.request);
     cJSON visit_fields[]={
@@ -1882,10 +1885,10 @@ int main(int argc, char **argv) {
     reset(); dispatch((action_t){.kind=A_LATEST,.id="a"}); old_visit=visit_queued;
     ht_visit_close(&visit); visit_work(old_visit); assert(!visit_wire); // A cancelled queued action cannot jump later.
     dispatch((action_t){.kind=A_LATEST,.id="a"}); visit_work(old_visit); assert(!visit_wire && visit.pending);
-    reset(); s.view=SETTINGS; s.offset=6; scene_take(); habitat_touch(true,233,272,1000); s.active=1;
-    habitat_touch(false,233,272,1080); assert(!visit_sends && !starts); // Destination changed under the finger.
-    reset(); s.view=SETTINGS; s.offset=6; scene_take(); congestion=true;
-    tap(1000,233,272); assert(!visit.pending && !visit_sends && s.view==MESSAGE);
+    reset(); s.view=SETTINGS; s.offset=0; scene_take(); habitat_touch(true,233,TAB_TOP+3*TAB_ROW_HEIGHT+20,1000); s.active=1;
+    habitat_touch(false,233,TAB_TOP+3*TAB_ROW_HEIGHT+20,1080); assert(!visit_sends && !starts); // Destination changed under the finger.
+    reset(); s.view=SETTINGS; s.offset=0; scene_take(); congestion=true;
+    tap(1000,233,TAB_TOP+3*TAB_ROW_HEIGHT+20); assert(!visit.pending && !visit_sends && s.view==MESSAGE);
     reset(); s.connected=false; s.view=SETTINGS; scene_take(); assert(!action_enabled(A_LATEST));
     tab_frame_checks();
     workspace_setup(); assert(!action_enabled(A_TABS)); portrait(dir,"workspace-home");
@@ -2053,7 +2056,7 @@ int main(int argc, char **argv) {
         const ht_run_t *r=&scene.runs[i];
         if(r->x+r->w<=119) previous_visible=true;
         if(r->x>=347) next_visible=true;
-        assert(strcmp(r->text,"controls"));
+        assert(strcmp(r->text,"controls"));   // the menu heading is MENU, a letter to a run (dial-reach T10)
     }
     assert(previous_visible && next_visible);
     habitat_touch(true,300,233,3000); habitat_touch(true,240,233,3120); scene_take();
@@ -3280,12 +3283,16 @@ int main(int argc, char **argv) {
     }
     // Every advertised optional control is present, none appear for a legacy host.
     reset(); host_features=0; view(SETTINGS); scene_take();
-    assert(settings_count()==5 && !action_enabled(A_FORM) && !action_enabled(A_LATEST));
+    assert(settings_count()==8 && !action_enabled(A_FORM) && !action_enabled(A_LATEST));
+    {   // the menu on the first window: the THIS AGENT label and three hit rows (one is the < back control), no "controls", the label says its words
+        int rows_hit=0; for(int i=0;i<s.hit_count;i++) if(s.hits[i].action==A_STOP||s.hits[i].action==A_MODELS||s.hits[i].action==A_HOME) rows_hit++;
+        assert(rows_hit==3 && scene_says("THIS AGENT") && !scene_says("controls") && !scene_says("ON COMPUTER"));
+    }
     portrait(dir,"controls-core");
     habitat_touch(true,233,370,1000); habitat_touch(true,233,160,1250); habitat_touch(false,233,160,1300);
-    // Five rows without the optional controls, so the list scrolls to its one remaining offset and
-    // Nap — the only preference-shaped thing the glass kept — is reachable there.
-    scene_take(); assert(s.offset==1 && action_enabled(A_NAP));
+    // Eight lines without the optional controls (two labels and six rows), so the list scrolls to its last offset (4) and
+    // Quiet 15 min — the only preference-shaped thing the glass kept — is reachable there.
+    scene_take(); assert(s.offset==4 && action_enabled(A_NAP));
     portrait(dir,"controls-core-scroll");
     dispatch((action_t){.kind=A_FIND}); assert(s.view==AGENTS && !form_actions && !starts);
     dispatch((action_t){.kind=A_LATEST,.id="a"}); assert(!visit_sends);
@@ -3313,7 +3320,7 @@ with tempfile.TemporaryDirectory(prefix='harness-touch-ui-') as d:
                     '-fsanitize='+os.environ.get('SANITIZERS','undefined,bounds'),
                     *extra_includes, '-I',str(native),str(out/'touch_ui.c'), *extra_sources, str(native/'gestures.c'),
                     str(native/'form.c'),str(native/'visit.c'),str(native/'draft.c'), str(native/'scroll.c'),str(native/'selection.c'),str(native/'carry.c'),str(native/'tim.c'),str(native/'character_motion.c'),str(native/'character_layout.c'),str(native/'character.c'),str(native/'illustrated.c'),str(native/'tux.c'),str(native/'focus.c'),str(native/'lvgl_fonts.c'),str(native/'lvgl_icons.c'),str(native/'focus_marks.c'),str(native/'focus_faces.c'),str(native/'pets.c'),str(native/'../../pet_store.c'),str(native/'../../elapsed.c'),str(native/'terminal.c'),
-                    str(native/'fonts.c'),str(native/'octopus.c'),str(native/'ascii_clip.c'),str(native/'octopus_font.c'),str(native/'workspace.c'),str(native/'supertab.c'),str(native/'command_face.c'),'-o',str(out/'touch_ui'),'-lm'],check=True)
+                    str(native/'fonts.c'),str(native/'octopus.c'),str(native/'ascii_clip.c'),str(native/'octopus_font.c'),str(native/'workspace.c'),str(native/'supertab.c'),str(native/'command_face.c'),str(native/'menu_list.c'),'-o',str(out/'touch_ui'),'-lm'],check=True)
     args=[str(out/'touch_ui')]
     if os.environ.get('HABITAT_PREVIEW_DIR'):
         dest=Path(os.environ['HABITAT_PREVIEW_DIR']);dest.mkdir(parents=True,exist_ok=True)

@@ -1,14 +1,14 @@
 """The menu prompt in ui_habitat.c and ptt.c ("Hold BOOT 2 s for menu"): how the pure machine (menu_prompt.c, test_menu_prompt.c) is wired in.
 
 The Settings list had no touch path from 2026-09-28 (the long hold went to the tabs). User decision 2026-11-11: a pull UP from the bottom edge of the main
-face opens a prompt, BOOT held 2 s opens the controls list (Settings is its first row). Read from the source with comments removed:
+face opens a prompt, BOOT held 2 s opens the controls list ("MENU"), scrolled to its end so the DIAL group with Settings is on screen (user decision 2026-11-12; Settings is the last row). Read from the source with comments removed:
 
   * the pull up: starts at y >= 400, passes the swipe threshold, on the main face only; no terminal scroll is begun from that band or while the prompt is up;
   * the prompt owns BOOT: boot_voice refuses (so ui_voice_can_start is false and ui_voice_start starts nothing), a BOOT tap is eaten, ptt.c feeds the key level
     AFTER its own handling so the release that ends the confirming press is eaten first;
   * a swipe down dismisses (before the Inbox pull-down), 10 s close it, leaving the main face closes it, a sleeping screen closes it, a tap does nothing
     (the prompt scene has no hit areas);
-  * the confirm opens SETTINGS at its first row and starts no voice;
+  * the confirm opens SETTINGS scrolled to its end (settings_end_offset: the DIAL group with Settings on screen) and starts no voice;
   * the tap and the hold on the face are as they were (tabs), and the stale "no touch path reaches Settings" comments are gone.
 """
 from pathlib import Path
@@ -63,6 +63,7 @@ static void display_lock(void) { locks++; }
 static void display_unlock(void) { locks--; }
 static bool display_is_asleep(void) { return asleep; }
 static void view(int v) { s.view = v; view_calls++; }
+static int settings_end_offset(void) { return 9; }   // the production helper is tested in test_menu_groups.py; here only that BOOT uses it
 '''
 for name in ('menu_sync', 'menu_open', 'menu_close', 'menu_tick', 'ui_menu_boot'):
     harness += function(name, raw) + chr(10)
@@ -122,7 +123,7 @@ int main(void)
     for (uint32_t t = 60200; t <= 62100; t += 100) step(t, true);
     assert(view_calls == 0 && s.menu.open);
     step(62200, true);
-    assert(view_calls == 1 && s.view == SETTINGS && s.offset == 0 && !s.menu.open && atomic_load(&menu_live));
+    assert(view_calls == 1 && s.view == SETTINGS && s.offset == 9 && !s.menu.open && atomic_load(&menu_live));
     step(62300, true);
     assert(view_calls == 1 && atomic_load(&menu_live));
     step(62400, false);
@@ -162,7 +163,7 @@ assert 'boot_voice(&a) &&' in function('ui_voice_can_start') and 'if (boot_voice
 pressed = function('ui_boot_pressed')
 assert re.search(r'display_lock\(\);\s*if \(ht_menu_eats_tap\(&s\.menu\)\) \{\s*display_unlock\(\);\s*return;\s*\}', pressed), 'a BOOT tap is eaten'
 mb = function('ui_menu_boot')
-assert 'ht_menu_boot(&s.menu, ms(), down)' in mb and re.search(r'view\(SETTINGS\);\s*s\.offset = 0;', mb), 'the confirm opens the controls list at its first row'
+assert 'ht_menu_boot(&s.menu, ms(), down)' in mb and re.search(r'view\(SETTINGS\);\s*s\.offset = settings_end_offset\(\);', mb), 'the confirm opens the controls list scrolled to its end'
 for banned in ('ui_voice_start', 'A_VOICE', 'audio_client', 'boot_voice', 'queue('):
     assert banned not in mb, f'ui_menu_boot must not touch {banned}'
 assert 'if (!atomic_load(&menu_live)) return;' in mb, 'cheap while the prompt is down: no lock'
@@ -185,9 +186,10 @@ assert 'ht_menu_next_ms(&s.menu, now)' in function('habitat_next_wake_ms'), 'the
 prompt = function('render_menu_prompt')
 assert '"Hold BOOT 2 s for menu"' in prompt and 'ht_menu_progress(&s.menu' in prompt and 'swipe down to cancel' in prompt and 'hits' not in prompt and 'control(' not in prompt
 assert re.search(r'if \(s\.menu\.open\) render_menu_prompt\(f\);[^\n]*\n\s*else switch \(s\.view\) \{', ui)
-# Settings is the first row of the controls list
-items = function('settings_item')
-assert re.search(r'items\[\] = \{\s*\{"Settings", A_PREFS, 0\},', items), 'Settings first'
+# Settings is the LAST row of the controls list (the DIAL group), and the menu opens scrolled to it (user decision 2026-11-12; test_menu_groups.py runs the model)
+table = re.search(r'menu_items\[\] = \{.*?\n\};', ui, re.S).group(0)
+rows = re.findall(r'\{"([^"]+)", (A_\w+), \w+, (MENU_GROUP_\w+)\}', table)
+assert rows[-1] == ('Settings', 'A_PREFS', 'MENU_GROUP_DIAL'), 'Settings is the last row, in the DIAL group'
 # stale comments
 assert 'no touch path reaches Settings' not in raw and 'no touch path reaches Settings' not in text(here / 'test_phone_screen.py'), 'the comments tell the truth'
 assert 'THE MENU PROMPT' in raw
@@ -195,4 +197,4 @@ assert 'THE MENU PROMPT' in raw
 assert '"ui/habitat/menu_prompt.c"' in text(fw / 'main/CMakeLists.txt')
 run = text(here / 'run.sh')
 assert 'test_menu_prompt' in run and 'test_menu_screen.py' in run
-print('menu prompt wiring: pull up at the bottom edge, BOOT owned (no voice, taps eaten), 2 s opens Settings first, swipe down/10 s/leave close, no scroll, comments PASS')
+print('menu prompt wiring: pull up at the bottom edge, BOOT owned (no voice, taps eaten), 2 s opens the menu at its end (DIAL group, Settings), swipe down/10 s/leave close, no scroll, comments PASS')

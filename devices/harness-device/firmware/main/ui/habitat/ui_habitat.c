@@ -20,6 +20,7 @@
 #include "brightness_arc.h"
 #include "prefs_logic.h"
 #include "menu_prompt.h"
+#include "menu_list.h"
 #include "../../battery.h"
 #include "../../power_sleep.h"
 #include "../../last_words.h"
@@ -1917,32 +1918,58 @@ static void render_answer_review(ht_scene_t *f)
     control(f,q->draft[0] ? 313 : 258,footer_y,102,s.q.index+1 < s.q.count ? "[next]" : "[send]",
         A_ANSWER,0,s.connected && !s.q.pending && (q->selected || q->draft[0]));
 }
+/*
+ * THE CONTROLS LIST ("MENU"), in three groups (user decisions 2026-11-12). THIS AGENT acts on the agent on the glass, ON COMPUTER reaches agents and text on the
+ * computer, DIAL is the dial itself. Each group has a dim label line before its first visible row (menu_list.c builds the lines, test_menu_list.c runs its
+ * rules). Table order is group order. A row that needs a host feature is hidden when the host lacks it; a group with no visible row has no label.
+ * "Quiet 15 min" is the old Nap row: the internal names s.nap and A_NAP stay, because s.quiet is another setting (the desktop's creature animations).
+ */
+static const struct { const char *label; action_kind_t action; uint32_t feature; uint8_t group; } menu_items[] = {
+    {"Stop turn", A_STOP, 0, MENU_GROUP_AGENT},
+    {"Change model", A_MODELS, 0, MENU_GROUP_AGENT},
+    {"Latest reply", A_LATEST, CABLE_FEATURE_VISIT, MENU_GROUP_AGENT},
+    {"Find agent", A_FIND, CABLE_FEATURE_FORM, MENU_GROUP_COMPUTER},
+    {"New agent", A_FORM, CABLE_FEATURE_FORM, MENU_GROUP_COMPUTER},
+    {"Pick text", A_SELECT_BEGIN, CABLE_FEATURE_SELECTION, MENU_GROUP_COMPUTER},
+    {"Inbox", A_INBOX, 0, MENU_GROUP_DIAL},
+    {"Quiet 15 min", A_NAP, 0, MENU_GROUP_DIAL},
+    {"Computers", A_MACHINES, 0, MENU_GROUP_DIAL},
+    {"Settings", A_PREFS, 0, MENU_GROUP_DIAL},   // the Settings screen (render_prefs); the Phone row lives there now
+};
+_Static_assert(sizeof menu_items / sizeof menu_items[0] + MENU_GROUPS <= MENU_MAX_LINES, "the menu's rows and labels must fit menu_list's lines");
+// The visible lines (labels and rows) for what this host offers. A fresh list on every call: the host's features can change while the menu is up.
+static int settings_lines(menu_line_t *lines)
+{
+    menu_def_t defs[sizeof menu_items / sizeof menu_items[0]];
+    for (unsigned i = 0; i < sizeof menu_items / sizeof menu_items[0]; i++) defs[i] = (menu_def_t){menu_items[i].group, menu_items[i].feature};
+    return menu_build(defs, (int)(sizeof menu_items / sizeof menu_items[0]), cable_client_supports, lines, MENU_MAX_LINES);
+}
+// The wanted-th visible ROW (labels are not counted).
 static const char *settings_item(int wanted, action_kind_t *action)
 {
-    static const struct { const char *label; action_kind_t action; uint32_t feature; } items[] = {
-        {"Settings", A_PREFS, 0},   // the Settings screen (render_prefs); the Phone row lives there now. First, because BOOT held 2 s opens this list (menu prompt)
-        {"Inbox", A_INBOX, 0}, {"Computers", A_MACHINES, 0},
-        {"Model", A_MODELS, 0}, {"Stop current turn", A_STOP, 0},
-        {"Nap", A_NAP, 0},
-        {"Find agent", A_FIND, CABLE_FEATURE_FORM},
-        {"New agent", A_FORM, CABLE_FEATURE_FORM},
-        {"Latest output", A_LATEST, CABLE_FEATURE_VISIT},
-        {"Select text", A_SELECT_BEGIN, CABLE_FEATURE_SELECTION},
-    };
-    for (unsigned i = 0; i < sizeof items / sizeof items[0]; i++) {
-        if (items[i].feature && !cable_client_supports(items[i].feature)) continue;
+    menu_line_t lines[MENU_MAX_LINES];
+    const int n = settings_lines(lines);
+    for (int i = 0; i < n; i++) {
+        if (lines[i].item < 0) continue;
         if (wanted-- == 0) {
-            if (action) *action = items[i].action;
-            return items[i].label;
+            if (action) *action = menu_items[lines[i].item].action;
+            return menu_items[lines[i].item].label;
         }
     }
     return NULL;
 }
+// The number of visible LINES, labels included: the scroll limit follows it.
 static int settings_count(void)
 {
-    int count = 0;
-    while (settings_item(count, NULL)) count++;
-    return count;
+    menu_line_t lines[MENU_MAX_LINES];
+    return settings_lines(lines);
+}
+// The offset of the last window: BOOT held opens the menu scrolled here, so the DIAL group with Settings is on screen (user decision 2026-11-12).
+static int settings_end_offset(void)
+{
+    menu_line_t lines[MENU_MAX_LINES];
+    const int n = settings_lines(lines);
+    return menu_clamp(lines, n, TAB_ROWS, n);
 }
 static void tabs_move(int dy)
 {
@@ -1952,7 +1979,14 @@ static void tabs_move(int dy)
     int step = s.tab_drag / TAB_ROW_HEIGHT;
     if (!step) return;
     s.tab_drag %= TAB_ROW_HEIGHT;
-    int count = s.view == AGENTS ? s.count : s.view == SETTINGS ? settings_count() : s.view == PREFS ? prefs_count() : s.tab_count;
+    if (s.view == SETTINGS) {   // one line a step; the model skips a window that would end on a group label
+        menu_line_t lines[MENU_MAX_LINES];
+        const int next = menu_scroll(lines, settings_lines(lines), TAB_ROWS, s.offset, step);
+        if (next != s.offset) { s.offset = next; change(); }
+        else s.tab_drag = 0;
+        return;
+    }
+    int count = s.view == AGENTS ? s.count : s.view == PREFS ? prefs_count() : s.tab_count;
     int last = count > TAB_ROWS ? count - TAB_ROWS : 0;
     int next = s.offset + step;
     if (next < 0) next = 0;
@@ -2671,22 +2705,43 @@ static void render_menu_prompt(ht_scene_t *f)
     }
     text_in(f, FACE_CX(260), 290, 260, &ht_mono_20, "swipe down to cancel", DIM, true);
 }
+// A group's label line: dim, left, in the lower part of its slot (at `y`) so it sits next to the rows it heads. It is not a control: no hit is registered, so a
+// tap on it does nothing (and a drag that starts on it still scrolls, because the view owns the gesture). THIS AGENT names the agent on the glass (the name keeps
+// its own case; the fixed words are capitals).
+static void menu_label(ht_scene_t *f, int group, int y)
+{
+    static const char *const names[MENU_GROUPS] = {"THIS AGENT", "ON COMPUTER", "DIAL"};
+    const ht_font_t *font = focus_skin() ? &ht_lv_inter_20.base : &ht_mono_16;
+    char full[HT_TEXT_BYTES], fitted[HT_TEXT_BYTES];
+    const agent_t *a = group == MENU_GROUP_AGENT ? active() : NULL;
+    if (a) snprintf(full, sizeof full, "THIS AGENT: %s", a->name[0] ? a->name : "Untitled");
+    else snprintf(full, sizeof full, "%s", names[group]);
+    ht_fit_width(fitted, sizeof fitted, full, SET_TEXT_W, font);
+    const int ty = y + TAB_ROW_HEIGHT - 12 - font->height;
+    if (focus_skin()) focus_put(f, SET_TEXT_X, ty, SET_TEXT_W, font, color(0x4c4c4c), BG, fitted, false);
+    else ht_text(f, SET_TEXT_X, ty, SET_TEXT_W, font, DIM, BG, fitted);
+}
 static void render_settings(ht_scene_t *f)
 {
-    heading(f, "controls");
-    int last = settings_count() - TAB_ROWS;
-    if (last < 0) last = 0;
-    if (s.offset > last) s.offset = last;
-    if (s.offset < 0) s.offset = 0;
-    for (int row = 0; row < TAB_ROWS; row++) {
-        action_kind_t action;
-        const char *label = settings_item(s.offset + row, &action);
-        if (!label) break;
-        if (action == A_NAP) label = s.nap ? "Wake" : "Nap";
+    focus_header(f, "MENU");
+    control(f, 87, 67, 48, "<", A_HOME, 0, true);
+    menu_line_t lines[MENU_MAX_LINES];
+    const int n = settings_lines(lines);
+    s.offset = menu_clamp(lines, n, TAB_ROWS, s.offset);
+    for (int row = 0; row < TAB_ROWS && s.offset + row < n; row++) {
+        const menu_line_t line = lines[s.offset + row];
+        const int y = TAB_TOP + row * TAB_ROW_HEIGHT;
+        if (line.item < 0) {   // a group label: a full slot, no hit
+            menu_label(f, line.group, y);
+            continue;
+        }
+        const action_kind_t action = menu_items[line.item].action;
+        const char *label = menu_items[line.item].label;
+        if (action == A_NAP && s.nap) label = "Wake";
         bool enabled = action == A_INBOX || action == A_NAP || action == A_PHONE || action == A_PREFS ||
             (s.connected && ((action != A_STOP && action != A_MODELS && action != A_SELECT_BEGIN && action != A_LATEST) ||
                 (active() && (action != A_STOP || active()->busy) && (action != A_LATEST || !visit.pending))));
-        int y = TAB_TOP + row * TAB_ROW_HEIGHT, hit = s.hit_count++;
+        int hit = s.hit_count++;
         s.hits[hit] = (hit_t){{LIST_HIT_X, y, LIST_HIT_W, TAB_ROW_HEIGHT}, action, 0, enabled};
         if (focus_skin()) {   // Inter, centred in the row it is tapped in
             const ht_font_t *font = focus_face_for(UI_FONT);
@@ -3772,8 +3827,10 @@ static void dispatch(action_t a)
         break;
     case A_SETTINGS: {
         const int keep = a.value ? s.list_offset : 0;   // back from the Settings screen lands on the row it left
+        menu_line_t lines[MENU_MAX_LINES];
+        const int n = settings_lines(lines);
         view(SETTINGS);
-        s.offset = keep;
+        s.offset = menu_clamp(lines, n, TAB_ROWS, keep);   // the host's features can change in between: the old offset may not be a window now
         break;
     }
     case A_PREFS: {
@@ -6838,7 +6895,7 @@ void ui_menu_boot(bool down)
         ESP_LOGI("habitat", "menu: BOOT held 2 s, opening the controls list");
         menu_sync();
         view(SETTINGS);
-        s.offset = 0;
+        s.offset = settings_end_offset();   // the DIAL group with Settings on screen (user decision 2026-11-12), not the top
     } else {
         menu_sync();
         if (s.menu.open && (was_down || s.menu.down)) change();   // the bar moves (and empties on a release); an idle prompt is not repainted at 10 Hz
