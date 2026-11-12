@@ -383,6 +383,10 @@ export interface CableHost {
   playerLibrary?(): Promise<PlayerSession[]>
   /** Every running agent on this computer, newest first and not capped: the dial's "All agents" list, paged by the session. */
   listRunning?(): Promise<Array<{ id: string; name: string; engine: string; machineId: string }>>
+  /** Whether a desktop window is announced. Absent: the window is taken to be there. */
+  hasWindow?(): boolean
+  /** No window: pin a running agent to the front of the dial's running list. False when it is not running now. */
+  pinRunning?(agentId: string): Promise<boolean>
   sendTurn(agentId: string, text: string): void | { ok: true } | { ok: false; machine?: string; reason?: string }
   stopTurn(agentId: string): void
   /**
@@ -1626,6 +1630,12 @@ export class CableSession {
         return
       }
       case 'agent.open':
+        // No window, a dial that reads the running list, and a pick (a question screen's open is not one):
+        // there is no desktop to move. The daemon pins the agent into the dial's list instead (L5).
+        if (str('agentId') && str('reason') !== 'question' && this.runningCapable && this.host.pinRunning && this.host.hasWindow?.() === false) {
+          await this.pickRunning(str('agentId')!)
+          return
+        }
         // Only the one reason the window knows; anything else reads as a tap, the older frame's meaning.
         if (str('agentId')) this.host.openAgent(str('agentId')!, str('reason') === 'question' ? 'question' : undefined)
         return
@@ -3624,8 +3634,30 @@ export class CableSession {
     await this.send({ t: 'question.close', agentId, id })
   }
 
+  /**
+   * A pick from the dial's "All agents" list with no window open. The agent goes to the front of the dial's
+   * list (at most 16), the list is pushed, and the dial lands on it: one `focus` frame, the list's own
+   * re-assert when the push changed the list, else sent here.
+   */
+  private async pickRunning(agentId: string): Promise<void> {
+    if (!(await this.host.pinRunning!(agentId))) {
+      await this.toast('That agent is no longer running.')
+      return
+    }
+    this.desiredFocus = agentId
+    this.expectedAppFocusEcho = agentId
+    this.expectedAppFocusEchoUntil = Date.now() + APP_FOCUS_SETTLE_MS
+    const before = this.focusFrames
+    await this.syncAgents()
+    if (this.focusFrames === before) await this.focusAgent(agentId)
+  }
+
+  /** How many `focus` frames this session has started to send. */
+  private focusFrames = 0
+
   async focusAgent(agentId: string): Promise<void> {
     this.desiredFocus = agentId
+    this.focusFrames++
     const sent = await this.send({ t: 'focus', agentId })
     if (sent && this.desiredFocus === agentId) this.appFocusUnsent = false
   }

@@ -4908,3 +4908,121 @@ describe('running page (All agents)', () => {
     } finally { await session.stop() }
   })
 })
+
+describe('picking an agent from the All list', () => {
+  const agent = (id: string): CableAgent => ({ id, name: `Agent ${id}`, engine: 'claude', machineId: 'mac-local', machine: 'MacBook Pro' })
+  const HELLO = { t: 'hello', product: 'harness', mac: 'aa:bb', running: 'v1' }
+  const frames = (port: LoopbackPort, t: string) => port.sent.filter((m) => m.t === t)
+
+  /** A host with no window whose running list the pin edits, as the daemon's does: picked first, last one out. */
+  function noWindow(listed: string[], running: string[]) {
+    const state = { listed: [...listed], running: [...running], window: false }
+    const pinRunning = vi.fn(async (id: string) => {
+      if (state.window || !state.running.includes(id)) return false
+      if (!state.listed.includes(id)) state.listed = [id, ...state.listed].slice(0, 16)
+      return true
+    })
+    const host = makeHost({
+      hasWindow: () => state.window,
+      pinRunning,
+      listAgentSnapshot: async () => state.window
+        ? { agents: [agent('w1')], tab: 'tab', total: 40 }
+        : { agents: state.listed.map(agent), tab: '', total: 40, running: true as const },
+      listAgents: async () => (state.window ? [agent('w1')] : []),
+      activeSwarm: () => (state.window ? 'tab' : ''),
+    })
+    return { state, host, pinRunning }
+  }
+
+  async function start(host: CableHost, hello: Record<string, unknown> = HELLO) {
+    const c = await connect(host)
+    c.port.say(hello)
+    await vi.waitFor(() => expect(c.port.types()).toContain('notif.replace'))
+    return c
+  }
+
+  const sixteen = Array.from({ length: 16 }, (_, i) => `l${String(i).padStart(2, '0')}`)
+
+  it('no window, a pick outside the 16: one roster push, picked agent first, one focus frame; openAgent not called', async () => {
+    const { host } = noWindow(sixteen, [...sixteen, 'outside'])
+    const { session, port } = await start(host)
+    try {
+      port.sent.length = 0
+      port.say({ t: 'agent.open', agentId: 'outside' })
+      await vi.waitFor(() => expect(frames(port, 'focus').length).toBeGreaterThan(0))
+      await settle()
+      expect(frames(port, 'agents.begin')).toHaveLength(1)
+      const sent = frames(port, 'agent').map((m) => m.id)
+      expect(sent).toHaveLength(16)
+      expect(sent[0]).toBe('outside')
+      expect(sent).not.toContain(sixteen[15])
+      expect(frames(port, 'agents.end').at(-1)).toMatchObject({ tab: '', running: true })
+      expect(frames(port, 'focus')).toEqual([{ t: 'focus', agentId: 'outside' }])
+      // The list comes first, then where the dial lands.
+      expect(port.types().indexOf('agents.end')).toBeLessThan(port.types().indexOf('focus'))
+      expect(host.openAgent).not.toHaveBeenCalled()
+    } finally { await session.stop() }
+  })
+
+  it('no window, a pick already listed: no roster push, one focus frame', async () => {
+    const { host } = noWindow(sixteen, sixteen)
+    const { session, port } = await start(host)
+    try {
+      port.sent.length = 0
+      port.say({ t: 'agent.open', agentId: sixteen[7] })
+      await vi.waitFor(() => expect(frames(port, 'focus').length).toBeGreaterThan(0))
+      await settle()
+      expect(frames(port, 'agents.begin')).toEqual([])
+      expect(frames(port, 'focus')).toEqual([{ t: 'focus', agentId: sixteen[7] }])
+      expect(host.openAgent).not.toHaveBeenCalled()
+    } finally { await session.stop() }
+  })
+
+  it('a window is open: agent.open goes to the desktop once and pinRunning is not asked', async () => {
+    const { host, state, pinRunning } = noWindow(sixteen, sixteen)
+    state.window = true
+    const { session, port } = await start(host)
+    try {
+      port.say({ t: 'agent.open', agentId: 'somewhere' })
+      await vi.waitFor(() => expect(host.openAgent).toHaveBeenCalledTimes(1))
+      expect(host.openAgent).toHaveBeenCalledWith('somewhere', undefined)
+      expect(pinRunning).not.toHaveBeenCalled()
+    } finally { await session.stop() }
+  })
+
+  it('a pick of an agent that stopped says so and moves nothing', async () => {
+    const { host } = noWindow(sixteen, sixteen)
+    const { session, port } = await start(host)
+    try {
+      port.sent.length = 0
+      port.say({ t: 'agent.open', agentId: 'gone' })
+      await vi.waitFor(() => expect(frames(port, 'toast')).toHaveLength(1))
+      expect(frames(port, 'toast')[0]).toEqual({ t: 'toast', text: 'That agent is no longer running.' })
+      await settle()
+      expect(frames(port, 'focus')).toEqual([])
+      expect(frames(port, 'agents.begin')).toEqual([])
+      expect(host.openAgent).not.toHaveBeenCalled()
+    } finally { await session.stop() }
+  })
+
+  it('a question screen\'s open still goes to the desktop path, never a pin', async () => {
+    const { host, pinRunning } = noWindow(sixteen, sixteen)
+    const { session, port } = await start(host)
+    try {
+      port.say({ t: 'agent.open', agentId: sixteen[2], reason: 'question' })
+      await vi.waitFor(() => expect(host.openAgent).toHaveBeenCalledWith(sixteen[2], 'question'))
+      expect(pinRunning).not.toHaveBeenCalled()
+    } finally { await session.stop() }
+  })
+
+  it('a dial without running v1 gets today\'s behaviour', async () => {
+    const { host, pinRunning } = noWindow(sixteen, sixteen)
+    const { session, port } = await start(host, { t: 'hello', product: 'harness', mac: 'cc:dd' })
+    try {
+      port.say({ t: 'agent.open', agentId: sixteen[3] })
+      await vi.waitFor(() => expect(host.openAgent).toHaveBeenCalledTimes(1))
+      expect(pinRunning).not.toHaveBeenCalled()
+      expect(frames(port, 'toast')).toEqual([])
+    } finally { await session.stop() }
+  })
+})

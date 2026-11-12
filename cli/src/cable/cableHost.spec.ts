@@ -1153,3 +1153,77 @@ describe('DaemonCableHost.listRunning (the All agents list)', () => {
     expect((await host.listRunning())[0].id).toBe('a00')
   })
 })
+
+describe('DaemonCableHost.pinRunning (a pick with no window)', () => {
+  const set = (rows: Array<Record<string, unknown> & { agentId: string }>): void => {
+    AGENTS.length = 0
+    for (const r of rows) AGENTS.push({ engine: 'claude', active: true, terminalAvailable: true, registeredAt: 1, ...r } as never)
+  }
+  const many = (n: number) => Array.from({ length: n }, (_, i) => ({ agentId: `a${String(i).padStart(2, '0')}`, registeredAt: 100 + i, lastHookAt: 1000 + i }))
+  const ids = async (host: DaemonCableHost) => (await host.listAgentSnapshot({ running: true })).agents.map((a) => a.id)
+
+  it('hasWindow follows setSwarms', () => {
+    const host = new DaemonCableHost(wiring())
+    expect(host.hasWindow()).toBe(false)
+    onTab(host, [])
+    expect(host.hasWindow()).toBe(true)
+    host.setSwarms(null)
+    expect(host.hasWindow()).toBe(false)
+  })
+
+  it('is false with a window', async () => {
+    set(many(3))
+    const host = new DaemonCableHost(wiring())
+    onTab(host, ['a00'])
+    expect(await host.pinRunning('a01')).toBe(false)
+  })
+
+  it('is false for an unknown, held or cloud id', async () => {
+    set([...many(2), { agentId: 'held', identityHold: 'x' }, { agentId: 'cloud', engine: 'devin-cloud' }])
+    const host = new DaemonCableHost(wiring())
+    await ids(host)
+    for (const id of ['nope', 'held', 'cloud']) expect(await host.pinRunning(id)).toBe(false)
+  })
+
+  it('puts a running agent first, at most 16, and the old last one goes', async () => {
+    set(many(20))
+    const host = new DaemonCableHost(wiring())
+    const first = await ids(host)
+    expect(first).not.toContain('a00')
+    expect(await host.pinRunning('a00')).toBe(true)
+    const next = await ids(host)
+    expect(next).toEqual(['a00', ...first.slice(0, 15)])
+    expect(next).toHaveLength(16)
+  })
+
+  it('knows an agent that started a moment ago, without a snapshot first', async () => {
+    set(many(3))
+    const host = new DaemonCableHost(wiring())
+    await ids(host)
+    AGENTS.push({ agentId: 'brand-new', registeredAt: 9000, active: true, terminalAvailable: true, engine: 'claude', lastHookAt: 9000 })
+    expect(await host.pinRunning('brand-new')).toBe(true)
+    expect((await ids(host))[0]).toBe('brand-new')
+  })
+
+  it('survives later ticks, and a window flip clears it', async () => {
+    set(many(20))
+    const host = new DaemonCableHost(wiring())
+    const first = await ids(host)
+    await host.pinRunning('a00')
+    const pinned = await ids(host)
+    expect(await ids(host)).toEqual(pinned)
+    onTab(host, ['a01'])
+    host.setSwarms(null); host.setDesk([])
+    expect(await ids(host)).toEqual(first)
+  })
+
+  it('with a window, openAgent still hands the window the agent and its machine', async () => {
+    set(many(3))
+    const opened = vi.fn()
+    const host = new DaemonCableHost(wiring({ opened }))
+    onTab(host, ['a00'])
+    await host.listAgentsFlat()
+    host.openAgent('a02')
+    expect(opened).toHaveBeenCalledWith('mine', 'a02', undefined)
+  })
+})

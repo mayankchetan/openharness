@@ -543,6 +543,23 @@ export class DaemonCableHost implements CableHost {
     return this.runningOrder.reconcile(rows.map((r) => ({ id: r.agentId, registeredAt: r.registeredAt })), rank)
   }
 
+  /** Whether a desktop window is announced. False is the no-window state, where a dial's pick pins the list. */
+  hasWindow(): boolean {
+    return this.swarms !== null
+  }
+
+  /**
+   * The dial picked a running agent and no window is open: put it at the front of the running list (the
+   * last one drops out when 16 are listed). False with a window, and for an agent that is not running now.
+   * The running set is read again first, so an agent that started a moment ago can be picked.
+   */
+  async pinRunning(agentId: string): Promise<boolean> {
+    if (this.swarms !== null) return false
+    await this.listAgentsFlat()
+    await this.reconcileRunning()
+    return this.runningOrder.pin(agentId)
+  }
+
   /**
    * Every running agent on THIS computer, newest first, whatever the window shows and not capped: the
    * "All agents" list, which the dial reads four rows at a time. A plain sort on every call; the stable
