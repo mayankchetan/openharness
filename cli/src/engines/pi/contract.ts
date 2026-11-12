@@ -71,7 +71,12 @@ export default function (pi: ExtensionAPI) {
           ],
         }),
       });
-      if (!res.ok) return; // daemon refused (e.g. transcript not readable yet) — retry on the next turn
+      // Only a real accept counts. The daemon answers "ignored" and "retry" (202) with a 2xx too, and
+      // neither registered the session: retry on the next turn (e.g. transcript not readable yet).
+      if (res.status !== 200) return;
+      let answer: any = null;
+      try { answer = await res.json(); } catch {} // an older daemon may send no JSON: that is an accept
+      if (answer && (answer.ignored === true || answer.retry === true)) return;
       announced = true;
       if (ready) registered = true;
     } catch {}
