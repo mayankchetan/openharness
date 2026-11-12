@@ -457,6 +457,24 @@ SETUP(inbox_failed) { g_inbox_find(false, true); }
 SETUP(inbox_empty) { LOCKED(ht_tab_carousel_reset(&inbox_carousel, 0, 0); view(INBOX)); }
 SETUP(machines) { LOCKED(view(MACHINES)); }
 SETUP(machines_empty) { LOCKED(ui_machines_clear(); view(MACHINES)); }
+// "All agents": a page of four rows with the three statuses (the second of three pages), and the empty list. The model is set straight, as a reply would set it.
+static void g_running(int count, int total)
+{
+    static const char *const names[4] = {"Payments refactor", "Landing page", "A very long agent name that cannot fit the row", "Docs"};
+    display_lock();
+    cable_running_init(&s.running_page);
+    s.running_page.request = 1; s.running_page.loaded = true; s.running_page.total = total; s.running_page.count = count; s.running_page.offset = total > 4 ? 4 : 0;
+    for (int i = 0; i < count; i++) {
+        snprintf(s.running_page.rows[i].id, sizeof s.running_page.rows[i].id, "g%02d", i);
+        GCOPY(s.running_page.rows[i].name, names[i]);
+        GCOPY(s.running_page.rows[i].engine, i % 2 ? "codex" : "claude");
+        s.running_page.rows[i].status = (running_status_t)(i % 3);
+    }
+    view(RUNNING);
+    display_unlock();
+}
+SETUP(running) { g_running(4, 10); }
+SETUP(running_empty) { g_running(0, 0); }
 SETUP(settings_1) { LOCKED(view(SETTINGS)); }
 SETUP(settings_2) { LOCKED(view(SETTINGS); s.offset = 5); }
 // The Settings screen (PREFS) and its children. The worker has not read NVS in the gallery, so prefs_link is set by hand: both radios set up, Auto.

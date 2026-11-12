@@ -294,6 +294,12 @@ void cable_client_send_focus(const char *agent_id);
 // unanswered question, and each used to open a tab).
 void cable_client_send_open(const char *agent_id, const char *reason);
 
+// "All agents": ask the daemon for one page of the running agents of this computer. `running.get {offset, request}`; the answer is
+// `running.page {request, offset, total, rows}`, which handle_running_page hands to ui_running_replace. `request` is the model's serial
+// (cable_running.h): a reply for any other serial is dropped. False when the daemon does not offer the feature (welcome `running.list`) or the frame
+// could not be built. Called from the UI worker, never from the render task.
+bool cable_client_request_running(int offset, uint32_t request);
+
 // One report of a finger on the glass, on its way to the window on the computer.
 //
 // THE DIAL IS A TOUCHPAD HERE, and this reports MOVEMENT rather than a position: it cannot know how tall

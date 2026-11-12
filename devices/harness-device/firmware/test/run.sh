@@ -419,6 +419,8 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
 python3 "$here/test_drawbuf_psram.py"
 python3 "$here/test_display_power.py"
 python3 "$here/test_machine_ui.py"
+# "All agents": running.page against the real cJSON, the view logic with fakes, the menu row and the 14-line list (dial-reach T7)
+python3 "$here/test_running_ui.py"
 python3 "$here/test_reload_threads.py"
 python3 "$here/test_agent_snapshot.py"
 python3 "$here/test_running_empty.py"

@@ -14,6 +14,7 @@
 #include "cable_debug.h"
 #endif
 #include "cable_machines.h"
+#include "cable_running.h"
 #include "config_store.h"
 #include "device_mac.h"
 #include "esp_app_desc.h"
@@ -485,6 +486,17 @@ void cable_client_send_open(const char *agent_id, const char *reason)
     // Absent for a tap: an older daemon reads the frame exactly as before.
     if (reason && reason[0]) msg_string(&root, "reason", reason);
     send_json(root);
+}
+
+bool cable_client_request_running(int offset, uint32_t request)
+{
+    // Offered only to a daemon whose welcome lists "running.list" (it only does when this dial said running "v1"); the daemon ignores a frame outside these ranges.
+    if (!cable_client_supports(CABLE_FEATURE_RUNNING) || offset < 0 || offset > 1000000 || request < 1 || request > 0x7fffffffu) return false;
+    cJSON *root = msg("running.get");
+    if (!root) return false;
+    msg_number(&root, "offset", offset);
+    msg_number(&root, "request", (double)request);
+    return send_json(root);
 }
 
 bool cable_client_notification_read(const char *agent_id, const char *read_token)
@@ -1190,6 +1202,7 @@ static void session_down(const char *why)
     // alone deliberately: a session that comes back on the same computer should land where it was.
     cable_machines_clear(&s_machines);
     ui_machines_clear();
+    ui_running_clear();   // the "All agents" page belonged to that daemon too
     // The Swarms too, with their inbox entries: on attach the daemon resends every card and every open wait.
     ui_supertabs_clear();
     s_machine_name[0] = '\0';
@@ -1273,6 +1286,44 @@ static void handle_agents_end(const cJSON *p)
     // app_main's refresh reads the list and rebuilds the tiles. Going through the same request the
     // backend path used means the carousel's landing, naming and removal logic has one implementation.
     ui_request_agent_reload();
+}
+
+// ── the running agents ("All agents") ───────────────────────────────────────────────────────────────────────────
+// `running.page {request, offset, total, rows}`: at most CABLE_RUNNING_ROWS rows, each {id, name, engine, machineId, status}. The whole frame is dropped (and
+// the dial's page stays as it was) for a missing or out-of-range request, offset or total, more rows than a page, a row that is not an object, or a row id that is
+// empty or ID_MAX bytes or more (an id is what routes the pick; a cut id would open another agent). A name is cut at 95 bytes and an engine at 15, a
+// non-string one is empty, an unknown status is idle. The reply for an older request is dropped by the model (cable_running_apply), not here. This runs on the
+// USB reader task: the rows are parsed into a PSRAM static, never the task stack (4 x ~160 B).
+static bool whole_number(const cJSON *v, double min, double max)
+{
+    return cJSON_IsNumber(v) && v->valuedouble >= min && v->valuedouble <= max && v->valuedouble == (double)(long long)v->valuedouble;
+}
+static void handle_running_page(const cJSON *p)
+{
+    if (!p) return;
+    const cJSON *request = cJSON_GetObjectItemCaseSensitive(p, "request");
+    const cJSON *offset = cJSON_GetObjectItemCaseSensitive(p, "offset");
+    const cJSON *total = cJSON_GetObjectItemCaseSensitive(p, "total");
+    const cJSON *items = cJSON_GetObjectItemCaseSensitive(p, "rows");
+    if (!whole_number(request, 1, 2147483647.0) || !whole_number(offset, 0, 1000000.0) || !whole_number(total, 0, 1000000.0) || !cJSON_IsArray(items)) return;
+    static EXT_RAM_BSS_ATTR cable_running_row_t rows[CABLE_RUNNING_ROWS];
+    int n = 0;
+    const cJSON *it = NULL;
+    cJSON_ArrayForEach(it, items) {
+        if (n >= CABLE_RUNNING_ROWS || !cJSON_IsObject(it)) return;
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(it, "id");
+        if (!cJSON_IsString(id) || !id->valuestring[0] || strlen(id->valuestring) >= sizeof rows[n].id) return;
+        const cJSON *name = cJSON_GetObjectItemCaseSensitive(it, "name");
+        const cJSON *engine = cJSON_GetObjectItemCaseSensitive(it, "engine");
+        const cJSON *status = cJSON_GetObjectItemCaseSensitive(it, "status");
+        memset(&rows[n], 0, sizeof rows[n]);
+        snprintf(rows[n].id, sizeof rows[n].id, "%s", id->valuestring);
+        snprintf(rows[n].name, sizeof rows[n].name, "%s", cJSON_IsString(name) ? name->valuestring : "");
+        snprintf(rows[n].engine, sizeof rows[n].engine, "%s", cJSON_IsString(engine) ? engine->valuestring : "");
+        rows[n].status = cable_running_status_parse(cJSON_IsString(status) ? status->valuestring : NULL);
+        n++;
+    }
+    ui_running_replace((uint32_t)request->valuedouble, (int)offset->valuedouble, (int)total->valuedouble, rows, n);
 }
 
 // ── the machine wheel ───────────────────────────────────────────────────────────────────────────────
@@ -1667,6 +1718,7 @@ static void handle_message(const cJSON *root)
     if (strcmp(t, "agents.begin") == 0) { handle_agents_begin(); return; }
     if (strcmp(t, "agent") == 0) { handle_agent(p); return; }
     if (strcmp(t, "agents.end") == 0) { handle_agents_end(p); return; }
+    if (strcmp(t, "running.page") == 0) { handle_running_page(p); return; }
     if (strcmp(t, "machines.begin") == 0) { cable_machines_begin(&s_machines); return; }
     if (strcmp(t, "machine") == 0) { stage_machine(p, str_of(p, "id")); return; }
     if (strcmp(t, "machines.end") == 0) { handle_machines_end(p); return; }

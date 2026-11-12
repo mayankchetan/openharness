@@ -21,6 +21,7 @@
 #include "prefs_logic.h"
 #include "menu_prompt.h"
 #include "menu_list.h"
+#include "cable_running.h"
 #include "../../battery.h"
 #include "../../power_sleep.h"
 #include "../../last_words.h"
@@ -126,7 +127,8 @@ typedef enum {
     FORGET,  // "forget phone?": one confirmation before the bonds are wiped
     PREFS,   // the Settings screen: Brightness, Sound, Unplugged link, Screen off, Night mode, Battery saver, Phone, About, Restart dial
     BRIGHT,  // the Brightness slider: an arc on the right edge of the glass
-    ABOUT    // read only: version, battery, link, time since boot
+    ABOUT,   // read only: version, battery, link, time since boot
+    RUNNING  // "All agents": the running agents of this computer, four to a page, from the daemon (running.page)
 } view_t;
 typedef enum {
     A_NONE,
@@ -189,7 +191,10 @@ typedef enum {
     A_DRAFT_EDIT, A_DRAFT_APPEND, A_DRAFT_UNDO, A_DRAFT_SEND, A_DRAFT_DISCARD,
     A_DRAFT_STATE, A_DRAFT_OPTIONS, A_DRAFT_BACK, A_DRAFT_COMMAND, A_NOTICE_READ,
     A_LEAD,       // a Swarm's project picked on PANES: value its place, id its Lead
-    A_SUPERTAB    // to the worker: value SUPERTAB_*, text the Swarm, id the Lead ("" only for an open)
+    A_SUPERTAB,   // to the worker: value SUPERTAB_*, text the Swarm, id the Lead ("" only for an open)
+    A_RUNNING,        // open "All agents" (the menu row)
+    A_RUNNING_PICK,   // a row of "All agents" tapped: value its place on the page
+    A_RUNNING_GET     // to the worker: value the offset, revision the request serial (running.get)
 } action_kind_t;
 typedef struct {
     action_kind_t kind;
@@ -261,6 +266,8 @@ static EXT_RAM_BSS_ATTR struct {
     bool muted;
     int pet_pose;
     uint32_t pet_until, nap_until, last_celebration;
+    cable_running_t running_page;   // "All agents": the page now shown and the serial of the latest request (PSRAM with the rest of s)
+    int running_want;          // the offset of the request still waiting for its reply (a drag that comes before it pages from here)
     int nap_shown;   // the Quiet row's minute count as last painted or ticked (the tick repaints only when it changes)
     cable_swarm_t tabs[SWARMS_MAX];
     int tab_count, tab_drag;
@@ -1938,6 +1945,7 @@ static const struct { const char *label; action_kind_t action; uint32_t feature;
     {"Stop turn", A_STOP, 0, MENU_GROUP_AGENT},
     {"Change model", A_MODELS, 0, MENU_GROUP_AGENT},
     {"Latest reply", A_LATEST, CABLE_FEATURE_VISIT, MENU_GROUP_AGENT},
+    {"All agents", A_RUNNING, CABLE_FEATURE_RUNNING, MENU_GROUP_COMPUTER},   // the running agents of this computer, paged (no window needed)
     {"Find agent", A_FIND, CABLE_FEATURE_FORM, MENU_GROUP_COMPUTER},
     {"New agent", A_FORM, CABLE_FEATURE_FORM, MENU_GROUP_COMPUTER},
     {"Pick text", A_SELECT_BEGIN, CABLE_FEATURE_SELECTION, MENU_GROUP_COMPUTER},
@@ -1954,8 +1962,9 @@ static int settings_lines(menu_line_t *lines)
     for (unsigned i = 0; i < sizeof menu_items / sizeof menu_items[0]; i++) defs[i] = (menu_def_t){menu_items[i].group, menu_items[i].feature};
     return menu_build(defs, (int)(sizeof menu_items / sizeof menu_items[0]), cable_client_supports, lines, MENU_MAX_LINES);
 }
-// The wanted-th visible ROW (labels are not counted).
-static const char *settings_item(int wanted, action_kind_t *action)
+// The wanted-th visible ROW (labels are not counted). The renderer reads settings_lines directly; this is the lookup the host tests extract (test_touch_ui.py,
+// test_menu_groups.py, test_running_ui.py), so a build without them would call it unused.
+static __attribute__((unused)) const char *settings_item(int wanted, action_kind_t *action)
 {
     menu_line_t lines[MENU_MAX_LINES];
     const int n = settings_lines(lines);
@@ -1981,6 +1990,65 @@ static int settings_end_offset(void)
     const int n = settings_lines(lines);
     return menu_clamp(lines, n, TAB_ROWS, n);
 }
+/*
+ * "ALL AGENTS" (dial-reach T7): the running agents of this computer, four a page. The daemon builds the list and holds all of it; the dial holds ONE page
+ * (s.running_page, cable_running.c) and a serial for its latest request. A drag asks for the next page (running.get); a reply for an older request is dropped, so
+ * two quick drags never show the older page last. Nothing refreshes by itself: leaving and opening the view asks again. A tap on a row sends agent.open for that
+ * agent, with no reason, and goes home: the daemon moves the desktop to it or, with no desktop, puts it in the dial's own list. This view never adds or removes
+ * a tile (spec L5), and the 16-tile cap is the daemon's business.
+ */
+// What the page says when it has no rows to draw: nothing yet, or nobody running. NULL when there are rows (or a page is on screen while the next one loads).
+static const char *running_empty_text(const cable_running_t *m)
+{
+    if (!m->loaded && m->count == 0) return "Loading...";
+    if (m->loaded && m->total == 0) return "No running agents";
+    return NULL;
+}
+// A reply from the cable (reader task). cable_running_apply drops any serial but the latest.
+void ui_running_replace(uint32_t request, int offset, int total, const cable_running_row_t *rows, int n)
+{
+    display_lock();
+    if (cable_running_apply(&s.running_page, request, offset, total, rows, n) && s.view == RUNNING) change();
+    display_unlock();
+}
+// The session went down: the daemon that knew these agents is gone.
+void ui_running_clear(void)
+{
+    display_lock();
+    cable_running_init(&s.running_page);
+    s.running_want = 0;
+    if (s.view == RUNNING) change();
+    display_unlock();
+}
+// Ask for the page at `offset`: a new serial, then the worker sends it (the cable is never written from the render task).
+static void running_ask(int offset)
+{
+    s.running_want = offset;
+    const uint32_t serial = cable_running_request(&s.running_page, offset);
+    queue((action_t){.kind = A_RUNNING_GET, .value = offset, .revision = serial});
+}
+static void running_open(void)
+{
+    if (s.view == SETTINGS) s.list_offset = s.offset;   // "<" comes back to this place in the menu
+    running_ask(0);
+    view(RUNNING);
+}
+static void running_pick(int row)
+{
+    if (row < 0 || row >= s.running_page.count || !s.running_page.rows[row].id[0]) return;
+    action_t open = {.kind = A_DESKTOP};
+    COPY(open.id, s.running_page.rows[row].id);
+    if (!queue(open)) return;   // the cable is busy: stay, and the next tap tries again
+    view(HOME);
+}
+// A drag of `steps` rows. It pages from the request still pending when there is one, so three quick steps reach three pages on, and it asks again when the
+// reply never came (a lost frame must not strand the view on "Loading...").
+static void running_drag(int steps)
+{
+    const int base = s.running_page.loaded ? s.running_page.offset : s.running_want;
+    const int target = cable_running_step(&s.running_page, base - s.running_page.offset + steps);
+    if (target != base || !s.running_page.loaded) running_ask(target);
+}
 static void tabs_move(int dy)
 {
     // Move by one name while the finger is down, rather than paging by three
@@ -1989,6 +2057,10 @@ static void tabs_move(int dy)
     int step = s.tab_drag / TAB_ROW_HEIGHT;
     if (!step) return;
     s.tab_drag %= TAB_ROW_HEIGHT;
+    if (s.view == RUNNING) {   // one row a step; each step that changes the page asks the daemon for it
+        running_drag(step);
+        return;
+    }
     if (s.view == SETTINGS) {   // one line a step; the model skips a window that would end on a group label
         menu_line_t lines[MENU_MAX_LINES];
         const int next = menu_scroll(lines, settings_lines(lines), TAB_ROWS, s.offset, step);
@@ -2660,6 +2732,36 @@ static void render_prefs(ht_scene_t *f)
     }
     if (s.note[0]) text_in(f, FACE_CX(324), 372, 324, &ht_mono_20, s.note, DIM, true);
 }
+// One row of "All agents": the agent's name on the left (fitted, so a long name never runs into the status), its status on the right.
+static void running_row(ht_scene_t *f, int y, const cable_running_row_t *row, uint16_t ink, uint16_t ground)
+{
+    static const char *const words[] = {"idle", "working", "needs you"};
+    const char *status = words[row->status >= RUNNING_IDLE && row->status <= RUNNING_NEEDS_YOU ? row->status : RUNNING_IDLE];
+    const ht_font_t *font = focus_skin() ? focus_face_for(UI_FONT) : UI_FONT;
+    int vw = focus_skin() ? ht_measure(font, status) + 4 : (int)strlen(status) * UI_FONT->width;
+    if (focus_skin() && vw > 190) vw = 190;
+    const int room = LIST_HIT_X + LIST_HIT_W - 16 - vw - 8 - SET_TEXT_X;
+    char name[HT_TEXT_BYTES];
+    ht_fit_width(name, sizeof name, row->name[0] ? row->name : "Untitled", room, font);
+    const uint16_t status_ink = row->status == RUNNING_NEEDS_YOU ? ACCENT : row->status == RUNNING_WORKING ? color(HT_THEME_DONE) : DIM;
+    prefs_row(f, y, name, status, ink, status_ink, ground);
+}
+static void render_running(ht_scene_t *f)
+{
+    focus_header(f, "AGENTS");
+    control(f, 87, 67, 48, "<", A_SETTINGS, 1, true);
+    const char *empty = running_empty_text(&s.running_page);
+    if (empty) {
+        center(f, 192, empty, FG);
+        return;
+    }
+    for (int row = 0; row < CABLE_RUNNING_ROWS && row < s.running_page.count; row++) {
+        const int y = TAB_TOP + row * TAB_ROW_HEIGHT, hit = s.hit_count++;
+        s.hits[hit] = (hit_t){{LIST_HIT_X, y, LIST_HIT_W, TAB_ROW_HEIGHT}, A_RUNNING_PICK, row, s.connected};
+        const bool pressed = hit == s.pressed;
+        running_row(f, y, &s.running_page.rows[row], !s.connected ? DIM : pressed ? ACCENT : FG, pressed ? SEL : BG);
+    }
+}
 static void render_bright(ht_scene_t *f)
 {
     focus_header(f, "BRIGHTNESS");
@@ -3130,6 +3232,9 @@ bool habitat_scene_take(ht_scene_t *f)
     case INBOX:
         render_list(f);
         break;
+    case RUNNING:
+        render_running(f);
+        break;
     case VOICE:
         render_voice(f);
         break;
@@ -3251,6 +3356,7 @@ const char *habitat_view_name(void)
     case PREFS: return "prefs";
     case BRIGHT: return "brightness";
     case ABOUT: return "about";
+    case RUNNING: return "running";
     }
     return "unknown";
 }
@@ -3630,6 +3736,12 @@ static void dispatch(action_t a)
         break;
     case A_MACHINES:
         view(MACHINES);
+        break;
+    case A_RUNNING:
+        if (s.connected && cable_client_supports(CABLE_FEATURE_RUNNING)) running_open();
+        break;
+    case A_RUNNING_PICK:
+        running_pick(a.value);
         break;
     case A_TAB: {
         int index = tab_index_of(a.id);
@@ -4025,6 +4137,7 @@ static void dispatch(action_t a)
     case A_PLINK_CYCLE:
     case A_RESTART_GO:
     case A_PREFS_SAVE:
+    case A_RUNNING_GET:
         break;   // the worker's alone: it is queued, never dispatched from a hit rect
     case A_SUPERTAB:
     case A_QUESTION_READ:
@@ -4192,6 +4305,9 @@ static void worker(void *unused)
         }
         case A_MACHINE:
             cable_client_select_machine(a.id);
+            break;
+        case A_RUNNING_GET:
+            cable_client_request_running(a.value, a.revision);
             break;
         case A_VOICE:
             display_lock();
@@ -4410,7 +4526,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
             if (gesture.axis == 2 && ht_tab_carousel_move(&pane_carousel, x, now)) change();
         } else if (s.view == INBOX && character.id == HT_CHARACTER_FOCUS && inbox_carousel.touching) {
             if (gesture.axis == 2 && ht_tab_carousel_move(&inbox_carousel, x, now)) change();
-        } else if ((s.view == AGENTS || s.view == SETTINGS || s.view == PREFS) && gesture.axis == 1) {
+        } else if ((s.view == AGENTS || s.view == SETTINGS || s.view == PREFS || s.view == RUNNING) && gesture.axis == 1) {
             tabs_move((s.last_y - y) * (scroll_reversed ? -1 : 1));
         } else if (s.view == DRAFT && gesture.axis == 1) {
             draft_move((s.last_y - y) * (scroll_reversed ? -1 : 1), now);
@@ -4436,7 +4552,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
         bool notice_tap = notice_contact && ht_tab_carousel_end(&inbox_carousel, x, gesture.axis == 2, now);
         if (s.view == AGENTS && character.id == HT_CHARACTER_FOCUS) {
             // the pages own the contact (pane_contact, below)
-        } else if (!s.touch_cancelled && (s.view == AGENTS || s.view == SETTINGS || s.view == PREFS) && gesture.axis == 1)
+        } else if (!s.touch_cancelled && (s.view == AGENTS || s.view == SETTINGS || s.view == PREFS || s.view == RUNNING) && gesture.axis == 1)
             tabs_move((s.last_y - y) * (scroll_reversed ? -1 : 1));
         bool tab_contact = s.view == TABS && tab_carousel.touching;
         bool tab_tap = tab_contact && ht_tab_carousel_end(&tab_carousel, x, gesture.axis == 2, now);
@@ -4555,7 +4671,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                 dispatch(pressed_action);
             }
         } else if (gesture.axis == 1 && abs(dy) > 55 && abs(dy) > abs(dx)) {
-            if (s.view == TABS || s.view == AGENTS || s.view == SETTINGS || s.view == PREFS) {
+            if (s.view == TABS || s.view == AGENTS || s.view == SETTINGS || s.view == PREFS || s.view == RUNNING) {
                 // The list consumed the drag already, including its final sample.
             } else if (s.view == DRAFT || s.view == DRAFT_OPTIONS) {
                 // Reading a draft never submits or starts recording.
@@ -4591,6 +4707,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                             : s.view == MODELS   ? s.model_count
                             : s.view == SETTINGS ? settings_count()
                             : s.view == PREFS    ? prefs_count()
+                            : s.view == RUNNING  ? s.running_page.count
                             : s.view == QUESTION ? s.q.item[s.q.index].count : 0;
                 int next = s.offset + (dy < 0 ? 3 : -3);
                 if (next >= 0 && next < count) s.offset = next;
@@ -5567,7 +5684,7 @@ uint32_t ui_mode_switch_busy(char *focus, size_t cap)
     if (s.view == READER) busy |= MS_BUSY_READER;
     // forms, selections, stop confirmation, model and machine pickers, tabs, the update screen, a message
     switch (s.view) {
-    case FORM: case SELECTION: case STOP: case FORGET: case BRIGHT: case MODELS: case MACHINES: case TABS: case OTA: case MESSAGE:
+    case FORM: case SELECTION: case STOP: case FORGET: case BRIGHT: case MODELS: case MACHINES: case TABS: case OTA: case MESSAGE: case RUNNING:
         busy |= MS_BUSY_PICKER;
         break;
     default:
@@ -5590,7 +5707,7 @@ void ui_mode_notice(bool on)
     }
     display_unlock();
 }
-bool ui_picker_is_open(void) { return s.view == MODELS || s.view == MACHINES || s.view == TABS; }
+bool ui_picker_is_open(void) { return s.view == MODELS || s.view == MACHINES || s.view == TABS || s.view == RUNNING; }
 bool ui_switch_is_open(void) { return s.view == TABS; }
 bool ui_scroll_reportable(void)
 {

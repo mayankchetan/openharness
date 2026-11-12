@@ -11,6 +11,7 @@
 #include "ui_metrics.h"   // UI_DESK_GRID — which face this build is for, and so which of these exist
 #include "config_store.h"
 #include "../cable_machines.h"   // cable_machine_t — the wheel's row, already parsed and diffed
+#include "../cable_running.h"    // cable_running_row_t — one row of the "All agents" page
 #include "../cable_client.h"     // cable_swarm_t — one of the window's tabs, as the wire carries it
 #include "habitat/supertab.h"   // ht_supertab_t — one Swarm and its Leads, as cable_client parsed it
 
@@ -319,6 +320,11 @@ bool ui_peek_agent_reload_req(void);   // non-consuming check (a slow per-agent 
 // with one is an empty tab; without one it is a shut app — see no_agents_apply). `running` is the daemon's marker that the list is the running
 // agents of this computer (no window): an empty list then reads "No running agents" and offers no tab to choose.
 void ui_fleet_set(int total, bool has_window, bool running);
+
+// "All agents": the page the daemon answered (`running.page`), applied only when `request` is the dial's latest (cable_running_apply drops any other), and the
+// clear when the session goes down. Both take the display lock themselves. No tile is added to or removed from the roster by this view (spec L5).
+void ui_running_replace(uint32_t request, int offset, int total, const cable_running_row_t *rows, int n);
+void ui_running_clear(void);
 
 // Tell the window where the dial is looking, on purpose. ONLY for a move a person made through something
 // other than a swipe (a notification): those go through code, and code-driven moves are

@@ -111,8 +111,38 @@ assert '"ui/habitat/menu_list.c"' in text(fw / 'main/CMakeLists.txt'), 'menu_lis
 assert '#include "menu_list.h"' in ui
 
 # --- the production table, compiled ---------------------------------------------------------------------------------------------------------------
+# The expected lines come from an independent rule written here in Python (group by group, a label before a group's first visible row, rows in table order),
+# not from menu_list.c, so a mistake in the model or in the table's use of it shows. A row is a letter ('a' + its table index), a label is 'L'.
 actions = sorted(set(re.findall(r'\bA_[A-Z_]+\b', table + settings_functions)))
 table_text = re.search(r'static const struct \{[^}]*\} menu_items\[\] = \{.*?\n\};', ui, re.S).group(0)
+all_rows = re.findall(r'\{"([^"]+)",\s*(A_\w+),\s*([A-Za-z_0-9]+),\s*(MENU_GROUP_\w+)\}', table_text)
+FEATURES = ['CABLE_FEATURE_FORM', 'CABLE_FEATURE_SELECTION', 'CABLE_FEATURE_VISIT', 'CABLE_FEATURE_RUNNING']
+
+
+def expected(have):
+    out, last = '', None
+    for i, (label, action, feature, group) in enumerate(all_rows):
+        if feature != '0' and feature not in have:
+            continue
+        if group != last:
+            out += 'L'
+            last = group
+        out += chr(ord('a') + i)
+    return out
+
+
+cases = [set(), {'CABLE_FEATURE_FORM'}, {'CABLE_FEATURE_FORM', 'CABLE_FEATURE_SELECTION', 'CABLE_FEATURE_VISIT'}, {'CABLE_FEATURE_RUNNING'}, set(FEATURES)]
+checks = ''
+for have in cases:
+    pic = expected(have)
+    n = len(pic)
+    visible = [all_rows[ord(c) - ord('a')] for c in pic if c != 'L']
+    mask = ' | '.join(sorted(have)) or '0'
+    checks += '    host_mask = %s;\n    picture(pic);\n    assert(!strcmp(pic, "%s") && settings_count() == %d);\n' % (mask, pic, n)
+    checks += '    assert(settings_end_offset() == %d);\n' % (n - 4 if n > 4 else 0)
+    for k, row in enumerate(visible):
+        checks += '    assert(settings_item(%d, &a) && a == %s && !strcmp(settings_item(%d, NULL), "%s"));\n' % (k, row[1], k, row[0])
+    checks += '    assert(!settings_item(%d, NULL) && !settings_item(-1, NULL));\n' % len(visible)
 harness = r"""
 #include <assert.h>
 #include <stdbool.h>
@@ -126,41 +156,23 @@ typedef enum { A_NONE, """ + ', '.join(actions) + r""" } action_kind_t;
 static uint32_t host_mask;
 bool cable_client_supports(uint32_t features) { return (host_mask & features) == features; }
 """ + table_text + "\n" + "\n".join(function(n) for n in ('settings_lines', 'settings_item', 'settings_count', 'settings_end_offset')) + r"""
-static int lines_of(menu_line_t *l) { return settings_lines(l); }
 static void picture(char *out)
 {
     menu_line_t l[MENU_MAX_LINES];
-    int n = lines_of(l);
-    for (int i = 0; i < n; i++) out[i] = l[i].item < 0 ? 'L' : (char)('0' + l[i].item);
+    int n = settings_lines(l);
+    for (int i = 0; i < n; i++) out[i] = l[i].item < 0 ? 'L' : (char)('a' + l[i].item);
     out[n] = 0;
 }
 int main(void)
 {
     char pic[32];
-    host_mask = CABLE_FEATURE_FORM | CABLE_FEATURE_SELECTION | CABLE_FEATURE_VISIT;
-    picture(pic);
-    assert(!strcmp(pic, "L012L345L6789") && settings_count() == 13);
-    // settings_item(wanted) is the wanted-th visible ITEM, labels not counted
-    static const char *const labels[] = {"Stop turn", "Change model", "Latest reply", "Find agent", "New agent", "Pick text",
-                                         "Inbox", "Quiet 15 min", "Computers", "Settings"};
     action_kind_t a;
-    for (int i = 0; i < 10; i++) { assert(settings_item(i, &a) && !strcmp(settings_item(i, NULL), labels[i])); }
-    assert(settings_item(0, &a) && a == A_STOP && settings_item(9, &a) && a == A_PREFS && settings_item(7, &a) && a == A_NAP);
-    assert(!settings_item(10, &a));
-    assert(settings_end_offset() == 9);
-    // no optional feature: the ON COMPUTER group and its label are gone; 8 lines
-    host_mask = 0;
-    picture(pic);
-    assert(!strcmp(pic, "L01L6789") && settings_count() == 8);
-    assert(settings_item(0, &a) && a == A_STOP && settings_item(1, &a) && a == A_MODELS && settings_item(2, &a) && a == A_INBOX && !strcmp(settings_item(5, NULL), "Settings") && !settings_item(6, NULL));
-    assert(settings_end_offset() == 4);
-    // a feature that arrives later: the kept offset is clamped by the model
+""" + checks + r"""    // a feature that arrives later: the kept offset is clamped by the model
     menu_line_t l[MENU_MAX_LINES];
+    host_mask = 0;
     int n = settings_lines(l);
-    assert(menu_clamp(l, n, TAB_ROWS, 9) == 4);
-    host_mask = CABLE_FEATURE_FORM;
-    picture(pic);
-    assert(!strcmp(pic, "L01L34L6789") && settings_item(2, &a) && a == A_FIND);
+    assert(menu_clamp(l, n, TAB_ROWS, 9) == settings_end_offset() && menu_clamp(l, n, TAB_ROWS, 0) == 0);
+    (void)a;
     puts("menu groups: production table, settings_item and settings_count agree with the model");
     return 0;
 }

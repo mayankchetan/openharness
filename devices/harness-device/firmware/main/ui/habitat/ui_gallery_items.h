@@ -74,6 +74,8 @@
     X(inbox_empty,      "inbox_empty",      0, 2000, "inbox",         "render_focus_inbox",      NULL) \
     X(machines,         "machines",         0, 2000, "machines",      "render_list",             NULL) \
     X(machines_empty,   "machines_empty",   0, 2000, "machines",      "render_list",             NULL) \
+    X(running,          "running",          0, 2000, "running",       "render_running",          NULL) \
+    X(running_empty,    "running_empty",    0, 2000, "running",       "render_running",          NULL) \
     X(settings_1,       "settings_1",       0, 2000, "settings",      "render_settings",         NULL) \
     X(settings_2,       "settings_2",       0, 2000, "settings",      "render_settings",         NULL) \
     X(prefs,            "prefs",            0, 2000, "prefs",         "render_prefs",            NULL) \
