@@ -1014,3 +1014,95 @@ describe('Swarm cards', () => {
     expect(await bare.swarmCardRecap('st1', 'l1')).toBeNull()
   })
 })
+
+describe('DaemonCableHost running list (no window)', () => {
+  type Row = { agentId: string; registeredAt: number; active: boolean; terminalAvailable: boolean; engine: string; lastHookAt?: number } & Record<string, unknown>
+  const set = (rows: Array<Partial<Row> & { agentId: string }>): void => {
+    AGENTS.length = 0
+    for (const r of rows) AGENTS.push({ engine: 'claude', active: true, terminalAvailable: true, registeredAt: 1, ...r } as never)
+  }
+  const many = (n: number) => Array.from({ length: n }, (_, i) => ({ agentId: `a${String(i).padStart(2, '0')}`, registeredAt: 100 + i, lastHookAt: 1000 + i }))
+  const ids = (s: { agents: Array<{ id: string }> }) => s.agents.map((a) => a.id)
+
+  it('lists running agents newest first, at most 16', async () => {
+    set(many(20))
+    const host = new DaemonCableHost(wiring())
+    const snap = await host.listAgentSnapshot({ running: true })
+    expect(snap.agents).toHaveLength(16)
+    expect(snap.agents[0].id).toBe('a19')
+    expect(snap.running).toBe(true)
+    expect(snap.tab).toBe('')
+  })
+
+  it('leaves out held, stopped and cloud rows, keeps a terminal', async () => {
+    set([
+      { agentId: 'ok', lastHookAt: 10 },
+      { agentId: 'held', lastHookAt: 20, identityHold: 'lost' },
+      { agentId: 'closing', lastHookAt: 30, closePlan: { state: 'waiting' } },
+      { agentId: 'stopped', lastHookAt: 40, active: false },
+      { agentId: 'cloud', lastHookAt: 50, engine: 'devin-cloud' },
+      { agentId: 'shell', lastHookAt: 5, engine: 'terminal' },
+    ])
+    const host = new DaemonCableHost(wiring())
+    expect(ids(await host.listAgentSnapshot({ running: true })).sort()).toEqual(['ok', 'shell'])
+  })
+
+  it('does not list another machine\'s agents', async () => {
+    set([{ agentId: 'mine1', lastHookAt: 1 }])
+    const fleet = fleetOf([REMOTE])
+    fleet.listAgents = vi.fn(async () => [{ id: 'r1', name: 'api' }] as never)
+    const host = new DaemonCableHost(wiring(), fleet)
+    await host.listAgentsFlat(); await new Promise((r) => setTimeout(r, 0))
+    expect((await host.listAgentsFlat()).map((a) => a.id)).toContain('r1')
+    expect(ids(await host.listAgentSnapshot({ running: true }))).toEqual(['mine1'])
+  })
+
+  it('keeps the order stable when a listed agent gets newer activity', async () => {
+    set(many(5))
+    const host = new DaemonCableHost(wiring())
+    const first = ids(await host.listAgentSnapshot({ running: true }))
+    AGENTS.find((a) => a.agentId === 'a00')!.lastHookAt = 99999
+    expect(ids(await host.listAgentSnapshot({ running: true }))).toEqual(first)
+  })
+
+  it('puts a new agent first; a stopped one drops out and the next fills the end', async () => {
+    set(many(20))
+    const host = new DaemonCableHost(wiring())
+    const first = ids(await host.listAgentSnapshot({ running: true }))
+    expect(first).toHaveLength(16)
+    AGENTS.push({ agentId: 'fresh', registeredAt: 5000, active: true, terminalAvailable: true, engine: 'claude', lastHookAt: 1 })
+    const second = ids(await host.listAgentSnapshot({ running: true }))
+    expect(second).toEqual(['fresh', ...first.slice(0, 15)])
+    // One listed agent stops: the best unlisted agent (a04, the one cut by the new agent) fills the end.
+    const gone = second[4]
+    AGENTS.splice(AGENTS.findIndex((a) => a.agentId === gone), 1)
+    const third = ids(await host.listAgentSnapshot({ running: true }))
+    expect(third).toHaveLength(16)
+    expect(third).not.toContain(gone)
+    expect(third[15]).toBe(first[15])
+  })
+
+  it('without opts.running, no window still gives [] and listAgents() is []', async () => {
+    set(many(3))
+    const host = new DaemonCableHost(wiring())
+    expect(await host.listAgentSnapshot()).toMatchObject({ agents: [], tab: '' })
+    expect((await host.listAgentSnapshot()).running).toBeUndefined()
+    expect(await host.listAgents()).toEqual([])
+  })
+
+  it('with a window the tab list comes back with no running flag, and the next no-window episode starts over', async () => {
+    set(many(20))
+    const host = new DaemonCableHost(wiring())
+    const first = ids(await host.listAgentSnapshot({ running: true }))
+    onTab(host, ['a01', 'a02'])
+    const tab = await host.listAgentSnapshot({ running: true })
+    expect(ids(tab)).toEqual(['a01', 'a02'])
+    expect(tab.running).toBeUndefined()
+    // A new agent arrived while the window was open; after the window shuts the list is rebuilt, not patched.
+    AGENTS.push({ agentId: 'late', registeredAt: 7000, active: true, terminalAvailable: true, engine: 'claude', lastHookAt: 1 })
+    host.setSwarms(null); host.setDesk([])
+    const again = ids(await host.listAgentSnapshot({ running: true }))
+    expect(again).toEqual(first)
+    expect(again).not.toContain('late')
+  })
+})

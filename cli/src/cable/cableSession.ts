@@ -367,7 +367,8 @@ export interface CableHost {
   /** The active tab's agents, in tile order — and nothing else. Empty with no window or an empty tab. */
   listAgents(): Promise<CableAgent[]>
   /** Pane rows and workspace identity from the same desktop announcement. */
-  listAgentSnapshot?(): Promise<{ agents: CableAgent[]; tab: string; total: number }>
+  /** With `running` and no window: this computer's running agents (at most 16), and `running: true` in the answer. */
+  listAgentSnapshot?(opts?: { running?: boolean }): Promise<{ agents: CableAgent[]; tab: string; total: number; running?: boolean }>
   /** Every agent across the account — the overview's number. The dial gets the count, never the rows. */
   agentTotal(): number
   /** The active tab's id, or '' with no window: what lets the dial tell an empty tab from a shut app. */
@@ -709,6 +710,8 @@ export class CableSession {
   private statsTurn = false
   /** `player: 'library-v1'`: the paged `player.library`. */
   private playerCapable = false
+  /** `running: 'v1'`: with no window the list holds this computer's running agents, and `agents.end` says so. */
+  private runningCapable = false
   /** `superTab: 'wait-v1'`: a `question` with `superTab` and `attention` is shown as a Super Tab wait, which nobody
    *  answers on the device. Any other device is not sent one: the round dial would open a question screen for it that
    *  cannot load. */
@@ -728,13 +731,14 @@ export class CableSession {
 
   /** For the greeting's log line: which capabilities this hello named, or nothing. */
   private capabilitiesNamed(): string {
-    const named = [this.swarmMembers && 'swarms', this.longRecap && 'recap', this.stepsActivity && 'activity', this.statsTurn && 'stats', this.playerCapable && 'player', this.superTabWaits && 'superTab', this.swarmCard && 'swarmCard']
+    const named = [this.swarmMembers && 'swarms', this.longRecap && 'recap', this.stepsActivity && 'activity', this.statsTurn && 'stats', this.playerCapable && 'player', this.runningCapable && 'running', this.superTabWaits && 'superTab', this.swarmCard && 'swarmCard']
       .filter(Boolean)
     return named.length ? ` caps ${named.join(',')}` : ''
   }
 
   private resetCapabilities(): void {
     this.swarmMembers = this.longRecap = this.stepsActivity = this.statsTurn = this.playerCapable = this.superTabWaits = false
+    this.runningCapable = false
     this.swarmCard = false
     this.adpcmVoice = this.adpcmUnofferedLogged = false
     this.keepaliveCapable = false
@@ -1368,6 +1372,7 @@ export class CableSession {
         this.stepsActivity = str('activity') === 'steps-v1'
         this.statsTurn = str('stats') === 'turn-v1'
         this.playerCapable = str('player') === 'library-v1'
+        this.runningCapable = str('running') === 'v1'
         this.superTabWaits = str('superTab') === 'wait-v1'
         this.swarmCard = str('swarmCard') === 'v1'
         this.adpcmVoice = str('voiceCodec') === 'adpcm-v1'
@@ -2722,21 +2727,33 @@ export class CableSession {
     })
   }
 
-  private async syncAgentsNow(force: boolean): Promise<void> {
-    const snapshot = this.host.listAgentSnapshot ? await this.host.listAgentSnapshot() : {
+  /** The list the dial is shown: the host's snapshot, asking for the running list only for a dial that reads one. */
+  private async agentSnapshot(): Promise<{ agents: CableAgent[]; tab: string; total: number; running?: boolean }> {
+    return this.host.listAgentSnapshot ? await this.host.listAgentSnapshot({ running: this.runningCapable }) : {
       agents: await this.host.listAgents(), tab: this.host.activeSwarm(), total: this.host.agentTotal(),
     }
+  }
+
+  private async syncAgentsNow(force: boolean): Promise<void> {
+    const snapshot = await this.agentSnapshot()
     const { agents, tab, total } = snapshot
+    const running = snapshot.running === true
     // WHETHER there is a window is in the key, not WHICH tab: an empty tab after the window shut sends the
     // same zero rows and draws a different screen, so that flip has to push. The tab's id does not — the
     // dial names the tab from the `swarms` frame — and keying on it made every tab switch push twice,
     // once when `app_swarms` named the new tab over the old panes and again when `app_panes` arrived.
-    const key = `${tab ? 'window' : ''}|${CableSession.agentsKey(agents)}`
+    const key = `${tab ? 'window' : running ? 'running' : ''}|${CableSession.agentsKey(agents)}`
     if (!force && key === this.lastAgentsKey) return
+    // The window came back after a running list: the tile the desktop is on is where the dial lands, in
+    // this one push (one focus frame below, no burst). Left alone when that tile is not in the new list.
+    if (tab && this.lastAgentsKey.startsWith('running|')) {
+      const onDesk = this.host.appFocus?.()?.agentId
+      if (onDesk && agents.some((a) => a.id === onDesk)) this.desiredFocus = onDesk
+    }
     this.lastAgentsKey = key
     // Every push, and only pushes. The dial showing a different number from the daemon is a question this
     // line answers in one look: either the daemon never said it, or it said it and the dial disagreed.
-    this.log(`cable: agents → ${agents.length} of ${total}${force ? ' (requested)' : ''}`)
+    this.log(`cable: agents → ${agents.length} of ${total}${running ? ' (running)' : ''}${force ? ' (requested)' : ''}`)
 
     await this.send({ t: 'agents.begin' })
     for (const a of agents) {
@@ -2757,7 +2774,7 @@ export class CableSession {
     // Every agent sent is walked. What travels beside them: `total`, the account-wide count the overview
     // prints (the rows behind it stay here), and `tab`, the active tab's id — '' with no window, which is
     // how the dial tells "the app is shut" from "this tab is empty" when both send zero agents.
-    await this.send({ t: 'agents.end', total, tab })
+    await this.send({ t: 'agents.end', total, tab, ...(running ? { running: true } : {}) })
 
     // The list just changed shape under the dial, so say again which agent both screens are on.
     //
@@ -2815,7 +2832,8 @@ export class CableSession {
     // desk: a click from a local agent to a remote one took 1.5 s, of which 0.7 s was this loop waiting
     // on the first `agent_recent` while the dial sat on the old tile.
     const rows: Array<{ id: string; past: Array<{ recap: string; text: string; fullText?: string }> }> = []
-    for (const a of await this.host.listAgents()) {
+    // The same list the dial was just sent, so a running list is restored too (at most 16 agents).
+    for (const a of (await this.agentSnapshot()).agents) {
       // Marked as it is ASKED FOR, not as it is sent: the answer is a cloud round trip, and a tick
       // arriving mid-loop would otherwise start a second walk over the same agents.
       if (this.restored.has(a.id)) continue

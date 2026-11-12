@@ -28,6 +28,7 @@ import type { FleetRouting } from '../services/fleet.js'
 import { ServiceUnavailableError } from '../core/serviceHost.js'
 
 import { PLAYER_STATES, type PlayerSession } from './playerLibrary.js'
+import { RunningOrder, isRunning, type RankFn } from './runningAgents.js'
 import type { LeadRecap, SwarmCard } from '../superTabs/cards.js'
 import type { ActivitySnapshot, AppSwarms, SuperTabAsk, CableAgent, CableHost, CableMachine, CableMachineSource, CableSwarm, CableTile, DialStatus, OpenReason, RouteDecision } from './cableSession.js'
 import type { WindowRoute } from './windowRoute.js'
@@ -380,8 +381,14 @@ export class DaemonCableHost implements CableHost {
    * tab, an empty desk with none is a closed app, and the two draw different screens — see listAgents.
    */
   setSwarms(swarms: AppSwarms | null): void {
+    // A window coming or going starts the running list over: the order and any pin belong to one
+    // no-window episode (the tab's own order rules again once a window is back).
+    if ((this.swarms === null) !== (swarms === null)) this.runningOrder.reset()
     this.swarms = swarms
   }
+
+  /** The no-window list's stable order, and the agent a dial pick pinned into it. */
+  private readonly runningOrder = new RunningOrder()
 
   /** What the window still has unread, newest first. Empty until a window says otherwise. */
   private unread: UnreadNotification[] = []
@@ -471,7 +478,9 @@ export class DaemonCableHost implements CableHost {
    * its own name.
    *
    * Three answers, and each is a state the dial draws:
-   *   - no window (`swarms === null`)      → `[]`; the dial shows "Run OpenHarness on your computer".
+   *   - no window (`swarms === null`)      → `[]` from this method; the dial shows "Run OpenHarness on your
+   *                                          computer". (`listAgentSnapshot({ running: true })` answers a dial
+   *                                          that reads a running list with this computer's running agents.)
    *   - a window with an empty tab         → `[]`; the dial shows "Nothing on this tab".
    *   - a window with panes                → those agents, in tile order; a tile whose machine dropped out
    *                                          is held from the router's `knownAgents` (see listAgentsFlat).
@@ -480,7 +489,7 @@ export class DaemonCableHost implements CableHost {
     return (await this.listAgentSnapshot()).agents
   }
 
-  async listAgentSnapshot(): Promise<{ agents: CableAgent[]; tab: string; total: number }> {
+  async listAgentSnapshot(opts?: { running?: boolean }): Promise<{ agents: CableAgent[]; tab: string; total: number; running?: boolean }> {
     const flat = await this.listAgentsFlat()
     const byId = new Map(flat.map((a) => [a.id, a]))
     // app_panes and app_swarms are separate messages. Never label the new panes
@@ -488,6 +497,18 @@ export class DaemonCableHost implements CableHost {
     // swarm announcement already contains membership in the same tile order.
     const app = this.swarms
     const tab = app?.active ?? ''
+    if (app === null && opts?.running) {
+      // No window, and the dial said it reads a running list: the running agents of this computer, at most
+      // 16, newest first and then stable (runningAgents.ts). `running: true` tells the dial this is not
+      // the "no window" screen.
+      const listed = (await this.reconcileRunning()).map((id) => byId.get(id)).filter((a): a is CableAgent => !!a)
+      const runningShape = `(running ${listed.length})`
+      if (runningShape !== this.deskShape) {
+        this.deskShape = runningShape
+        this.wiring.log(`cable: tab ${runningShape} · ${flat.length} in all`)
+      }
+      return { agents: listed, tab: '', total: this.viaFleet((r) => r.agentTotal()), running: true }
+    }
     const ids = app?.swarms.find(s => s.id === tab)?.agentIds ?? []
     const out = ids.map(id => byId.get(id)).filter((a): a is CableAgent => !!a)
     // One line per CHANGE. The failure this catches is silent by nature: tiles whose ids this daemon does
@@ -500,6 +521,20 @@ export class DaemonCableHost implements CableHost {
       this.wiring.log(`cable: tab ${shape} · ${flat.length} in all`)
     }
     return { agents: out, tab, total: this.viaFleet((r) => r.agentTotal()) }
+  }
+
+  /** The running agents of THIS computer, as the stable order lists them. The flat list was just read. */
+  private async reconcileRunning(): Promise<string[]> {
+    const rows = this.wiring.sessions().filter(isRunning)
+    const byId = new Map(rows.map((r) => [r.agentId, r]))
+    const rank: RankFn = async (ids) => {
+      const times = await this.viaFleet((r) => r.activityTimes())
+      return new Map(ids.map((id) => {
+        const s = byId.get(id)
+        return [id, { activity: times?.get(id) ?? (s ? s.lastHookAt || s.boundAt || s.registeredAt || 0 : 0), openedAt: s?.lastOpenedAt ?? 0 }]
+      }))
+    }
+    return this.runningOrder.reconcile(rows.map((r) => ({ id: r.agentId, registeredAt: r.registeredAt })), rank)
   }
 
   /** How many agents the account has across every machine — the overview's number, sent beside the

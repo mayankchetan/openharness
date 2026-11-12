@@ -4615,3 +4615,149 @@ describe('ADPCM voice turns', () => {
     expect(line).toContain('adpcm 2 blocks, 1 lost, 0 repeated, 0 bad')
   })
 })
+
+describe('running list', () => {
+  const agent = (id: string): CableAgent => ({ id, name: `Agent ${id}`, engine: 'claude', machineId: 'mac-local', machine: 'MacBook Pro' })
+  const ALL = ['r1', 'r2', 'r3'].map(agent)
+
+  /** A host whose snapshot follows `state`: a window (`tab`) or, with none, what the running list holds. */
+  function stateful() {
+    const state = {
+      tab: '' as string,
+      tabAgents: [] as CableAgent[],
+      running: ALL as CableAgent[],
+      focus: undefined as { machineId: string; agentId: string } | undefined,
+    }
+    const snapshot = vi.fn(async (opts?: { running?: boolean }) => {
+      if (state.tab) return { agents: state.tabAgents, tab: state.tab, total: 9 }
+      if (opts?.running) return { agents: state.running, tab: '', total: 9, running: true as const }
+      return { agents: [] as CableAgent[], tab: '', total: 9 }
+    })
+    const host = makeHost({
+      listAgentSnapshot: snapshot,
+      listAgents: async () => (state.tab ? state.tabAgents : []),
+      activeSwarm: () => state.tab,
+      appFocus: () => state.focus,
+      recentSummaries: vi.fn(async () => []),
+    })
+    return { state, snapshot, host }
+  }
+
+  const frames = (port: LoopbackPort, t: string) => port.sent.filter((m) => m.t === t)
+
+  it('a dial that says running v1 gets the running list and agents.end.running; one that does not gets zero rows', async () => {
+    const a = stateful()
+    const { session, port } = await connect(a.host)
+    try {
+      port.say({ t: 'hello', product: 'harness', mac: 'aa:bb', running: 'v1' })
+      await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
+      expect(frames(port, 'agent').map((m) => m.id)).toEqual(['r1', 'r2', 'r3'])
+      expect(frames(port, 'agents.end').at(-1)).toMatchObject({ total: 9, tab: '', running: true })
+      expect(a.snapshot).toHaveBeenCalledWith({ running: true })
+    } finally { await session.stop() }
+
+    const b = stateful()
+    const old = await connect(b.host)
+    try {
+      old.port.say({ t: 'hello', product: 'harness', mac: 'cc:dd' })
+      await vi.waitFor(() => expect(old.port.types()).toContain('agents.end'))
+      expect(frames(old.port, 'agent')).toEqual([])
+      expect(frames(old.port, 'agents.end').at(-1)).toEqual({ t: 'agents.end', total: 9, tab: '' })
+      expect(b.snapshot).toHaveBeenCalledWith({ running: false })
+    } finally { await old.session.stop() }
+  })
+
+  it('names the capability in the greeting log and forgets it with the port', async () => {
+    const a = stateful()
+    const lines: string[] = []
+    const { session, port } = await connect(Object.assign(a.host, { log: (l: string) => { lines.push(l) } }))
+    try {
+      port.say({ t: 'hello', product: 'harness', mac: 'aa:bb', running: 'v1' })
+      await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
+      expect(lines.join('\n')).toMatch(/caps [^\n]*running/)
+      expect(session['runningCapable']).toBe(true)
+      session['resetCapabilities']()
+      expect(session['runningCapable']).toBe(false)
+    } finally { await session.stop() }
+  })
+
+  it('a reconnect with 16 listed (of 40 running) sends 16 agent frames and restores only those', async () => {
+    const a = stateful()
+    a.state.running = Array.from({ length: 16 }, (_, i) => agent(`q${i}`))
+    const { session, port } = await connect(a.host)
+    try {
+      port.say({ t: 'hello', product: 'harness', mac: 'aa:bb', running: 'v1' })
+      await vi.waitFor(() => expect(port.types()).toContain('notif.replace'))
+      expect(frames(port, 'agent')).toHaveLength(16)
+      const asked = (a.host.recentSummaries as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])
+      expect(asked.sort()).toEqual(a.state.running.map((r) => r.id).sort())
+    } finally { await session.stop() }
+  })
+
+  it('the window opening is one roster push and at most one focus frame, on the desktop\'s tile', async () => {
+    const a = stateful()
+    const { session, port } = await connect(a.host)
+    try {
+      port.say({ t: 'hello', product: 'harness', mac: 'aa:bb', running: 'v1' })
+      await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
+      await session.focusAgent('r1')          // the dial is on r1 in the running list
+      a.state.tab = 'w1'; a.state.tabAgents = [agent('r2'), agent('r3')]
+      a.state.focus = { machineId: 'mac-local', agentId: 'r3' }
+      port.sent.length = 0
+      await session.syncAgents()
+      await settle()
+      expect(frames(port, 'agents.begin')).toHaveLength(1)
+      expect(frames(port, 'agents.end')).toHaveLength(1)
+      expect(frames(port, 'agents.end')[0]).toMatchObject({ tab: 'w1' })
+      expect(frames(port, 'agents.end')[0]).not.toHaveProperty('running')
+      const focuses = frames(port, 'focus')
+      expect(focuses.length).toBeLessThanOrEqual(1)
+      expect(focuses).toEqual([{ t: 'focus', agentId: 'r3' }])
+    } finally { await session.stop() }
+  })
+
+  it('a desktop tile that is not in the new tab list leaves the focus alone', async () => {
+    const a = stateful()
+    const { session, port } = await connect(a.host)
+    try {
+      port.say({ t: 'hello', product: 'harness', mac: 'aa:bb', running: 'v1' })
+      await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
+      a.state.tab = 'w1'; a.state.tabAgents = [agent('r2')]
+      a.state.focus = { machineId: 'mac-local', agentId: 'elsewhere' }
+      port.sent.length = 0
+      await session.syncAgents()
+      await settle()
+      expect(frames(port, 'agent').map((m) => m.id)).toEqual(['r2'])
+      expect(frames(port, 'focus').length).toBeLessThanOrEqual(1)
+      expect(frames(port, 'focus').every((m) => m.agentId !== 'elsewhere')).toBe(true)
+    } finally { await session.stop() }
+  })
+
+  it('the window shutting pushes the running list again', async () => {
+    const a = stateful()
+    a.state.tab = 'w1'; a.state.tabAgents = [agent('r2')]
+    const { session, port } = await connect(a.host)
+    try {
+      port.say({ t: 'hello', product: 'harness', mac: 'aa:bb', running: 'v1' })
+      await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
+      expect(frames(port, 'agents.end').at(-1)).toMatchObject({ tab: 'w1' })
+      a.state.tab = ''; a.state.tabAgents = []
+      port.sent.length = 0
+      await session.syncAgents()
+      expect(frames(port, 'agent').map((m) => m.id)).toEqual(['r1', 'r2', 'r3'])
+      expect(frames(port, 'agents.end').at(-1)).toMatchObject({ tab: '', running: true })
+    } finally { await session.stop() }
+  })
+
+  it('an unchanged running list is not pushed again', async () => {
+    const a = stateful()
+    const { session, port } = await connect(a.host)
+    try {
+      port.say({ t: 'hello', product: 'harness', mac: 'aa:bb', running: 'v1' })
+      await vi.waitFor(() => expect(port.types()).toContain('agents.end'))
+      port.sent.length = 0
+      await session.syncAgents()
+      expect(frames(port, 'agents.begin')).toEqual([])
+    } finally { await session.stop() }
+  })
+})
