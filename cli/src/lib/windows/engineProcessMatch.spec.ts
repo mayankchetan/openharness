@@ -114,4 +114,14 @@ describe('engine recognition on Windows', () => {
     const npmClaude = row(9000, 1, 'node.exe', `"C:\\Program Files\\nodejs\\node.exe" ${NPM}\\node_modules\\@anthropic-ai\\claude-code\\cli.js`)
     expect(engineProcessMatch(npmClaude, 'claude')).toMatchObject({ score: 2, evidence: 'package-entrypoint' })
   })
+
+  it('knows pi\'s package entry, including the dist/bundle/cli.js that pi 0.84 moved it to', () => {
+    const bundledWindows = row(7001, 1, 'node.exe', 'node.exe C:\\x\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js',
+      ['node.exe', 'C:\\x\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js'])
+    const bundledPosix = row(7002, 1, 'node', 'node /x/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js')
+    const legacyPosix = row(7003, 1, 'node', 'node /x/node_modules/pi-coding-agent/dist/cli.js')
+    expect(engineProcessMatch(bundledWindows, 'pi')).toMatchObject({ score: 2, evidence: 'package-entrypoint' })
+    expect(engineProcessMatch(bundledPosix, 'pi')).toMatchObject({ score: 2, evidence: 'package-entrypoint' })
+    expect(engineProcessMatch(legacyPosix, 'pi')).toMatchObject({ score: 2, evidence: 'package-entrypoint' })
+  })
 })
