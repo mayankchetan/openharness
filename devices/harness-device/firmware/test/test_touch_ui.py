@@ -1536,11 +1536,11 @@ static void swarm_pane_checks(const char *dir) {
     ui_supertab_recap("s1", "L4", "Need a decision on the cache size.", 1792560000u, false); scene_take();
     assert(scene_says("Need a decision") && !scene_says("Working"));
     FOCUS_PAGE("swarm-2e-ask");
-    // 2h a Swarm with no projects: PANES' own empty page, and "Choose a tab" goes to TABS.
+    // 2h a Swarm with no projects: AGENTS' own empty page, and "Choose a tab" goes to TABS.
     {
         const char ids[4][ID_MAX] = {"s1", "s3", "s2", "s4"}; ui_supertabs_ids(ids, 4);
         card_begin("s4", "", "empty"); card_send();
-        enter_at("s4", NULL); assert(scene_says("No panes in") && scene_says("this tab.") && scene_says("Choose a tab"));
+        enter_at("s4", NULL); assert(scene_says("No agents in") && scene_says("this tab.") && scene_says("Choose a tab"));
         FOCUS_PAGE("swarm-2h");
         tap(fake_ms, 233, 365); assert(s.view == TABS);
     }
@@ -2979,7 +2979,7 @@ int main(int argc, char **argv) {
     assert(s.offset==4 && !strcmp(make_action(s.hits[4]).id,"pane-7"));
     portrait(dir,"panes-last");
     // FOCUS'S PANES (design 2026-10-06): paged like the tabs. The pane on the face is the chosen page, Inter 44 green,
-    // "claude - Harness" on two balanced lines ("claude -" / "Harness"), the next one peeking in Inter 28; "PANES" on
+    // "claude - Harness" on two balanced lines ("claude -" / "Harness"), the next one peeking in Inter 28; "AGENTS" on
     // top, a green Done at the foot. A swipe browses and changes nothing; Done opens the chosen pane; no close pill.
     reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); s.count=3; s.active=0;
     {
@@ -2997,16 +2997,16 @@ int main(int argc, char **argv) {
             done |= !strcmp(r->text,HT_DONE) && r->y==400 && r->fg==color(HT_THEME_VOICE);
         }
         assert(big==2 && small>=1 && done);
-        // The header: "PANES" a letter to a run in Inter 20, grey, spaced 2 at y 62.
+        // The header: "AGENTS" a letter to a run in Inter 20, grey, spaced 2 at y 62.
         {
-            const char *letters = "PANES"; int at = -1, found = 0;
+            const char *letters = "AGENTS"; int at = -1, found = 0;
             for(int i=0;i<scene.count;i++) if (scene.runs[i].y == 62 && scene.runs[i].text[0] && !scene.runs[i].text[1]) {
                 assert(scene.runs[i].font == &ht_lv_inter_20.base && scene.runs[i].fg == color(0x4c4c4c));
                 assert(scene.runs[i].text[0] == letters[found]);
                 if (found) assert(scene.runs[i].x == at);
                 at = scene.runs[i].x + scene.runs[i].w + 2; found++;
             }
-            assert(found == 5);
+            assert(found == 6);
         }
         int runs = scene.count;
         // A swipe to the left: the next page, and nothing switched.
@@ -3051,7 +3051,7 @@ int main(int argc, char **argv) {
         for(int i=0;i<scene.count;i++) whole |= scene.runs[i].font == &ht_lv_inter_44.base && !strcmp(scene.runs[i].text,"Tri\xe1\xbb\x83n khai");
         assert(whole);
     }
-    // The empty page (design 2026-10-06): "No panes in / this tab." on two Inter 44 lines centred on the glass, the header
+    // The empty page (design 2026-10-06): "No agents in / this tab." on two Inter 44 lines centred on the glass, the header
     // as ever, "Choose a tab" in Inter 28 on a 260 x 64 pill at (103, 333) that opens the tabs; loading on one line,
     // the run count unchanged.
     reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); s.count=0; s.connected=true;
@@ -3060,7 +3060,7 @@ int main(int argc, char **argv) {
         int lines=0; bool pill=false, box=false, header=false;
         for(int i=0;i<scene.count;i++) {
             const ht_run_t *r=&scene.runs[i];
-            if(!strcmp(r->text,"No panes in")) { lines++; assert(r->font==&ht_lv_inter_44.base && r->y==181+(52-ht_lv_inter_44.base.height)/2); }
+            if(!strcmp(r->text,"No agents in")) { lines++; assert(r->font==&ht_lv_inter_44.base && r->y==181+(52-ht_lv_inter_44.base.height)/2); }
             if(!strcmp(r->text,"this tab.")) { lines++; assert(r->font==&ht_lv_inter_44.base && r->y==233+(52-ht_lv_inter_44.base.height)/2); }
             if(!strcmp(r->text,"Choose a tab")) pill = r->font == &ht_lv_inter_28.base && abs(r->x + r->w / 2 - 233) <= 1;
             if(r->box.h==64) box = r->x==103 && r->y==333 && r->w==260 && r->box.radius==32 && r->box.fill==color(0x171718) && r->box.border==color(0x3a3f4b);

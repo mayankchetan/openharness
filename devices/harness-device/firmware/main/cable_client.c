@@ -1124,7 +1124,7 @@ static void session_up(const cJSON *p)
     const char *app = str_of(p, "app");
     const cJSON *machine = p ? cJSON_GetObjectItemCaseSensitive(p, "machine") : NULL;
     const char *name = str_of(machine, "name");
-    snprintf(s_machine_name, sizeof(s_machine_name), "%s", name ? name : "Machine");
+    snprintf(s_machine_name, sizeof(s_machine_name), "%s", name ? name : "Computer");
     // The CABLED computer's identity, and what `local` is judged against. Proto 1 put the dial's own MAC
     // here, which named nothing anyone could select.
     const char *mid = str_of(machine, "id");

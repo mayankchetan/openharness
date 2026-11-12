@@ -612,7 +612,7 @@ static void focus_face(void)
         f.activity = ""; f.elapsed = 0;
         static const char *const resting[] = {"Let's build it", "Do anything", "What's next?",
             "Ready when you are", "Hold the button to talk", "Say the word", "Make it happen", "Start something",
-            "Hold to switch tabs", "Tap the name to switch panes"};
+            "Hold to switch tabs", "Tap name to switch agents"};
         char first[64] = "";
         const char *names[] = {"Payments refactor", "Landing page", "Deploy firmware", "Docs sweep",
                                "Bug triage", "Release notes"};
@@ -645,7 +645,7 @@ static void focus_face(void)
             }
         }
         /*
-         * RANDOM WHEREVER IT SHOWS (owner, 2026-10-02): the same name every time — "Choose a pane",
+         * RANDOM WHEREVER IT SHOWS (owner, 2026-10-02): the same name every time — "Choose an agent",
          * the face with no agent — still gets a new line each time the resting face returns, never
          * the one it just showed, and over a few returns most of the list.
          */
@@ -653,7 +653,7 @@ static void focus_face(void)
             // Today's resting face (an engine with no relaxing scene: Cursor) says its line in the middle, runs 8 and 9;
             // the relaxing face (Claude) on the lower arc, run 10, from its own list (owner, 2026-10-09). The same picker.
             f.engine = relaxing ? "claude" : "cursor";
-            f.recipient = "Choose a pane";
+            f.recipient = "Choose an agent";
             char last[64] = "", seen[10][64];
             int kinds = 0;
             #define SAID(sc_, out_) do { if (relaxing) { assert((sc_).runs[10].arc == 2 && (sc_).runs[10].fg == ht_rgb(0x9a9aa6) && \
@@ -684,10 +684,10 @@ static void focus_face(void)
             }
             assert(kinds >= 5);
             // The teaching lines come up more (owner, 2026-10-03): today's "Hold the button to talk" (was "Tap to talk" until 2026-11-11) is listed 10 times of 27,
-            // "Hold to switch tabs" 5, "Tap the name to switch panes" 5, the rest once; the relaxing list "Hold the button to talk"
-            // 10 of 24, "Hold for tabs" 5, "Tap name for panes" 5, "What's next?", "Your move", "Say the word", "Ask away"
+            // "Hold to switch tabs" 5, "Tap name to switch agents" 5, the rest once; the relaxing list "Hold the button to talk"
+            // 10 of 24, "Hold for tabs" 5, "Tap name for agents" 5, "What's next?", "Your move", "Say the word", "Ask away"
             // once — never twice running.
-            static const char *const relax_lines[] = {"Holdthebuttontotalk", "Holdfortabs", "Tapnameforpanes", "What'snext?",
+            static const char *const relax_lines[] = {"Holdthebuttontotalk", "Holdfortabs", "Tapnameforagents", "What'snext?",
                                                       "Yourmove", "Saytheword", "Askaway"};
             int talk = 0, tabs = 0, name = 0, other = 0, each[7] = {0};
             for (int visit = 0; visit < 900; visit++) {
@@ -703,7 +703,7 @@ static void focus_face(void)
                 snprintf(last, sizeof last, "%s", said);
                 if (!strcmp(said, "Holdthebuttontotalk")) talk++;
                 else if (!strcmp(said, relaxing ? "Holdfortabs" : "Holdtoswitchtabs")) tabs++;
-                else if (!strcmp(said, relaxing ? "Tapnameforpanes" : "Tapthenametoswitchpanes")) name++;
+                else if (!strcmp(said, relaxing ? "Tapnameforagents" : "Tapnametoswitchagents")) name++;
                 else other++;
                 if (relaxing) {
                     bool listed = false;
@@ -1676,7 +1676,7 @@ static void focus_relaxing(void)
 {
     ht_character_t c = {0};
     assert(ht_character_select(&c, HT_CHARACTER_FOCUS));
-    static const char *const lines[] = {"Hold the button to talk", "Hold for tabs", "Tap name for panes", "What's next?",
+    static const char *const lines[] = {"Hold the button to talk", "Hold for tabs", "Tap name for agents", "What's next?",
                                         "Your move", "Say the word", "Ask away"};
     static const struct { const char *engine; unsigned shapes, step_ms; bool overlay; } want[] = {
         {"claude", 6, 55, false}, {"codex", 0, 120, true}, {"muse", 8, 100, false}};
@@ -1817,7 +1817,7 @@ static void focus_relaxing(void)
         snprintf(said, sizeof said, "%s%s", sc.runs[8].text, sc.runs[9].text);
         squeeze(said);
         static const char *const today[] = {"Let'sbuildit", "Doanything", "What'snext?", "Readywhenyouare", "Saytheword",
-            "Makeithappen", "Startsomething", "Holdthebuttontotalk", "Holdtoswitchtabs", "Tapthenametoswitchpanes"};
+            "Makeithappen", "Startsomething", "Holdthebuttontotalk", "Holdtoswitchtabs", "Tapnametoswitchagents"};
         bool known = false;
         for (unsigned r = 0; r < 10; r++) known |= !strcmp(said, today[r]);
         assert(known);

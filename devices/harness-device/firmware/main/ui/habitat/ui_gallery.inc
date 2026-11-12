@@ -393,7 +393,7 @@ static void step_slide_panes(uint32_t t)
     }
 }
 SETUP(panes_slide) { g_open_panes(); }
-SETUP(panes_empty) { g_swarm_go("sw2", NULL); g_open_panes(); }   // a Swarm with no projects: "No panes in this tab."
+SETUP(panes_empty) { g_swarm_go("sw2", NULL); g_open_panes(); }   // a Swarm with no projects: "No agents in this tab."
 SETUP(panes_loading) { ui_project_clear_all(); LOCKED(s.loading = true; dispatch((action_t){.kind = A_AGENTS})); }   // g_reset refills the roster
 SETUP(tabs) { LOCKED(tabs_open()); }
 static void step_slide_tabs(uint32_t t)

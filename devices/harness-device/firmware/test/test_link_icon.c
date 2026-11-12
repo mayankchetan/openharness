@@ -158,7 +158,7 @@ int main(void)
 
     // ── the lower arc: the status lines the dial can show ─────────────────────────────────────────────
     {
-        static const char *const lines[] = {"Hold the button to talk", "Hold for tabs", "Tap name for panes", "What's next?", "Your move", "Say the word", "Ask away", "Listening"};
+        static const char *const lines[] = {"Hold the button to talk", "Hold for tabs", "Tap name for agents", "What's next?", "Your move", "Say the word", "Ask away", "Listening"};
         for (unsigned i = 0; i < sizeof lines / sizeof lines[0]; i++) {
             ht_scene_t st;
             ht_scene_clear(&st, 0);

@@ -889,7 +889,7 @@ static void workspace_failed(const char *message)
 {
     ht_workspace_cancel_request(&workspace);
     s.loading=false; s.active=-1;
-    COPY(s.title,"Workspaces"); COPY(s.message,message); view(MESSAGE);
+    COPY(s.title,"Tabs"); COPY(s.message,message); view(MESSAGE);
 }
 static void tab_request(const char *id, bool browsing)
 {
@@ -912,7 +912,7 @@ static void tab_request(const char *id, bool browsing)
     ht_visit_close(&visit); s.pending_focus[0]=0;
     s.loading=true;
     if (!browsing) {
-        COPY(s.title,"Switching tab"); COPY(s.message,"Opening your workspace...");
+        COPY(s.title,"Switching tab"); COPY(s.message,"Opening your tab...");
         view(MESSAGE);
     }
     change();
@@ -1399,7 +1399,7 @@ static void render_workspace_preview(ht_scene_t *f)
         const ht_rect_t *t = ht_command_targets;
         uint16_t ground[4];
         for (int k = 0; k < 4; k++) ground[k] = s.pressed == k ? SEL : BG;
-        focus_put(f, t[0].x, t[0].y + (t[0].h - small->height) / 2, t[0].w, small, FG, ground[0], "workspaces", true);
+        focus_put(f, t[0].x, t[0].y + (t[0].h - small->height) / 2, t[0].w, small, FG, ground[0], "tabs", true);
         ht_lv_label_t l;
         ht_lv_label(&l, big, s.tabs[i].name[0] ? s.tabs[i].name : "Untitled", 340, 2, true);
         int top = t[1].y + (t[1].h - l.lines * big->height) / 2;
@@ -1416,7 +1416,7 @@ static void render_workspace_preview(ht_scene_t *f)
         for (int k = 0; k < 4; k++) { links[k].rect = t[k]; s.hits[s.hit_count++] = links[k]; }   // as command_face's
         return;
     }
-    command_face(f,"workspaces",s.tabs[i].name,"",
+    command_face(f,"tabs",s.tabs[i].name,"",
         primary,"slide back to cancel",false,links);
 }
 /*
@@ -1445,7 +1445,7 @@ static void render_focus_panes(ht_scene_t *f);
  * A SWARM PANE'S FACE (spec §4): the agent face, built from the Lead. The project on the upper arc; working: the pet
  * and the time since `since` (none for a remote Lead); asking or stuck: the asking pose and, in the recap's place, the
  * local wait's question, else the Lead's last message; done: that message, or the resting face. No Leads: PANES' own
- * "No panes in this tab.".
+ * "No agents in this tab.".
  */
 static void render_swarm_face(ht_scene_t *f)
 {
@@ -1540,7 +1540,7 @@ static void render_home(ht_scene_t *f)
      * name still — see ht_character_face_t.
      */
     bool rotating = home_caption_rotates() && character.id != HT_CHARACTER_FOCUS;
-    const char *caption = rotating && home_caption.activity ? activity : a ? a->name : "Choose a pane";
+    const char *caption = rotating && home_caption.activity ? activity : a ? a->name : "Choose an agent";
     bool bell = !s.voice_retry_until && !carry.active && !carry.error[0] && !visit.available;
     unsigned unread = notice_unread(a ? a->id : NULL);
     bell = bell && unread > 0;
@@ -1733,7 +1733,7 @@ static void focus_header(ht_scene_t *f, const char *title)
     }
 }
 /*
- * FOCUS'S PANE PICKER (design 2026-10-06, focus-project.html "Panes"): the close pill and "PANES" on top, the panes
+ * FOCUS'S PANE PICKER (design 2026-10-06, focus-project.html "Panes"): the close pill and "AGENTS" on top, the panes
  * paged like the tabs (focus_carousel) — the chosen one large and green in the middle, its neighbours fading at the
  * edges — and a green Done at the foot. Browsing changes nothing; Done or a tap on a page opens that pane, the cross
  * goes back. It replaced the column of cards (owner, 2026-10-01).
@@ -1749,13 +1749,13 @@ static const char *pane_label(int i)
 static void render_focus_panes(ht_scene_t *f)
 {
     uint16_t fg = color(0xeaeaf0), pressed_fill = color(0x30333f);   // the Choose-a-tab pill's ink and press
-    focus_header(f, "PANES");
+    focus_header(f, "AGENTS");
     const ht_supertab_t *here = swarm_here();
     int count = here ? here->lead_n : s.count, current = here ? sw.at : s.active;
     action_kind_t pick = here ? A_LEAD : A_AGENT;
     if (!count) {
         /*
-         * NO PANES (design 2026-10-06, focus-project.html "Panes, none"): "No panes in / this tab." on two Inter 44
+         * NO PANES (design 2026-10-06, focus-project.html "Panes, none"): "No agents in / this tab." on two Inter 44
          * lines 52 px apart, centred on the glass (181..285), and under it the door to the tab list, "Choose a tab":
          * a 260 x 64 pill at (103, 333), #171718 with a #3a3f4b rim, Inter 28. Loading says so on one line; the
          * second line's run stays, empty.
@@ -1764,7 +1764,7 @@ static void render_focus_panes(ht_scene_t *f)
         const ht_font_t *big = &ht_lv_inter_44.base, *pf = &ht_lv_inter_28.base;
         // With no window (agents.end running:true, U1) the list is the running agents, so the empty page says so and offers no tab to choose.
         const bool running = s.running && !here;
-        static const char *const empty[2] = {"No panes in", "this tab."};
+        static const char *const empty[2] = {"No agents in", "this tab."};
         static const char *const none_running[2] = {"No running", "agents."};
         bool loading = s.loading && !here;
         int lines = loading ? 1 : 2, top = 233 - lines * LINE / 2;
@@ -1794,12 +1794,12 @@ static void render_focus_panes(ht_scene_t *f)
 static void render_agents(ht_scene_t *f)
 {
     if (character.id == HT_CHARACTER_FOCUS) { render_focus_panes(f); return; }
-    heading(f, "panes");
+    heading(f, "agents");
     int last = s.count > TAB_ROWS ? s.count - TAB_ROWS : 0;
     if (s.offset > last) s.offset = last;
     if (s.offset < 0) s.offset = 0;
     if (!s.count) {
-        center(f, 192, s.loading ? "Loading..." : s.running ? "No running agents." : "No panes in this tab.", FG);
+        center(f, 192, s.loading ? "Loading..." : s.running ? "No running agents." : "No agents in this tab.", FG);
         if (!s.running) control(f, FACE_CX(204), 283, 204, "Choose a tab", A_TABS, 0, s.connected);
         return;
     }
@@ -1855,7 +1855,7 @@ static void render_question(ht_scene_t *f)
     if (s.q.error[0] || !s.q.valid || !s.q.supported) {
         ui_wrap(f, FACE_CX(336), 173, 336, 5, 0, UI_FONT, DIM,
             s.q.error[0] ? s.q.error : !s.q.valid ? "Answered elsewhere." : "This question needs the desktop.");
-        control(f, 116, 346, 238, "[ on desktop ]", A_DESKTOP, 1, s.connected);
+        control(f, 116, 346, 238, "[ on computer ]", A_DESKTOP, 1, s.connected);
         return;
     }
     question_item_t *q = &s.q.item[s.q.index];
@@ -1902,7 +1902,7 @@ static void render_answer_review(ht_scene_t *f)
     heading(f, s.q.name);
     if (s.q.error[0]) {
         ui_wrap(f,FACE_CX(336),166,336,5,0,UI_FONT,DIM,s.q.error);
-        control(f, 116, 346,238,"[ on desktop ]",A_DESKTOP,1,s.connected);
+        control(f, 116, 346,238,"[ on computer ]",A_DESKTOP,1,s.connected);
         return;
     }
     question_item_t *q = &s.q.item[s.q.index];
@@ -1921,11 +1921,11 @@ static const char *settings_item(int wanted, action_kind_t *action)
 {
     static const struct { const char *label; action_kind_t action; uint32_t feature; } items[] = {
         {"Settings", A_PREFS, 0},   // the Settings screen (render_prefs); the Phone row lives there now. First, because BOOT held 2 s opens this list (menu prompt)
-        {"Inbox", A_INBOX, 0}, {"Machines", A_MACHINES, 0},
+        {"Inbox", A_INBOX, 0}, {"Computers", A_MACHINES, 0},
         {"Model", A_MODELS, 0}, {"Stop current turn", A_STOP, 0},
         {"Nap", A_NAP, 0},
-        {"Find Harness", A_FIND, CABLE_FEATURE_FORM},
-        {"New Harness", A_FORM, CABLE_FEATURE_FORM},
+        {"Find agent", A_FIND, CABLE_FEATURE_FORM},
+        {"New agent", A_FORM, CABLE_FEATURE_FORM},
         {"Latest output", A_LATEST, CABLE_FEATURE_VISIT},
         {"Select text", A_SELECT_BEGIN, CABLE_FEATURE_SELECTION},
     };
@@ -1995,7 +1995,7 @@ static void tab_name(ht_scene_t *f, const char *name, int center_x, uint16_t ink
     }
 }
 /*
- * FOCUS'S TABS AND PANES (design 2026-10-06, focus-project.html "Tabs", "Panes"): the close pill and "TABS" / "PANES"
+ * FOCUS'S TABS AND PANES (design 2026-10-06, focus-project.html "Tabs", "Panes"): the close pill and "TABS" / "AGENTS"
  * on top, Done at the foot, and between them a carousel of 320 px pages (focus_carousel). The chosen tab, in the middle, is Inter 44 in green, a name of several words
  * on two lines split where their lengths balance, each line at most 300 px; its neighbours peek in at the edges in
  * Inter 28, #6a6962 at 70 %, fading into the black (the design's two masks: the carousel's 7 % / 84 % ramps and the
@@ -2317,7 +2317,7 @@ static void render_list(ht_scene_t *f)
     if (s.view == TABS) { render_tabs(f); return; }
     if (s.view == INBOX && character.id == HT_CHARACTER_FOCUS) { render_focus_inbox(f); return; }
     if (s.view == INBOX && s.notice_count) { render_notice(f); return; }
-    const char *title = s.view == MACHINES ? "machines" : "inbox";
+    const char *title = s.view == MACHINES ? "computers" : "inbox";
     heading(f, title);
     int count = s.view == MACHINES ? s.machine_count : s.notice_count;
     if (!count) {
@@ -2382,7 +2382,7 @@ static void render_selection(ht_scene_t *f)
 {
     heading(f, selection.query[0] ? "find in output" : "select text");
     agent_t *a = active();
-    text(f, FACE_CX(324), 116, 324, selection.query[0] ? selection.query : a ? a->name : "Harness", DIM);
+    text(f, FACE_CX(324), 116, 324, selection.query[0] ? selection.query : a ? a->name : "Agent", DIM);
     if (carry.pending) {
         center(f, 207, "Picking up the text...", FG);
         center(f, 285, "Then choose who gets it", DIM);
@@ -2417,11 +2417,23 @@ static void render_selection(ht_scene_t *f)
             ht_selection_ready(&selection) && selection.excerpt[0]);
     center(f, 395, selection.pending ? "choosing..." : "drag to read", DIM);
 }
+/*
+ * The title of a form page, as the dial shows it. The desktop sends "Find Harness" for the agent finder (device_finder.dart) and "New Harness"
+ * for the new-agent form (new_harness_form.dart); this dial's word for an agent is "agent" (plan C8), and no Dart changes. Any other title (an
+ * agent's label while picking) is shown as it is. An empty title falls back by the form kind.
+ */
+static const char *form_title_shown(const char *title, bool finding)
+{
+    if (!title || !title[0]) return finding ? "Find agent" : "New agent";
+    if (!strcmp(title, "Find Harness")) return "Find agent";
+    if (!strcmp(title, "New Harness")) return "New agent";
+    return title;
+}
 static void render_form(ht_scene_t *f)
 {
     const ht_form_page_t *p = &form.page;
     bool finding = !strncmp(form.id, "find-", 5);
-    center(f, 79, p->title[0] ? p->title : !strncmp(form.id, "find-", 5) ? "Find Harness" : "New Harness", DIM);
+    center(f, 79, form_title_shown(p->title, finding), DIM);
     char count[32]; snprintf(count, sizeof count, "%d / %d", p->position, p->total);
     if (p->query[0]) text(f, FACE_CX(276), 113, 276, p->query, DIM);
     else if (p->total) center(f, 113, count, DIM);
@@ -3537,7 +3549,7 @@ static void dispatch(action_t a)
             strcmp(a.text,visit.id) || a.revision!=visit.request) break;
         if (ht_visit_back(&visit, ms())) {
             COPY(s.title, "Returning");
-            snprintf(s.message, sizeof(s.message), "%.79s", visit.label[0] ? visit.label : "Your previous pane");
+            snprintf(s.message, sizeof(s.message), "%.79s", visit.label[0] ? visit.label : "Your previous agent");
             view(MESSAGE);
         } else {
             COPY(s.title,"Return"); COPY(s.message,"The cable is busy. Try again."); view(MESSAGE);
@@ -3574,7 +3586,7 @@ static void dispatch(action_t a)
         tabs_sync();
         if (s.view!=TABS) break; // preserve a queue failure shown by tabs_sync
         if (workspace.phase!=HT_WORKSPACE_IDLE) {
-            COPY(s.title,"Switching tab"); COPY(s.message,"Opening your workspace...");
+            COPY(s.title,"Switching tab"); COPY(s.message,"Opening your tab...");
             view(MESSAGE);
         } else view(HOME);
         break;
@@ -3639,12 +3651,14 @@ static void dispatch(action_t a)
             int target = find(a.id);
             const ht_lead_t *lead = voice_lead(a.id, a.value);
             if (lead) target = -1;
+            // The two titles below are the DESKTOP's own words (device_finder.dart, new_harness_form.dart): protocol values, compared as they arrive.
+            // Only the words the dial shows change.
             if (a.value == 2) snprintf(s.voice_target, sizeof s.voice_target, "Find %.48s",
-                !strcmp(form.page.title, "Find Harness") ? "Harness" :
+                !strcmp(form.page.title, "Find Harness") ? "agent" :
                 !strcmp(form.page.title, "New Harness") ? form.page.label : form.page.title);
             else if (a.value == 7) COPY(s.voice_target, "Find in output");
             else if (a.value == 5 || a.value == 6) COPY(s.voice_target, draft.page.name);
-            else COPY(s.voice_target, lead ? lead->project : target >= 0 ? s.agents[target].name : "harness");
+            else COPY(s.voice_target, lead ? lead->project : target >= 0 ? s.agents[target].name : "agent");
             COPY(s.voice_engine, lead ? lead->engine : target >= 0 && a.value != 2 && a.value != 5 && a.value != 6 && a.value != 7 ?
                 s.agents[target].engine : "");
             s.voice_started = ms();
@@ -3715,7 +3729,7 @@ static void dispatch(action_t a)
         if (!s.connected || s.voice_open) break;
         if (!cable_client_supports(CABLE_FEATURE_FORM)) {
             if (a.kind == A_FIND) view(AGENTS);
-            else { COPY(s.title,"New Harness"); COPY(s.message,"Open New Harness on your computer."); view(MESSAGE); }
+            else { COPY(s.title,"New agent"); COPY(s.message,"Open Harness on your computer to start a new agent."); view(MESSAGE); }
             break;
         }
         if (!form.id[0]) {
@@ -5597,7 +5611,7 @@ static void notice_add(const char *id, const char *name, const char *machine, co
     cable_notif_t *n = &s.notice[pos];
     memset(n, 0, sizeof(*n));
     COPY(n->agent_id, id);
-    COPY(n->name, name && *name ? name : "Harness");
+    COPY(n->name, name && *name ? name : "Agent");
     COPY(n->machine, machine);
     recap_preview(n->summary, sizeof n->summary, recap);
     n->question = question;
@@ -5941,7 +5955,7 @@ static void swarms_apply(void)
         ht_tab_carousel_reset(&tab_carousel, tabs_total(), index >= 0 ? index : tab_index_here());
     }
     if (workspace.phase!=HT_WORKSPACE_IDLE && workspace_index(workspace.pending)<0) {
-        workspace_failed("That workspace is gone. Choose another.");
+        workspace_failed("That tab is gone. Choose another.");
     } else if (ht_workspace_selected(&workspace,s.selected_tab)) {
         // Even identical/empty tabs need a fresh roster to acknowledge landing.
         // A narrow refresh forces that snapshot without replaying other state.
@@ -6228,7 +6242,7 @@ void ui_machine_select_error(const char *id, const char *code, const char *messa
     }
     s.pending_machine[0] = 0;
     display_unlock();
-    ui_show_error("Machine", message);
+    ui_show_error("Computer", message);
 }
 void ui_tick_machine_select(void)
 {
@@ -6236,7 +6250,7 @@ void ui_tick_machine_select(void)
     if (s.pending_machine[0] && (int32_t)(ms() - s.machine_deadline) >= 0) {
         s.pending_machine[0] = 0;
         COPY(s.title, "No response");
-        COPY(s.message, "The machine did not answer. Please try again.");
+        COPY(s.message, "The computer did not answer. Please try again.");
         view(MESSAGE);
     }
     display_unlock();
@@ -6418,7 +6432,7 @@ static bool draft_page(const cJSON *p, ht_draft_page_t *page)
     COPY(page->text, text_->valuestring); COPY(page->agent, agent->valuestring);
     const cJSON *name = cJSON_GetObjectItemCaseSensitive(p, "name"),
         *context = cJSON_GetObjectItemCaseSensitive(p, "context");
-    COPY(page->name, cJSON_IsString(name) ? name->valuestring : "Harness");
+    COPY(page->name, cJSON_IsString(name) ? name->valuestring : "Agent");
     if (cJSON_IsString(context)) COPY(page->context, context->valuestring);
     page->position = position->valueint; page->total = total->valueint;
     page->can_undo = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(p, "canUndo"));
@@ -6575,7 +6589,7 @@ void ui_visit_state(const cJSON *p)
             } else {
                 COPY(s.pending_focus, agent->valuestring);
                 COPY(s.title, "On your desktop");
-                COPY(s.message, "Waiting for that pane...");
+                COPY(s.message, "Waiting for that agent...");
                 view(MESSAGE);
             }
             if (cJSON_IsString(note) && note->valuestring[0]) {
@@ -6640,7 +6654,7 @@ void ui_enter_remote_offline(void)
 void ui_enter_link_guide(void)
 {
     ui_show_error(
-        "Link this machine",
+        "Link this computer",
         "On that computer:\nharness link create\n\nOn this computer:\nharness link import");
 }
 void ui_leave_remote_offline_loading(void) { ui_enter_boot_loading(); }
@@ -6653,9 +6667,9 @@ void ui_show_pairing(const char *code, int seconds)
 void ui_show_e2ee_pair(const char *code, int seconds)
 {
     (void)seconds;
-    ui_show_error("Pair machine", code);
+    ui_show_error("Pair computer", code);
 }
-void ui_show_e2ee_paired(const char *fingerprint) { ui_show_error("Machine paired", fingerprint); }
+void ui_show_e2ee_paired(const char *fingerprint) { ui_show_error("Computer paired", fingerprint); }
 void ui_show_unpaired(void) { ui_enter_boot_loading(); }
 void ui_show_ota_restarting(void)
 {

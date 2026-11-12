@@ -69,12 +69,12 @@ enum { MARK_SIZE = 56, TITLE_BOTTOM = HT_ARC_Y + HT_ARC_CELL_HEIGHT, COL_X = 41,
  * after a turn, on another agent, back from voice — and never the same line twice running (owner,
  * 2026-10-02). It holds while that face stays up, so a redraw never swaps it. Each fits two lines of
  * inter_36 at EMPTY_W. The lines that teach the dial come up more often (owner, 2026-10-03): a line
- * listed k times is k times as likely — "Hold the button to talk" 10, "Hold to switch tabs" 5, "Tap the name to
- * switch panes" 5, every other line once. Voice starts only from the BOOT hold (owner, 2026-11-11), so the talk line says so.
+ * listed k times is k times as likely — "Hold the button to talk" 10, "Hold to switch tabs" 5, "Tap name to
+ * switch agents" 5, every other line once. Voice starts only from the BOOT hold (owner, 2026-11-11), so the talk line says so.
  */
 #define HOLD_TO_TALK "Hold the button to talk"
 #define HOLD_FOR_TABS "Hold to switch tabs"
-#define TAP_THE_NAME "Tap the name to switch panes"
+#define TAP_THE_NAME "Tap name to switch agents"
 static const char *const RESTING[] = {
     "Let's build it", "Do anything", "What's next?", "Ready when you are",
     "Say the word", "Make it happen", "Start something",
@@ -85,12 +85,12 @@ static const char *const RESTING[] = {
 };
 /*
  * THE RELAXING FACE'S LINES (owner, 2026-10-09: mockup/relaxing.html): one short line on the lower arc, two or three
- * words, picked the same way — "Hold the button to talk" 10, "Hold for tabs" 5, "Tap name for panes" 5, every other line once.
+ * words, picked the same way — "Hold the button to talk" 10, "Hold for tabs" 5, "Tap name for agents" 5, every other line once.
  * Each must fit the lower arc (test_character.c: ht_arc_measure <= HT_ARC_SPAN for every line in the list).
  */
 #define HOLD_TALK "Hold the button to talk"
 #define HOLD_TABS "Hold for tabs"
-#define TAP_NAME "Tap name for panes"
+#define TAP_NAME "Tap name for agents"
 static const char *const RELAXING[] = {
     HOLD_TALK, HOLD_TALK, HOLD_TALK, HOLD_TALK, HOLD_TALK, HOLD_TALK, HOLD_TALK, HOLD_TALK, HOLD_TALK, HOLD_TALK,
     HOLD_TABS, HOLD_TABS, HOLD_TABS, HOLD_TABS, HOLD_TABS,
