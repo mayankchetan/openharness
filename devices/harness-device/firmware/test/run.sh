@@ -149,6 +149,9 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
 cc -std=c11 -Wall -Wextra -Werror -O1 \
    -o "$out/test_cable_machines" "$here/test_cable_machines.c" "$here/../main/cable_machines.c"
 "$out/test_cable_machines"
+# The "All agents" page model: request serial, stale replies, bounds, step (dial-reach T6)
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}"    -o "$out/test_cable_running" "$here/test_cable_running.c" "$here/../main/cable_running.c"
+"$out/test_cable_running"
 
 # The host's debug commands (screenshot chunking and checksum, round-face validation, gesture sampler, the
 # cable-task/touch-task hand-off on real threads). The JSON half is below, with the other cJSON tests.

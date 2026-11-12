@@ -27,6 +27,9 @@ enum {
     // The daemon keeps this dial's phone-mode key and takes the key-only net.set and net.mode 2 (docs/specs/cable-ble-link.md). Offered only over the
     // USB cable, to a dial whose hello said ble "v1" (an image built with the BLE link). The dial refuses both forms without it.
     CABLE_FEATURE_BLE = 1u << 10,
+    // The daemon pages the running agents of this computer (running.get / running.page, cli/src/cable/runningAgents.ts). Offered only to a dial whose
+    // hello said running "v1". It gates the "All agents" menu row: without it the dial asks for no page.
+    CABLE_FEATURE_RUNNING = 1u << 11,
 };
 
 // Does this image carry the BLE link? DEVICE_BLE_LINK is defined by main/CMakeLists.txt exactly when NimBLE is in the build (CONFIG_BT_NIMBLE_ENABLED).

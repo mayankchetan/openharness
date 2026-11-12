@@ -86,4 +86,12 @@ assert 'A_TABS' in legacy_pill and '!s.running' in legacy_pill, 'the legacy pill
 
 assert 'harnesses' not in panes and 'harnesses' not in agents, 'C8: agents, not harnesses'
 assert not re.search(r'"[^"\n]*[Hh]arnesses[^"\n]*"', ui + client), 'no on-screen text says harnesses'
-print('running marker and empty text: hello, reader, snapshot, ui_fleet_set arity, both faces, no pill, wording PASS')
+# --- T6: the page size is the daemon's (cli/src/cable/runningAgents.ts RUNNING_PAGE_SIZE) -----------------------------------------------------
+ts = text(fw / '../../../cli/src/cable/runningAgents.ts')
+size = re.search(r'export const RUNNING_PAGE_SIZE\s*=\s*(\d+)', ts)
+assert size, 'RUNNING_PAGE_SIZE not found in runningAgents.ts'
+rows = re.search(r'#define\s+CABLE_RUNNING_ROWS\s+(\d+)', text(main / 'cable_running.h'))
+assert rows and rows.group(1) == size.group(1), 'CABLE_RUNNING_ROWS must equal RUNNING_PAGE_SIZE (%s)' % size.group(1)
+assert '"cable_running.c"' in text(main / 'CMakeLists.txt'), 'cable_running.c is in the component sources'
+assert 'CABLE_FEATURE_RUNNING' in text(main / 'cable_features.h') and '"running.list"' in text(main / 'cable_features.c')
+print('running marker and empty text: hello, reader, snapshot, ui_fleet_set arity, both faces, no pill, wording, page size and feature name PASS')

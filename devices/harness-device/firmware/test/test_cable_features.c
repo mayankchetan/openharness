@@ -53,6 +53,17 @@ int main(void)
     check("{\"features\":[\"ble\"]}", CABLE_FEATURE_BLE);
     check("{\"features\":[\"net\",\"ble\"]}", CABLE_FEATURE_NET | CABLE_FEATURE_BLE);
     check("{\"features\":[\"Ble\",\"ble.set\",\"bluetooth\"]}", 0);
+    // The running list (dial-reach T6): bit 11, named "running.list". Wire-visible to the daemon, so its value is pinned here too.
+    assert(CABLE_FEATURE_RUNNING == (1u << 11));
+    check("{\"features\":[\"running.list\"]}", CABLE_FEATURE_RUNNING);
+    check("{\"features\":[\"running.list\",\"running.list\"]}", CABLE_FEATURE_RUNNING);
+    check("{\"features\":[\"Running.list\",\"running\",\"running.list.2\",\"RUNNING.LIST\"]}", 0);
+    check("{\"features\":[\"form\",\"running.list\",\"ble\"]}", CABLE_FEATURE_FORM | CABLE_FEATURE_RUNNING | CABLE_FEATURE_BLE);
+    // The daemon's welcome lists at most 13 names with this feature; the parse limit is 16 (more gives 0, so a long list would drop every feature).
+    check("{\"features\":[\"form\",\"selection\",\"visit\",\"voice.draft\",\"question.review\",\"agents.refresh\",\"settings\",\"debug\","
+          "\"voice.adpcm\",\"net\",\"ble\",\"running.list\",\"future\"]}",
+          CABLE_FEATURE_FORM | CABLE_FEATURE_SELECTION | CABLE_FEATURE_VISIT | CABLE_FEATURE_DRAFT | CABLE_FEATURE_QUESTIONS | CABLE_FEATURE_AGENTS_REFRESH |
+          CABLE_FEATURE_SETTINGS | CABLE_FEATURE_DEBUG | CABLE_FEATURE_ADPCM | CABLE_FEATURE_NET | CABLE_FEATURE_BLE | CABLE_FEATURE_RUNNING);
     // this host test is built without DEVICE_BLE_LINK: the image has no BLE link, and says so
     assert(!cable_ble_link_built());
     static const char *names[] = {"form", "selection", "visit", "voice.draft", "question.review", "agents.refresh"};

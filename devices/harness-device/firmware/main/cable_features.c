@@ -16,6 +16,7 @@ uint32_t cable_features_parse(const cJSON *welcome)
         {"voice.adpcm", CABLE_FEATURE_ADPCM},
         {"net", CABLE_FEATURE_NET},
         {"ble", CABLE_FEATURE_BLE},
+        {"running.list", CABLE_FEATURE_RUNNING},
     };
     uint32_t result = 0;
     const cJSON *item;

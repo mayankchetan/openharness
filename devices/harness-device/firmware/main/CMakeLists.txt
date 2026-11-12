@@ -43,6 +43,7 @@ set(BOARD_SRCS
     "net_link.c"
     "cable_client.c"
     "cable_machines.c"
+    "cable_running.c"
     "cable_scroll.c"
     "cable_json_guard.c"
     "cable_features.c"
