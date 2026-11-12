@@ -265,6 +265,8 @@ python3 "$here/test_menu_screen.py"
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -o "$out/test_menu_list" "$here/test_menu_list.c" "$here/../main/ui/habitat/menu_list.c"
 "$out/test_menu_list"
 python3 "$here/test_menu_groups.py"
+# The Quiet row (minutes left, once-a-minute repaint) and the moon mark on every face (dial-reach T11)
+python3 "$here/test_quiet.py"
 # Wifi-first work (T5): the permanent link icon (4:30 on the glass): run counts, the skip rule, colours, footprint, no pixel shared with the battery rim (every
 # percent, with the number), the notice line or the lower-arc status lines the dial shows; and the wiring and the "no tap to talk" rule as source tests.
 cc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Wno-format-truncation -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" -I "$here/../main" -o "$out/test_link_icon" \

@@ -219,6 +219,28 @@ int main(void)
         check(m == 10 && same(L, m, "L01L3L789a"), "RUNNING alone: ON COMPUTER holds only All agents");
     }
 
+    // ── the Quiet row's minutes (T11): whole minutes left, rounded UP, 1..15, 0 once the time is over ────────
+    {
+        const uint32_t MIN = 60000u, t = 1000000u;
+        check(menu_quiet_minutes(t, t + 15 * MIN) == 15, "quiet: 15 min left reads 15");
+        check(menu_quiet_minutes(t, t + 14 * MIN + 1) == 15, "quiet: 14 min 1 ms left still reads 15 (rounded up)");
+        check(menu_quiet_minutes(t, t + 14 * MIN) == 14, "quiet: exactly 14 min reads 14");
+        check(menu_quiet_minutes(t, t + MIN + 1) == 2, "quiet: 60001 ms reads 2");
+        check(menu_quiet_minutes(t, t + MIN) == 1, "quiet: 60000 ms reads 1");
+        check(menu_quiet_minutes(t, t + 1) == 1, "quiet: 1 ms reads 1, never 0 while time is left");
+        check(menu_quiet_minutes(t, t) == 0, "quiet: no time left reads 0");
+        check(menu_quiet_minutes(t, t - 1) == 0 && menu_quiet_minutes(t, t - 20 * MIN) == 0, "quiet: past the end reads 0");
+        check(menu_quiet_minutes(0xFFFFFF00u, 0xFFFFFF00u + 5 * MIN) == 5, "quiet: the 32-bit clock wraps (until is below now numerically)");
+        check(menu_quiet_minutes(0xFFFFFF00u + 5 * MIN, 0xFFFFFF00u) == 0, "quiet: wrapped and past the end reads 0");
+        check(menu_quiet_minutes(t, t + 16 * MIN) == 15 && menu_quiet_minutes(t, t + 100 * MIN) == 15, "quiet: never above 15");
+        int ok = 1;
+        for (uint32_t left = 1; left <= 15 * MIN; left += 977) {
+            int m = menu_quiet_minutes(t, t + left);
+            if (m < 1 || m > 15 || m != (int)((left + MIN - 1) / MIN)) ok = 0;
+        }
+        check(ok, "quiet: 1..15 and the ceiling of the minutes, over the whole run");
+    }
+
     printf("  %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

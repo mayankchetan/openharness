@@ -38,3 +38,7 @@ int menu_scroll(const menu_line_t *lines, int n, int rows, int offset, int steps
 
 // The definition index of the row drawn at `row` (0-based) of the window starting at `offset`; -1 for a label, a row past the end or an offset out of range.
 int menu_item_at(const menu_line_t *lines, int n, int offset, int row);
+
+// The Quiet row's count: whole minutes left until `until_ms`, rounded UP and kept within 1..15; 0 when no time is left. The dial has no wall clock (only its
+// millisecond timer), so the row says "Quiet NN min left", never "until HH:MM". Wrap-safe: the two times are 32-bit milliseconds on the same clock.
+int menu_quiet_minutes(uint32_t now_ms, uint32_t until_ms);

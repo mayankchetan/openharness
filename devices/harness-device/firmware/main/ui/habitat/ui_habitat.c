@@ -261,6 +261,7 @@ static EXT_RAM_BSS_ATTR struct {
     bool muted;
     int pet_pose;
     uint32_t pet_until, nap_until, last_celebration;
+    int nap_shown;   // the Quiet row's minute count as last painted or ticked (the tick repaints only when it changes)
     cable_swarm_t tabs[SWARMS_MAX];
     int tab_count, tab_drag;
     char selected_tab[ID_MAX];
@@ -1506,6 +1507,14 @@ static void render_swarm_face(ht_scene_t *f)
     s.hits[s.hit_count++] = focus_face ? (hit_t){{0, 66, HT_WIDTH, HT_HEIGHT - 66}, A_PET, 0, true}
                                        : (hit_t){{33, 66, 400, 316}, A_PET, 0, true};
 }
+// The moon mark: a crescent from two discs (a disc in FG, and a disc in BG a few pixels up and right that cuts it), top right of the glass. Drawn while Quiet is on.
+// The spot is free on every face: the curved name is on the top arc, the creature in the middle, the bell pill at the foot (test_quiet.py scans every character,
+// engine and name). It is not a control: no hit.
+static void render_moon(ht_scene_t *f)
+{
+    ht_box(f, 352, 122, 30, 30, 15, FG, FG);
+    ht_box(f, 362, 118, 28, 28, 14, BG, BG);
+}
 static void render_home(ht_scene_t *f)
 {
     s.caption_arc = (ht_rect_t){0};
@@ -1601,6 +1610,7 @@ static void render_home(ht_scene_t *f)
         f_.notice_ms = bell ? s.notice_ms : 0;
     }
     ht_character_face(f, &character, &f_, ACCENT, recap);
+    if (s.nap) render_moon(f);   // Quiet is on: a moon on the face
     s.pet_next_ms = focus_face ? ht_focus_pet_next_ms(&f_, recap) : 0;
     // The working face says it with the pet's bell bubble; every other face keeps the pill at 400.
     ht_rect_t bubble = {0};
@@ -2728,6 +2738,7 @@ static void render_settings(ht_scene_t *f)
     menu_line_t lines[MENU_MAX_LINES];
     const int n = settings_lines(lines);
     s.offset = menu_clamp(lines, n, TAB_ROWS, s.offset);
+    char quiet[24];   // "Quiet 15 min left": the longest, 17 characters (the terminal skin's 17 px cells fill 289 of the row's 300 px)
     for (int row = 0; row < TAB_ROWS && s.offset + row < n; row++) {
         const menu_line_t line = lines[s.offset + row];
         const int y = TAB_TOP + row * TAB_ROW_HEIGHT;
@@ -2737,7 +2748,10 @@ static void render_settings(ht_scene_t *f)
         }
         const action_kind_t action = menu_items[line.item].action;
         const char *label = menu_items[line.item].label;
-        if (action == A_NAP && s.nap) label = "Wake";
+        if (action == A_NAP && s.nap) {   // the dial has no wall clock, so the row counts minutes left (no "until HH:MM")
+            const int minutes = menu_quiet_minutes(ms(), s.nap_until);
+            if (minutes >= 1) { snprintf(quiet, sizeof quiet, "Quiet %d min left", minutes); label = quiet; }
+        }
         bool enabled = action == A_INBOX || action == A_NAP || action == A_PHONE || action == A_PREFS ||
             (s.connected && ((action != A_STOP && action != A_MODELS && action != A_SELECT_BEGIN && action != A_LATEST) ||
                 (active() && (action != A_STOP || active()->busy) && (action != A_LATEST || !visit.pending))));
@@ -3775,8 +3789,10 @@ static void dispatch(action_t a)
         }
         break;
     case A_NAP:
+        // The "Quiet 15 min" row. NOT s.quiet: that is the desktop's own setting (creature animations off). This is a rest of 15 minutes: the face is asleep, working
+        // captions are off, the tick ends it, and a tap on the face or the start of voice ends it too. A second tap on the row ends it at once.
         s.nap = !s.nap;
-        s.nap_until = ms() + 15 * 60 * 1000;
+        if (s.nap) { s.nap_until = ms() + 15 * 60 * 1000; s.nap_shown = 15; }
         change();
         break;
     case A_FIND:
@@ -4628,6 +4644,29 @@ void habitat_touch_cancel(void)
     if (visible) change();
 }
 bool habitat_is_voice_view(void) { return s.view == VOICE; }
+// The Quiet rest (s.nap). Each tick: the end of the rest clears it (once); while the menu is up, a change of the minute count repaints once. The tick runs
+// at about 10 Hz, and a repaint at that rate is what this avoids: `s.nap_shown` is the count last ticked, so the screen is painted once a minute.
+static void nap_tick(uint32_t now)
+{
+    if (!s.nap) return;
+    if ((int32_t)(now - s.nap_until) >= 0) {
+        s.nap = false;
+        change();
+        return;
+    }
+    if (s.view == SETTINGS) {
+        const int minutes = menu_quiet_minutes(now, s.nap_until);
+        if (minutes != s.nap_shown) { s.nap_shown = minutes; change(); }
+    }
+}
+// The next moment the row's minute count changes (the renderer sleeps until then); 0 when the row is not on screen or in the last minute (the end of the rest
+// is its own deadline).
+static uint32_t nap_next_minute_ms(uint32_t now)
+{
+    if (!s.nap || s.view != SETTINGS) return 0;
+    const int minutes = menu_quiet_minutes(now, s.nap_until);
+    return minutes > 1 ? s.nap_until - (uint32_t)(minutes - 1) * 60000u : 0;
+}
 uint32_t habitat_next_wake_ms(void)
 {
 #ifdef DEVICE_CREATURE_GALLERY
@@ -4678,7 +4717,7 @@ uint32_t habitat_next_wake_ms(void)
         uint32_t left = elapsed >= due ? 1 : due - elapsed;
         if (left < delay) delay = left;
     }
-    uint32_t deadlines[] = {s.pet_pose ? s.pet_until : 0, s.nap ? s.nap_until : 0,
+    uint32_t deadlines[] = {s.pet_pose ? s.pet_until : 0, s.nap ? s.nap_until : 0, nap_next_minute_ms(now),
                             s.voice_retry_until, s.battery_pct_until, s.restart_until, s.note_until};
     for (unsigned i = 0; i < sizeof(deadlines) / sizeof(deadlines[0]); i++)
         if (deadlines[i]) {
@@ -4757,10 +4796,7 @@ void habitat_tick(void)
         s.pet_pose = 0;
         change();
     }
-    if (s.nap && (int32_t)(now - s.nap_until) >= 0) {
-        s.nap = false;
-        change();
-    }
+    nap_tick(now);
     if (s.voice_open) {
         display_bump_activity();
         uint32_t second = (now - s.voice_started) / 1000;

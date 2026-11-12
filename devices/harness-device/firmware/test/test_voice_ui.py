@@ -36,9 +36,10 @@ static bool cable_client_supports(uint32_t features) { return (host_features & f
 #include "draft.h"
 #include "workspace.h"
 #include "supertab.h"
+#include "menu_list.h"
 #include "battery_rim.h"
 #define EXT_RAM_BSS_ATTR
-enum { HOME, AGENTS, AGENT, COMPANION, VOICE, MESSAGE, SELECTION, FORM, QUESTION, CHOICE, ANSWER_REVIEW, DRAFT, DRAFT_OPTIONS, INBOX, ABOUT, PREFS };
+enum { HOME, AGENTS, AGENT, COMPANION, VOICE, MESSAGE, SELECTION, FORM, QUESTION, CHOICE, ANSWER_REVIEW, DRAFT, DRAFT_OPTIONS, INBOX, ABOUT, PREFS, SETTINGS };
 enum { A_VOICE, A_VOICE_STOP, A_VOICE_ABORT };
 enum { VOICE_CMD_NONE, VOICE_CMD_GOAL };
 typedef int view_t;
@@ -70,6 +71,7 @@ static struct {
     struct { bool open; } menu;
     bool prefs_dirty, prefs_inflight;
     uint8_t prefs_fails;
+    int nap_shown;   /* the Quiet row's minute last ticked (nap_tick) */
     uint32_t pet_until, nap_until, voice_retry_until, voice_started, voice_wait_until, voice_generation, voice_question_revision, voice_draft_revision;
     int voice_question_index, battery_rim_seen, link_icon_seen;
     uint32_t battery_wake_seen, battery_pct_until;
@@ -145,7 +147,7 @@ dispatch = source.split('case A_VOICE:\n', 1)[1].split('case A_PET:', 1)[0]
 harness += 'static void dispatch(action_t a) { switch (a.kind) { case A_VOICE:\n' + dispatch + '} }\n'
 worker = source.split('static void worker(', 1)[1].split('case A_VOICE:\n', 1)[1].split('case A_STOP_YES:', 1)[0]
 harness += 'static void work(action_t a) { switch (a.kind) { case A_VOICE:\n' + worker + '} }\n'
-for name in ['habitat_tick', 'ui_set_connected', 'ui_show_error', 'ui_cable_toast',
+for name in ['nap_tick', 'habitat_tick', 'ui_set_connected', 'ui_show_error', 'ui_cable_toast',
              'ui_voice_error', 'ui_voice_routed', 'ui_voice_route_abort']:
     harness += function(name)
 harness += r'''
@@ -374,6 +376,6 @@ with tempfile.TemporaryDirectory(prefix='harness-voice-ui-') as directory:
     (root / 'voice_ui.c').write_text(harness)
     subprocess.run(['cc', '-std=c11', '-D_POSIX_C_SOURCE=200809L', '-Wall', '-Wextra', '-Werror', '-O1', '-g',
                     '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds'),
-                    '-I', str(native), str(root / 'voice_ui.c'), str(native / 'selection.c'), str(native / 'carry.c'), str(native / 'visit.c'), str(native / 'form.c'), str(native / 'draft.c'), str(native / 'workspace.c'), str(native / 'supertab.c'),
+                    '-I', str(native), str(root / 'voice_ui.c'), str(native / 'selection.c'), str(native / 'carry.c'), str(native / 'visit.c'), str(native / 'form.c'), str(native / 'draft.c'), str(native / 'workspace.c'), str(native / 'supertab.c'), str(native / 'menu_list.c'),
                     '-o', str(root / 'voice_ui')], check=True)
     subprocess.run([str(root / 'voice_ui')], check=True)

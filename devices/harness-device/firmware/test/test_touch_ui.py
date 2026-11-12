@@ -2854,6 +2854,13 @@ int main(int argc, char **argv) {
     }
     reset(); s.straight_title=true; scene_take(); portrait(dir,"straight-title");
     reset(); s.nap=true; scene_take(); portrait(dir,"asleep");
+    {   // the moon mark (dial-reach T11): the last two runs of the asleep face are its two discs, and no earlier run is under them
+        assert(scene.count>=2);
+        ht_rect_t d0=ht_run_bounds(&scene.runs[scene.count-2]), d1=ht_run_bounds(&scene.runs[scene.count-1]);
+        for(int i=0;i<scene.count-2;i++) { ht_rect_t r=ht_run_bounds(&scene.runs[i]); if(r.w<=0||r.h<=0) continue;
+            assert(!(d0.x<r.x+r.w && r.x<d0.x+d0.w && d0.y<r.y+r.h && r.y<d0.y+d0.h));
+            assert(!(d1.x<r.x+r.w && r.x<d1.x+d1.w && d1.y<r.y+r.h && r.y<d1.y+d1.h)); }
+    }
     reset(); s.pet_pose=3; scene_take(); portrait(dir,"done");
     reset(); s.pet_pose=1; scene_take(); portrait(dir,"booped");
     reset(); waiting_count=1; s.notice_count=1; scene_take(); portrait(dir,"attention");

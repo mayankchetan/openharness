@@ -60,3 +60,11 @@ int menu_item_at(const menu_line_t *lines, int n, int offset, int row)
     if (line >= n) return -1;
     return lines[line].item;   // -1 for a label
 }
+
+int menu_quiet_minutes(uint32_t now_ms, uint32_t until_ms)
+{
+    const int32_t left = (int32_t)(until_ms - now_ms);
+    if (left <= 0) return 0;
+    const int64_t minutes = ((int64_t)left + 59999) / 60000;
+    return minutes > 15 ? 15 : (int)minutes;
+}
