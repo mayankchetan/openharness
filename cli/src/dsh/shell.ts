@@ -7,6 +7,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { harnessNodePrelude, interactiveEngineShell } from '../lib/engineLaunch.js'
 import { managedNodePath } from '../lib/nodeRuntime.js'
+import { ownProcessGroup } from '../lib/windows/noWindow.js'
 
 export interface DshCommandOptions {
   cwd: string
@@ -87,8 +88,9 @@ export function spawnDshCommand(script: string, opts: { cwd: string; env?: Recor
     cwd: opts.cwd,
     env: { ...process.env, ...(opts.env ?? {}) },
     stdio: ['ignore', 'pipe', 'pipe'],
-    // Its own process group, so stopping it stops what it started (`sh -c node …`).
-    detached: true,
+    // Its own process group, so stopping it stops what it started (`sh -c node …`). On Windows there are no groups, and
+    // a detached shell would flash a console window for each program it starts (docs/windows-rules.md).
+    ...ownProcessGroup(),
   })
 }
 
