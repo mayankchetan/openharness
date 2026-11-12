@@ -40,14 +40,20 @@ uint32_t power_sleep_wait_ms(pp_poller_t who, uint32_t awake_ms);
 uint32_t power_sleep_ptt_poll_ms(uint32_t awake_ms);
 bool power_sleep_relaxed(void);
 #if S2_WIFI_OFF
-// True while the dial wants its Wi-Fi radio off (S2_WIFI_OFF: 5 minutes of dark battery time, power_policy.h pp_wifi_off_wanted). Any task; net_link.c reads it.
+// True while the dial wants its Wi-Fi radio off (S2_WIFI_OFF: 5 minutes of dark battery time, 2 with Battery saver, power_policy.h pp_wifi_off_wanted). Any task; net_link.c reads it.
 bool power_sleep_wifi_off_wanted(void);
+// The minutes of dark battery time before the radio parks (S2_WIFI_OFF_MIN by default; the Battery saver row sets 2). 0 puts the default back. Any task. Only the
+// moment the park STARTS moves: what the mode switch does about a parked radio (net_link_radio_waking, mode_glue.c) does not depend on it.
+void power_sleep_set_wifi_park_min(unsigned minutes);
+unsigned power_sleep_wifi_park_min(void);
 // The wake poke: called (from the screen hook, or from the ptt task when the wish ends) whenever the radio is wanted back, so net_link need not poll for it.
 // It must only notify a task; it runs on any task and takes no lock.
 void power_sleep_set_wake_cb(void (*cb)(void));
 #else
 static inline bool power_sleep_wifi_off_wanted(void) { return false; }
 static inline void power_sleep_set_wake_cb(void (*cb)(void)) { (void)cb; }
+static inline void power_sleep_set_wifi_park_min(unsigned minutes) { (void)minutes; }
+static inline unsigned power_sleep_wifi_park_min(void) { return S2_WIFI_OFF_MIN; }
 #endif
 #ifdef DEVICE_S2_DIAG
 // Wake diagnosis image only (s2_diag.h): while in S2, log the wake causes since the last call, esp_pm_dump_locks and esp_timer_dump. Render task, once per alive period.
@@ -64,6 +70,8 @@ uint32_t power_sleep_slept_ms(void);
 // THE BATTERY SCREEN POLICY (power_policy.h pp_screen_level): what the screen should be after `idle_ms` without a touch. On external
 // power: full, then off after 300 s. On the battery (policy S1 or S2): full, dim after 30 s, off after 60 s.
 pp_screen_t power_sleep_screen_level(uint32_t idle_ms);
+// Settings > Screen off and Battery saver: the time to dark in ms. 0 is the numbers above. Dim, where there is one, comes at half of it. Any task.
+void power_sleep_set_screen_off_ms(uint32_t ms);
 
 // D1, "PWR only" (power_policy.h pp_screen_input_allowed): false while the dial runs on its battery (policy S1 or S2) and the screen is
 // off. The touch task then drops the contact instead of waking the screen, and the ptt task ignores BOOT. True on external power and
@@ -75,6 +83,7 @@ bool power_sleep_input_allowed(void);
 static inline void power_sleep_init(void) {}
 // Without the flag the screen goes off after 300 s idle, as it always did (the same number as PP_SCREEN_OFF_USB_MS).
 static inline pp_screen_t power_sleep_screen_level(uint32_t idle_ms) { return idle_ms > PP_SCREEN_OFF_USB_MS ? PP_SCREEN_OFF : PP_SCREEN_FULL; }
+static inline void power_sleep_set_screen_off_ms(uint32_t ms) { (void)ms; }   // no battery policy in this image: the 300 s above stays
 static inline void power_sleep_poll(void) {}
 static inline void power_sleep_render_service(void) {}
 static inline void power_sleep_hold(uint32_t bits) { (void)bits; }
@@ -85,5 +94,7 @@ static inline bool power_sleep_relaxed(void) { return false; }
 static inline bool power_sleep_input_allowed(void) { return true; }
 static inline bool power_sleep_wifi_off_wanted(void) { return false; }
 static inline void power_sleep_set_wake_cb(void (*cb)(void)) { (void)cb; }
+static inline void power_sleep_set_wifi_park_min(unsigned minutes) { (void)minutes; }
+static inline unsigned power_sleep_wifi_park_min(void) { return S2_WIFI_OFF_MIN; }
 
 #endif

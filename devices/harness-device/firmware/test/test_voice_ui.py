@@ -38,7 +38,7 @@ static bool cable_client_supports(uint32_t features) { return (host_features & f
 #include "supertab.h"
 #include "battery_rim.h"
 #define EXT_RAM_BSS_ATTR
-enum { HOME, AGENTS, AGENT, COMPANION, VOICE, MESSAGE, SELECTION, FORM, QUESTION, CHOICE, ANSWER_REVIEW, DRAFT, DRAFT_OPTIONS, INBOX };
+enum { HOME, AGENTS, AGENT, COMPANION, VOICE, MESSAGE, SELECTION, FORM, QUESTION, CHOICE, ANSWER_REVIEW, DRAFT, DRAFT_OPTIONS, INBOX, ABOUT, PREFS };
 enum { A_VOICE, A_VOICE_STOP, A_VOICE_ABORT };
 enum { VOICE_CMD_NONE, VOICE_CMD_GOAL };
 typedef int view_t;
@@ -56,12 +56,14 @@ typedef struct { int8_t colour; } ui_companion_t;
 static ui_companion_t desktop_identity;
 static bool companion_celebrating;
 static void select_companion(void) {}
+static void bright_drag_end(void) {}   /* input_cancel ends a Brightness drag; no drag here */
 static ht_tab_carousel_t tab_carousel;
 #define PANE_PITCH 60
 static struct {
     bool quick_open, coasting, ready, connected, loading, nap, voice_open, voice_start_pending, voice_waiting, voice_carry, voice_review, voice_review_preview, voice_draft_append, voice_search, touch_down, touch_cancelled;
     int pet_pose, view, voice_return, offset, pressed, active, pane_pos;
-    uint32_t error_until;
+    uint32_t error_until, restart_until, note_until, about_at;   /* the Settings screen's expiries (habitat_tick) */
+    char note[40];
     uint32_t pet_until, nap_until, voice_retry_until, voice_started, voice_wait_until, voice_generation, voice_question_revision, voice_draft_revision;
     int voice_question_index, battery_rim_seen, link_icon_seen;
     uint32_t battery_wake_seen, battery_pct_until;

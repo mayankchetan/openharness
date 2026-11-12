@@ -87,6 +87,33 @@ void config_save_brightness(uint8_t level)
     ESP_LOGI(TAG, "save_brightness 0x%02x: %s", level, ok ? "ok" : "FAILED");
 }
 
+void config_load_prefs(config_prefs_t *out)
+{
+    memset(out, 0, sizeof *out);
+    out->night_bright = 100;
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return;
+    uint8_t v;
+    if (nvs_get_u8(h, "pf_night", &v) == ESP_OK) out->night = v == 1;
+    if (nvs_get_u8(h, "pf_saver", &v) == ESP_OK) out->saver = v == 1;
+    if (nvs_get_u8(h, "pf_nbr", &v) == ESP_OK) out->night_bright = v > 100 ? 100 : v;
+    if (nvs_get_u8(h, "pf_nmu", &v) == ESP_OK) out->night_muted = v == 1;
+    if (nvs_get_u8(h, "pf_scr", &v) == ESP_OK) out->timer = v <= 4 ? v : 0;   // five choices: 0 the policy's own, 1..4 30 s to 5 min
+    nvs_close(h);
+}
+
+bool config_save_prefs(const config_prefs_t *in)
+{
+    nvs_handle_t h;
+    if (open_rw(&h) != ESP_OK) return false;
+    bool ok = nvs_set_u8(h, "pf_night", in->night ? 1 : 0) == ESP_OK && nvs_set_u8(h, "pf_saver", in->saver ? 1 : 0) == ESP_OK &&
+              nvs_set_u8(h, "pf_nbr", in->night_bright) == ESP_OK && nvs_set_u8(h, "pf_nmu", in->night_muted ? 1 : 0) == ESP_OK &&
+              nvs_set_u8(h, "pf_scr", in->timer) == ESP_OK && nvs_commit(h) == ESP_OK;
+    close_rw(h);
+    ESP_LOGI(TAG, "save_prefs night=%d saver=%d timer=%u: %s", (int)in->night, (int)in->saver, (unsigned)in->timer, ok ? "ok" : "FAILED");
+    return ok;
+}
+
 bool config_load_muted(void)
 {
     nvs_handle_t h;

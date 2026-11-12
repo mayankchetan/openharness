@@ -98,8 +98,10 @@ for name in ('config_net_set_mode', 'config_save_stay_wl', 'config_net_info', 'c
     assert name in work, name
     others = [m.start() for m in re.finditer(r'\b' + name + r'\(', ui)]
     inside = [m.start() for m in re.finditer(r'\b' + name + r'\(', work)]
+    if name == 'config_net_set_mode':   # the Settings screen's Unplugged link row is the second writer, with its own worker function (test_mode_glue_source.py)
+        inside += [m.start() for m in re.finditer(r'\b' + name + r'\(', body(ui, 'prefs_link_work'))]
     if name in ('config_net_set_mode', 'config_save_stay_wl'):
-        assert len(others) == len(inside), f'{name} is called only in link_work'
+        assert len(others) == len(inside), f'{name} is called only in link_work (and prefs_link_work)'
 # the copy the render task reads is written under the display lock, after both writes
 assert work.index('config_net_set_mode(') < work.index('display_lock()') and work.index('config_save_stay_wl(') < work.index('display_lock()')
 assert work.index('display_lock()') < work.index('link_ui.loaded = true') < work.index('display_unlock()')

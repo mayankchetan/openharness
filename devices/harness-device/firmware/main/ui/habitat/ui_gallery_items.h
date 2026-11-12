@@ -76,6 +76,12 @@
     X(machines_empty,   "machines_empty",   0, 2000, "machines",      "render_list",             NULL) \
     X(settings_1,       "settings_1",       0, 2000, "settings",      "render_settings",         NULL) \
     X(settings_2,       "settings_2",       0, 2000, "settings",      "render_settings",         NULL) \
+    X(prefs,            "prefs",            0, 2000, "prefs",         "render_prefs",            NULL) \
+    X(prefs_2,          "prefs_2",          0, 2000, "prefs",         "render_prefs",            NULL) \
+    X(bright_mid,       "bright_mid",       0, 2000, "brightness",    "render_bright",           NULL) \
+    X(bright_low,       "bright_low",       0, 2000, "brightness",    "render_bright",           NULL) \
+    X(bright_full,      "bright_full",      0, 2000, "brightness",    "render_bright",           NULL) \
+    X(about,            "about",            0, 2000, "about",         "render_about",            NULL) \
     X(link_wifi,        "link_wifi",        0, 2000, "link",          "render_link",             NULL) \
     X(link_keep,        "link_keep",        0, 2000, "link",          "render_link",             NULL) \
     X(link_none,        "link_none",        0, 2000, "link",          "render_link",             NULL) \

@@ -146,6 +146,9 @@ uint32_t pp_wait_ms(pp_state_t s, pp_poller_t who, uint32_t awake_ms);
 #define PP_DIM_FLOOR          3u    // ... and never below this many percent
 typedef enum { PP_SCREEN_FULL = 0, PP_SCREEN_DIM, PP_SCREEN_OFF } pp_screen_t;
 pp_screen_t pp_screen_level(pp_state_t s, uint32_t idle_ms);
+// The same with the user's screen-off time (Settings > Screen off). `off_ms` 0 is the table above, exactly. Otherwise the screen goes off after `off_ms` of idle
+// time, on external power and on the battery alike, and on the battery it dims at half of it first (30 s of 60 s today); on external power it never dimmed and still does not.
+pp_screen_t pp_screen_level_cfg(pp_state_t s, uint32_t idle_ms, uint32_t off_ms);
 uint32_t pp_dimmed_percent(uint32_t user_percent);
 
 // THE PMIC POWER-OFF TRIGGERS (S3, DEVICE_BATTERY_POWEROFF; plan sections 3.6 and 16). From S2 (battery, screen off) the dial asks to be

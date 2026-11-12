@@ -184,17 +184,17 @@ assert 'wl_resolved(MG_RESOLVE_LIVE, &live_auto)' in body(glue, 'mode_glue_start
 # task (the cable) and the Link screen's worker; each calls mode_glue_settings_changed() after its write, on success and on failure (a failed write can
 # leave the marker off, which the glue should see). Nothing else may write them.
 WRITES = re.compile(r'\bconfig_net_(?:set|clear|set_key|set_host|set_mode)\(')
-allowed = {'cable_client.c': 'net_store_task', 'ui/habitat/ui_habitat.c': 'link_work'}
+allowed = {'cable_client.c': ['net_store_task'], 'ui/habitat/ui_habitat.c': ['link_work', 'prefs_link_work']}   # prefs_link_work: Settings > Unplugged link (2026-11-11)
 for path in main.rglob('*.c'):
     rel = path.relative_to(main).as_posix()
     if rel == 'config_store.c':
         continue
     src = code(rel)
-    if rel in allowed:
-        fn = body(src, allowed[rel])
-        assert WRITES.search(fn), f'{rel}: {allowed[rel]} writes the Wi-Fi settings'
+    for name in allowed.get(rel, []):
+        fn = body(src, name)
+        assert WRITES.search(fn), f'{rel}: {name} writes the Wi-Fi settings'
         last_write = max(m.start() for m in WRITES.finditer(fn))
-        assert 'mode_glue_settings_changed()' in fn[last_write:], f'{rel}: {allowed[rel]} must call mode_glue_settings_changed() after its last wl write'
+        assert 'mode_glue_settings_changed()' in fn[last_write:], f'{rel}: {name} must call mode_glue_settings_changed() after its last wl write'
         src = src.replace(fn, '')
     assert not WRITES.search(src), f'{rel} writes the Wi-Fi settings outside {allowed.get(rel, "any allowed function")}'
 assert '#include "mode_glue.h"' in text('cable_client.c')

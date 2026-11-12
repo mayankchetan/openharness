@@ -459,6 +459,13 @@ SETUP(machines) { LOCKED(view(MACHINES)); }
 SETUP(machines_empty) { LOCKED(ui_machines_clear(); view(MACHINES)); }
 SETUP(settings_1) { LOCKED(view(SETTINGS)); }
 SETUP(settings_2) { LOCKED(view(SETTINGS); s.offset = 5); }
+// The Settings screen (PREFS) and its children. The worker has not read NVS in the gallery, so prefs_link is set by hand: both radios set up, Auto.
+SETUP(prefs) { LOCKED(memset(&prefs, 0, sizeof prefs); prefs_link.loaded = prefs_link.wifi = prefs_link.phone = true; prefs_link.mode = 3; view(PREFS)); }
+SETUP(prefs_2) { LOCKED(prefs.night = prefs.saver = true; prefs.timer = HT_TIMER_2M; prefs_link.loaded = prefs_link.wifi = prefs_link.phone = true; prefs_link.mode = 1; view(PREFS); s.offset = 4); }
+SETUP(bright_mid) { LOCKED(memset(&prefs, 0, sizeof prefs); s.brightness = 60; view(BRIGHT)); }
+SETUP(bright_low) { LOCKED(memset(&prefs, 0, sizeof prefs); prefs.saver = true; s.brightness = HT_BRIGHT_MIN; view(BRIGHT)); }
+SETUP(bright_full) { LOCKED(memset(&prefs, 0, sizeof prefs); prefs.saver = true; s.brightness = 100; view(BRIGHT)); }
+SETUP(about) { LOCKED(view(ABOUT)); }
 // The Link screen (W16), the three states the worker can leave link_ui in: Wi-Fi with Keep Wi-Fi off, Keep Wi-Fi on, and a dial with no Wi-Fi set up.
 SETUP(link_wifi) { LOCKED(link_ui.loaded = link_ui.provisioned = link_ui.wifi = true; link_ui.stay = false; view(LINK)); }
 SETUP(link_keep) { LOCKED(link_ui.loaded = link_ui.provisioned = link_ui.wifi = link_ui.stay = true; view(LINK)); }

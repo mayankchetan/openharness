@@ -32,6 +32,7 @@ static atomic_bool asleep, force_frame;
 static atomic_uint last_activity;
 static atomic_uint wake_seq;   /* display_wake_seq(): the habitat UI shows the battery percent for 3 s after each wake */
 static atomic_uint requested_brightness = 40;
+static atomic_uint brightness_cap = 100;   /* Battery saver's cap (display_set_brightness_cap): 100 = none */
 #if S2_PANEL_SLPIN
 static atomic_bool s_panel_slpin;   /* the production file's flags (display_panel_sleep sets them; power_sleep.c calls it) */
 static bool s_panel_woke;

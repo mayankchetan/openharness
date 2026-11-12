@@ -100,6 +100,7 @@ static atomic_bool s_relaxed;          // the pollers run at their S2 rates (set
 static atomic_bool s_wdt_armed;        // the RTC watchdog is armed (S2 entered, not yet left): the ptt task feeds it on every wake
 static atomic_bool s_in_s2;            // S2 is applied (render task) or being applied: the screen hook takes the lock back while this is set
 static atomic_int  s_want;             // the policy's state (pp_state_t), written by the ptt task
+static atomic_uint s_screen_off_ms;    // Settings > Screen off (and Battery saver): 0 = the policy's own times; any task writes it, the screen policy reads it
 static atomic_uint s_link_holds;       // PP_HOLD_LINK and friends, set by transports through power_sleep_hold()
 static pp_t        s_pp;               // the policy; the ptt task only
 #ifdef DEVICE_BATTERY_POWEROFF
@@ -110,6 +111,7 @@ static pp_state_t  s_applied;          // what the render task has applied
 static bool        s_pm_battery;       // power management is configured for battery (frequency scaling, maybe light sleep)
 static bool        s_audio_idle;       // the I2S channels are stopped (audio_capture_idle)
 #if S2_WIFI_OFF
+static atomic_uint s_park_min = S2_WIFI_OFF_MIN;   // minutes of dark battery time before the Wi-Fi radio parks (Battery saver shortens it)
 static atomic_bool s_wifi_off;         // the radio is wanted off (power_policy.h pp_wifi_off_wanted); written by the ptt task and the screen hook, read by net_link
 static void      (*s_wake_cb)(void);   // pokes the net_link task when the radio is wanted back (set once, before the first wake that matters)
 #endif
@@ -215,6 +217,8 @@ static void s2_cpu_cap(bool cap)
 
 #if S2_WIFI_OFF
 bool power_sleep_wifi_off_wanted(void) { return atomic_load(&s_wifi_off); }
+void power_sleep_set_wifi_park_min(unsigned minutes) { atomic_store(&s_park_min, minutes ? minutes : S2_WIFI_OFF_MIN); }
+unsigned power_sleep_wifi_park_min(void) { return atomic_load(&s_park_min); }
 void power_sleep_set_wake_cb(void (*cb)(void)) { s_wake_cb = cb; }
 // The radio is wanted back: the wish ends first (so the task finds it ended when it wakes), then the poke. Any task.
 static void wifi_back(void)
@@ -356,9 +360,10 @@ void power_sleep_poll(void)
         const pp_off_reason_t why = pp_off_step(&s_off, &oin);
 #if S2_WIFI_OFF
         {   // the radio off after S2_WIFI_OFF_MIN minutes of dark battery time: a READ of the off timers' span, nothing of theirs is changed
-            const bool want = pp_wifi_off_wanted(&s_off, in.now_ms, (uint32_t)S2_WIFI_OFF_MIN * 60u * 1000u);
+            const unsigned park_min = atomic_load(&s_park_min);
+            const bool want = pp_wifi_off_wanted(&s_off, in.now_ms, (uint32_t)park_min * 60u * 1000u);
             if (want) {
-                if (!atomic_exchange(&s_wifi_off, true)) ESP_LOGI(TAG, "s2: wifi off wanted after %d min", (int)S2_WIFI_OFF_MIN);
+                if (!atomic_exchange(&s_wifi_off, true)) ESP_LOGI(TAG, "s2: wifi off wanted after %u min", park_min);
             } else {
                 wifi_back();
             }
@@ -557,8 +562,10 @@ void power_sleep_render_service(void)
 pp_screen_t power_sleep_screen_level(uint32_t idle_ms)
 {
     // "On the battery" is the policy's own call (two fresh reads, no host): S1 or S2. A dial the policy cannot confirm keeps 300 s.
-    return pp_screen_level((pp_state_t)atomic_load_explicit(&s_want, memory_order_relaxed), idle_ms);
+    return pp_screen_level_cfg((pp_state_t)atomic_load_explicit(&s_want, memory_order_relaxed), idle_ms, atomic_load_explicit(&s_screen_off_ms, memory_order_relaxed));
 }
+
+void power_sleep_set_screen_off_ms(uint32_t ms) { atomic_store_explicit(&s_screen_off_ms, ms, memory_order_relaxed); }
 
 bool power_sleep_input_allowed(void)
 {

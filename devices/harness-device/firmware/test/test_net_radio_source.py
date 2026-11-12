@@ -77,7 +77,7 @@ assert park.index('nwifi_radio_off()') < park.index('for (;;)') < park.index('nw
 loop = park[park.index('for (;;)'):park.index('nwifi_radio_on()')]
 assert 'atomic_load(&s_halt)' in loop and 'power_sleep_wifi_off_wanted()' in loop and 'xSemaphoreTake(s_poke' in loop and 'power_sleep_wait_ms(' in loop, 'leaves only when wanted-off ended and no power-off parked the link; sleeps on the poke semaphore'
 assert 'vTaskDelay(' not in loop, 'the park is a semaphore wait, not a poll'
-assert '"s2: wifi off after %d min"' in net_raw and 'S2_WIFI_OFF_MIN' in park
+assert '"s2: wifi off after %u min"' in net_raw and 'power_sleep_wifi_park_min()' in park   # the minutes are the Battery saver row's (power_sleep.c), default S2_WIFI_OFF_MIN
 assert re.search(r's_idle_profile = false;', park), 'the power-save profile is applied again after the radio is back'
 # the existing hold count is unchanged by this feature (test_wifi_power_source.py counts them)
 assert len(re.findall(r'power_sleep_hold\(PP_HOLD_LINK\)', net)) == 2

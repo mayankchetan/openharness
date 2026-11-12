@@ -13,6 +13,8 @@ void display_init_ota(void);
 
 // Set the AMOLED brightness (CO5300 DCS 0x51): 0x00 = dimmest, 0xFF = max. Applied live.
 void display_set_brightness(uint8_t level);
+// The most the panel is given, in percent (100 = no cap; below 8 counts as 8). The level set above is kept: lifting the cap brings it back. Battery saver uses it.
+void display_set_brightness_cap(uint8_t percent);
 
 // Lock/unlock the LVGL mutex. ANY code that touches LVGL objects from outside
 // the LVGL task (e.g. the WiFi/WS tasks via ui_screens.c) must hold this.

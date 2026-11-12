@@ -3,7 +3,7 @@
 The screens are three views of ui_habitat.c (PHONE, PASSKEY, FORGET) over one struct, phone_ui. Rules, each checked on the source (the text helpers are compiled and run):
 
   1. THE ROW. "Phone" is a Settings row only in an image built with BLE (#ifdef DEVICE_BLE_LINK around the table entry), and it is enabled whatever the Wi-Fi
-     or the daemon says (it sits in the always-enabled disjunct next to Inbox and Nap). The scroll limit of the list is the list's own count, not a number.
+     or the daemon says (it sits in the always-enabled disjunct next to Inbox, Nap and Settings). The scroll limit of the list is the list's own count, not a number.
   2. THE STATE LINE: Not paired / Paired / Connected, Waiting for phone with a countdown while the window is open, Phone mode is off when the link is not running.
   3. PAIR opens the window (ble_link_pairing_window(true)) from the PHONE view only, and only when it is closed; leaving the three views closes it, and an unanswered
      number is a No (phone_leave, called from view()).
@@ -54,12 +54,16 @@ raw = text(UI)
 ui = code(UI)
 
 # ── 1. the row ──────────────────────────────────────────────────────────────────────────────────────
-items = body(raw, 'settings_item')
-assert re.search(r'#ifdef DEVICE_BLE_LINK\n\s*\{"Phone", A_PHONE, 0\},[^\n]*\n#endif', items), 'the Phone row is inside #ifdef DEVICE_BLE_LINK'
-assert items.count('DEVICE_BLE_LINK') == 1 and 'feature' in items
-assert '"Phone", A_PHONE, 0}' in items and 'CABLE_FEATURE' not in items[items.index('"Phone"'):items.index('"Phone"') + 30], 'no daemon feature gates the row'
+# The row MOVED (2026-11-11) from the controls list to the Settings screen (prefs_item): same rule, a new place. It is no longer in settings_item.
+items = body(raw, 'prefs_item')
+assert re.search(r'#ifdef DEVICE_BLE_LINK\n\s*\{"Phone", A_PHONE\},[^\n]*\n#endif', items), 'the Phone row is inside #ifdef DEVICE_BLE_LINK'
+assert items.count('DEVICE_BLE_LINK') == 1 and 'feature' not in items
+assert '"Phone", A_PHONE}' in items and 'CABLE_FEATURE' not in items, 'no daemon feature gates the row'
+assert '"Phone"' not in body(raw, 'settings_item') and 'A_PHONE' not in body(raw, 'settings_item'), 'and it is gone from the controls list'
+prefs_rows = body(ui, 'render_prefs')
+assert 'enabled' not in prefs_rows and 'true};' in prefs_rows, 'every Settings row is a plain tap with no daemon'
 settings = body(ui, 'render_settings')
-assert re.search(r'bool enabled = action == A_INBOX \|\| action == A_NAP \|\| action == A_PHONE \|\|\s*\(s\.connected', settings), 'always enabled, like Inbox and Nap'
+assert re.search(r'bool enabled = action == A_INBOX \|\| action == A_NAP \|\| action == A_PHONE \|\| action == A_PREFS \|\|\s*\(s\.connected', settings), 'always enabled, like Inbox and Nap'
 assert 'wifi' not in items.lower() and 'config_net' not in items
 assert re.search(r'view_t;', raw) and all(re.search(r'\b' + v + r'\b', raw[raw.index('typedef enum {\n    HOME'):raw.index('} view_t;')]) for v in ('PHONE', 'PASSKEY', 'FORGET'))
 assert 'case PHONE: return "phone";' in raw and 'case PASSKEY: return "passkey";' in raw and 'case FORGET: return "forget";' in raw

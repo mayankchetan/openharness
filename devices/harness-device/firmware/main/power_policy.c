@@ -150,6 +150,14 @@ pp_screen_t pp_screen_level(pp_state_t s, uint32_t idle_ms)
     return PP_SCREEN_FULL;
 }
 
+pp_screen_t pp_screen_level_cfg(pp_state_t s, uint32_t idle_ms, uint32_t off_ms)
+{
+    if (!off_ms) return pp_screen_level(s, idle_ms);
+    if (idle_ms > off_ms) return PP_SCREEN_OFF;
+    if (s != PP_S0 && idle_ms > off_ms / 2) return PP_SCREEN_DIM;
+    return PP_SCREEN_FULL;
+}
+
 uint32_t pp_dimmed_percent(uint32_t user_percent)
 {
     const uint32_t dimmed = user_percent * PP_DIM_PERCENT / 100u;

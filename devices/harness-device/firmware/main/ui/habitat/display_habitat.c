@@ -88,6 +88,7 @@ static atomic_bool asleep, force_frame;
 static atomic_uint wake_seq;   // display_wake_seq(): moves on a wake from off and on a dimmed screen coming back
 // Panel IO belongs to the renderer, including brightness changes.
 static atomic_uint requested_brightness = 40;
+static atomic_uint brightness_cap = 100;   // percent: the most the panel gets (Battery saver); the user's own level above it is kept in requested_brightness
 static atomic_uint last_activity;
 static int64_t input_us;
 static portMUX_TYPE stats_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -405,6 +406,11 @@ void display_set_brightness(uint8_t value)
     atomic_store(&requested_brightness, percent < 8 ? 8 : percent);
     habitat_render_notify();
 }
+void display_set_brightness_cap(uint8_t percent)
+{
+    atomic_store(&brightness_cap, percent < 8 ? 8 : percent > 100 ? 100 : percent);
+    habitat_render_notify();
+}
 static void wait_dma(void)
 {
     render_progress(RENDER_DMA);
@@ -641,6 +647,10 @@ static void render_task(void *arg)
 #endif
         display_unlock();
         unsigned brightness = atomic_load(&requested_brightness);
+        {   // the cap comes first, so the dimmed level below is a quarter of what the panel would show, not of what the user asked for
+            const unsigned cap = atomic_load(&brightness_cap);
+            if (brightness > cap) brightness = cap;
+        }
 #ifdef DEVICE_BATTERY_SLEEP
         // The screen state is sampled ONCE for this pass (also used for `on` below): no panel writes while it is asleep, and on a wake
         // the user's brightness goes out in the pass that lights the panel, before the first frame.

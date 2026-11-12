@@ -17,7 +17,11 @@
 #include "theme.h"
 #include "battery_rim.h"
 #include "link_icon.h"
+#include "brightness_arc.h"
+#include "prefs_logic.h"
 #include "../../battery.h"
+#include "../../power_sleep.h"
+#include "../../last_words.h"
 #include "focus_faces.h"
 #ifdef DEVICE_CREATURE_GALLERY
 #include "creature_gallery.h"
@@ -39,6 +43,7 @@ static ht_gallery_t gallery;
 #include "esp_attr.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_app_desc.h"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
@@ -116,7 +121,10 @@ typedef enum {
     LINK,    // the Link screen (task W16): USB or Wi-Fi, and Keep Wi-Fi
     PHONE,   // the Phone screen (task B5): Not paired / Paired / Connected, Pair, Forget
     PASSKEY, // the number the phone asks to compare (numeric comparison): Yes or No
-    FORGET   // "forget phone?": one confirmation before the bonds are wiped
+    FORGET,  // "forget phone?": one confirmation before the bonds are wiped
+    PREFS,   // the Settings screen: Brightness, Sound, Unplugged link, Screen off, Night mode, Battery saver, Phone, About, Restart dial
+    BRIGHT,  // the Brightness slider: an arc on the right edge of the glass
+    ABOUT    // read only: version, battery, link, time since boot
 } view_t;
 typedef enum {
     A_NONE,
@@ -142,6 +150,19 @@ typedef enum {
     A_NAP,
     A_SETTINGS_SAVE,
     A_SETTINGS,
+    A_PREFS,         // open the Settings screen (value 1: back to the place in it that was left)
+    A_BRIGHT,        // open the Brightness slider
+    A_SOUND,         // toggle the muted flag
+    A_PLINK,         // Unplugged link: the row's tap; asks the worker for the next mode (A_PLINK_CYCLE)
+    A_PLINK_SYNC,    // to the worker: read wl_mode and what is set up into prefs_link
+    A_PLINK_CYCLE,   // to the worker: write the next wl_mode
+    A_SCREEN_OFF,    // cycle the screen-off timer
+    A_NIGHT,         // toggle Night mode
+    A_SAVER,         // toggle Battery saver
+    A_ABOUT,         // open the About screen
+    A_RESTART,       // Restart dial: the first tap arms it, the second restarts
+    A_RESTART_GO,    // to the worker: everything before it in the queue is written, then esp_restart()
+    A_PREFS_SAVE,    // to the worker: write prefs (Night mode, Battery saver, the timer) to NVS
     A_LINK,        // open the Link screen (no caller in v1: the edge swipe was removed 2026-11-10)
     A_LINK_SYNC,   // to the worker: read wl_mode and stay_wl into link_ui
     A_LINK_MODE,   // to the worker: the Link row, USB <-> Wi-Fi
@@ -263,6 +284,14 @@ static EXT_RAM_BSS_ATTR struct {
     char model_agent[ID_MAX], model_selected[192];
     char stop_agent[ID_MAX];
     int brightness;
+    bool bright_drag;         // a contact that began in the Brightness arc's band is the slider's until it lifts (bright_touch)
+    int bright_from;          // the level that contact began on: no change, no flash write
+    bool prefs_dirty;         // Night mode, Battery saver or the timer changed and the worker has not been asked to write it yet
+    int list_offset, prefs_offset;   // the place in the controls list and in the Settings screen that was left for a screen below it
+    uint32_t restart_until;   // Restart dial is armed until this ms() time; 0 = not armed
+    uint32_t note_until;      // the Settings screen's note line goes at this time; 0 = none
+    uint32_t about_at;        // when the About screen next redraws (uptime and battery move on their own)
+    char note[40];
     uint32_t voice_started;
     bool voice_open, voice_start_pending, voice_waiting, voice_carry;
     bool voice_review, voice_review_preview, voice_draft_append, voice_search;
@@ -335,6 +364,8 @@ static ht_character_caption_t home_caption;
 static action_t pressed_action;
 static bool queue(action_t a);
 static void view(view_t v);
+static void bright_drag_end(void);   // defined with the Settings screen's other touch code
+static int prefs_count(void);
 static const char *voice_status(void);
 /*
  * THE PHONE SCREENS (task B5): what the Phone screen shows, read from the BLE link once a tick while one of its three views is up (phone_poll, render task,
@@ -605,6 +636,7 @@ static void input_cancel(void)
     s.voice_review_preview = false;
     if (s.touch_down) s.touch_cancelled = true;
     s.pressed = -1;
+    bright_drag_end();   // a contact cut off in the middle of a drag keeps the level the finger had reached, and saves it once
 }
 static bool user_nav;   // display lock: true only while habitat_touch runs, so a view change that is a finger's doing can be told from a boot, refresh or desktop one
 static void view(view_t v)
@@ -629,6 +661,7 @@ static void view(view_t v)
         else ESP_LOGI("habitat", "phone: the view moved off the Phone screen without a touch; the pairing window is left as it is");
     }
     s.view = v;
+    if (v != PREFS) { s.restart_until = 0; s.note_until = 0; s.note[0] = 0; }   // Restart dial's arming and the note belong to the Settings screen alone
     s.error_until = 0;   // a timed error view belongs to ui_turn_error alone; any move off or onto MESSAGE ends it
     s.offset = 0;
     s.pressed = -1;
@@ -1157,15 +1190,16 @@ static void heading(ht_scene_t *f, const char *title)
     text(f, 147, 67, 252, title, FG);
 }
 /*
- * THE COMPANION SCREEN IS GONE, and so are Brightness and Sound from the list.
+ * THE COMPANION SCREEN IS GONE, and Brightness and Sound came back one level down, under Settings.
  *
  * Four rows is what a 466 circle holds between its chords, and every preference the device kept was
- * spending one of them. They live in the desktop app now (Settings > Autonomous robots), which is the
- * one surface with room to state a setting properly - see ui_settings_apply. What the glass keeps is
- * ACTIONS: things you do here because here is where your hand is. Nap is one, which is why it moved
- * into the list rather than leaving with the screen it was on.
- *
- * The settings themselves are unchanged in NVS and still applied. Only their screens went.
+ * spending one of them, so they left the controls list (2026-09). They are back now, but as ONE row of
+ * that list, "Settings", which opens a list of their own that scrolls like the first: Brightness (an arc
+ * on the right edge of the glass), Sound, Unplugged link, Screen off, Night mode, Battery saver, Phone,
+ * About and Restart dial. The desktop app (Settings > Autonomous robots) still sets the same stored
+ * values, and a change made on the glass is reported to it the way a change made there is
+ * (A_SETTINGS_SAVE, ui_settings_changed), so neither side undoes the other: the app never pushes a stored
+ * value on connect, it only reads what the dial reports.
  */
 static ht_character_mood_t character_mood(void)
 {
@@ -1838,9 +1872,7 @@ static const char *settings_item(int wanted, action_kind_t *action)
         {"Inbox", A_INBOX, 0}, {"Machines", A_MACHINES, 0},
         {"Model", A_MODELS, 0}, {"Stop current turn", A_STOP, 0},
         {"Nap", A_NAP, 0},
-#ifdef DEVICE_BLE_LINK
-        {"Phone", A_PHONE, 0},   // only in an image built with BLE; always there in that image, set up or not
-#endif
+        {"Settings", A_PREFS, 0},   // the Settings screen (render_prefs); the Phone row lives there now
         {"Find Harness", A_FIND, CABLE_FEATURE_FORM},
         {"New Harness", A_FORM, CABLE_FEATURE_FORM},
         {"Latest output", A_LATEST, CABLE_FEATURE_VISIT},
@@ -1869,7 +1901,7 @@ static void tabs_move(int dy)
     int step = s.tab_drag / TAB_ROW_HEIGHT;
     if (!step) return;
     s.tab_drag %= TAB_ROW_HEIGHT;
-    int count = s.view == AGENTS ? s.count : s.view == SETTINGS ? settings_count() : s.tab_count;
+    int count = s.view == AGENTS ? s.count : s.view == SETTINGS ? settings_count() : s.view == PREFS ? prefs_count() : s.tab_count;
     int last = count > TAB_ROWS ? count - TAB_ROWS : 0;
     int next = s.offset + step;
     if (next < 0) next = 0;
@@ -2397,6 +2429,165 @@ static void render_draft_options(ht_scene_t *f)
     control(f, FACE_CX(336), 323, 336, "Back to draft", A_DRAFT_BACK, 0, true);
     center(f, 380, draft.page.locked ? "Check terminal" : "Nothing sent yet", DIM);
 }
+/*
+ * THE SETTINGS SCREEN (PREFS) AND ITS THREE CHILDREN.
+ *
+ * A list in the geometry of the controls list: four rows of TAB_ROW_HEIGHT, the label on the left and what it is set to on the right, scrolled by a
+ * drag. The rows come from one table (prefs_item), so a new one is one line there, one case in dispatch and one in prefs_value. Hidden rows do not count
+ * (prefs_count), so the scroll limit is always the list's own.
+ *
+ *   Brightness        opens BRIGHT: an arc on the right edge (brightness_arc.h), 8 to 100 percent, live while the finger moves, one flash write on lift.
+ *   Sound             tap: muted on or off (UI_SETTING_MUTED, the same stored flag and the same report to the desktop as a change made there).
+ *   Unplugged link    tap: Auto, Wi-Fi, Phone, Auto (prefs_logic.h). It writes wl_mode, the byte `harness dial net auto|wifi|phone` writes, on the worker, and
+ *                     tells the mode switch (mode_glue_settings_changed) exactly as the Link screen does. A dial on USB does not reboot: it only enters a
+ *                     wireless mode when the cable goes (mode_switch.h). A dial that is unplugged and running a different mode switches through the
+ *                     busy-gated reboot of the mode switch. Shown only when two modes are on offer (so not in an image without the phone link).
+ *   Screen off        tap: 30 s, 1 min, 2 min, 5 min (power_sleep_set_screen_off_ms). A dial nobody has touched shows "Auto": the times it always had.
+ *   Night mode        tap: 8 percent and muted, the old pair kept in NVS; tap again: the old pair back. Moving the Brightness arc turns it off.
+ *   Battery saver     tap: the panel is capped at 30 percent (the user's own level is kept), the screen goes off after 30 s, the Wi-Fi radio parks after 2 minutes
+ *                     of dark battery time instead of 5. Tap again: the user's own values.
+ *   Phone             the Phone screen (moved here from the controls list).
+ *   About             ABOUT: version, battery, link, time since boot. Read only; nothing that is a secret.
+ *   Restart dial      the first tap says "Tap again to restart" for 3 s; a second tap queues what is pending, then esp_restart().
+ *
+ * `prefs` and `prefs_link` are read by the renderer and written under the display lock. prefs_link is filled by the worker (it reads NVS; the renderer never does).
+ */
+static ht_prefs_t prefs;
+static ht_link_kind_t link_icon_kind(void);   // defined with the link icon, below
+static struct { bool loaded, wifi, phone; int mode; } prefs_link;   // what the worker read: both radios' settings whole, and wl_mode
+#ifdef DEVICE_BLE_LINK
+#define PREFS_BLE_IMAGE true
+#else
+#define PREFS_BLE_IMAGE false
+#endif
+static int bright_level(void)
+{
+    return s.brightness < HT_BRIGHT_MIN ? HT_BRIGHT_MIN : s.brightness > HT_BRIGHT_MAX ? HT_BRIGHT_MAX : s.brightness;
+}
+static bool prefs_link_shown(void)
+{
+    return prefs_link.loaded && ht_link_options(prefs_link.wifi, prefs_link.phone, PREFS_BLE_IMAGE) >= 2;
+}
+static void prefs_value(action_kind_t action, char *value, size_t cap)
+{
+    switch (action) {
+    case A_BRIGHT: snprintf(value, cap, "%d%%", bright_level()); break;
+    case A_SOUND: snprintf(value, cap, "%s", s.muted ? "Off" : "On"); break;
+    case A_PLINK: snprintf(value, cap, "%s", ht_link_label(prefs_link.mode)); break;
+    case A_SCREEN_OFF: snprintf(value, cap, "%s", ht_timer_label(prefs.saver ? HT_TIMER_30S : prefs.timer)); break;
+    case A_NIGHT: snprintf(value, cap, "%s", prefs.night ? "On" : "Off"); break;
+    case A_SAVER: snprintf(value, cap, "%s", prefs.saver ? "On" : "Off"); break;
+    default: value[0] = 0; break;
+    }
+}
+// One row of the Settings screen, by its place among the rows that are shown: its label, the action of a tap, and the words on the right. NULL past the last.
+static const char *prefs_item(int wanted, action_kind_t *action, char *value, size_t cap)
+{
+    static const struct { const char *label; action_kind_t action; } items[] = {
+        {"Brightness", A_BRIGHT}, {"Sound", A_SOUND}, {"Unplugged link", A_PLINK}, {"Screen off", A_SCREEN_OFF},
+        {"Night mode", A_NIGHT}, {"Battery saver", A_SAVER},
+#ifdef DEVICE_BLE_LINK
+        {"Phone", A_PHONE},   // only in an image built with BLE; always there in that image, set up or not (it was a row of the controls list)
+#endif
+        {"About", A_ABOUT}, {"Restart dial", A_RESTART},
+    };
+    for (unsigned i = 0; i < sizeof items / sizeof items[0]; i++) {
+        if (items[i].action == A_PLINK && !prefs_link_shown()) continue;
+        if (wanted-- == 0) {
+            if (action) *action = items[i].action;
+            if (value && cap) prefs_value(items[i].action, value, cap);
+            return items[i].label;
+        }
+    }
+    return NULL;
+}
+static int prefs_count(void)
+{
+    int count = 0;
+    while (prefs_item(count, NULL, NULL, 0)) count++;
+    return count;
+}
+// A row's label on the left and its value on the right, inside the list's width, in the face the page is set in.
+static void prefs_row(ht_scene_t *f, int y, const char *label, const char *value, uint16_t ink, uint16_t value_ink, uint16_t ground)
+{
+    if (focus_skin()) {
+        const ht_font_t *font = focus_face_for(UI_FONT);
+        const int ty = y + 14 + (UI_FONT->height - font->height) / 2, right = LIST_HIT_X + LIST_HIT_W - 16;
+        int vw = value[0] ? ht_measure(font, value) + 4 : 0;
+        if (vw > 190) vw = 190;
+        focus_put(f, SET_TEXT_X, ty, right - vw - 8 - SET_TEXT_X, font, ink, ground, label, false);
+        if (vw) focus_put(f, right - vw, ty, vw, font, value_ink, ground, value, false);
+        return;
+    }
+    const int cells = (int)strlen(value);
+    ht_text(f, SET_TEXT_X, y + 14, (int)strlen(label) * UI_FONT->width, UI_FONT, ink, ground, label);
+    if (cells) ht_text(f, LIST_HIT_X + LIST_HIT_W - 16 - cells * UI_FONT->width, y + 14, cells * UI_FONT->width, UI_FONT, value_ink, ground, value);
+}
+static void render_prefs(ht_scene_t *f)
+{
+    focus_header(f, "SETTINGS");
+    control(f, 87, 67, 48, "<", A_SETTINGS, 1, true);
+    int last = prefs_count() - TAB_ROWS;
+    if (last < 0) last = 0;
+    if (s.offset > last) s.offset = last;
+    if (s.offset < 0) s.offset = 0;
+    for (int row = 0; row < TAB_ROWS; row++) {
+        action_kind_t action;
+        char value[24];
+        const char *label = prefs_item(s.offset + row, &action, value, sizeof value);
+        if (!label) break;
+        const bool armed = action == A_RESTART && s.restart_until;
+        if (armed) { label = "Tap again to restart"; value[0] = 0; }
+        const int y = TAB_TOP + row * TAB_ROW_HEIGHT, hit = s.hit_count++;
+        s.hits[hit] = (hit_t){{LIST_HIT_X, y, LIST_HIT_W, TAB_ROW_HEIGHT}, action, 0, true};
+        const bool pressed = hit == s.pressed;
+        prefs_row(f, y, label, value, pressed || armed ? ACCENT : FG, color(HT_THEME_DONE), pressed ? SEL : BG);
+    }
+    if (s.note[0]) text_in(f, FACE_CX(324), 372, 324, &ht_mono_20, s.note, DIM, true);
+}
+static void render_bright(ht_scene_t *f)
+{
+    focus_header(f, "BRIGHTNESS");
+    control(f, 87, 67, 48, "<", A_PREFS, 1, true);
+    char percent[8];
+    snprintf(percent, sizeof percent, "%d%%", bright_level());
+    const ht_font_t *big = &ht_lv_inter_bold_48.base;
+    const int w = ht_measure(big, percent);
+    ht_text(f, (HT_WIDTH - w) / 2, 233 - big->height / 2, w, big, color(HT_THEME_DONE), BG, percent);
+    if (prefs.saver && bright_level() > HT_SAVER_BRIGHT_CAP) {
+        char note[40];
+        snprintf(note, sizeof note, "Saver holds the panel at %d%%", HT_SAVER_BRIGHT_CAP);
+        text_in(f, FACE_CX(260), 290, 260, &ht_mono_20, note, DIM, true);
+    }
+    const ht_bright_ink_t ink = {color(HT_THEME_RIM_TRACK), color(HT_THEME_DONE), FG};
+    ht_bright_arc(f, bright_level(), &ink);
+}
+// How long the dial has been up, in the two largest units that are not zero.
+static void about_uptime(char *out, size_t cap)
+{
+    const unsigned long t = (unsigned long)(esp_timer_get_time() / 1000000);
+    const unsigned long d = t / 86400, h = t / 3600 % 24, m = t / 60 % 60;
+    if (d) snprintf(out, cap, "%lud %luh", d, h);
+    else if (h) snprintf(out, cap, "%luh %02lum", h, m);
+    else snprintf(out, cap, "%lum %02lus", m, t % 60);
+}
+static void render_about(ht_scene_t *f)
+{
+    focus_header(f, "ABOUT");
+    control(f, 87, 67, 48, "<", A_PREFS, 1, true);
+    const ht_link_kind_t link = link_icon_kind();
+    const int pct = battery_pct();
+    char battery[8], up[24];
+    if (pct >= 0) snprintf(battery, sizeof battery, "%d%%", pct); else snprintf(battery, sizeof battery, "n/a");
+    about_uptime(up, sizeof up);
+    const char *version = esp_app_get_description()->version;
+    const struct { const char *label, *value; } rows[] = {
+        {"Firmware", version[0] ? version : "?"}, {"Battery", battery},
+        {"Link", link == HT_LINK_WIFI ? "Wi-Fi" : link == HT_LINK_PHONE ? "Phone" : "USB"}, {"Up", up},
+    };
+    for (int row = 0; row < 4; row++)
+        prefs_row(f, TAB_TOP + row * TAB_ROW_HEIGHT, rows[row].label, rows[row].value, FG, color(HT_THEME_DONE), BG);
+}
 static void render_settings(ht_scene_t *f)
 {
     heading(f, "controls");
@@ -2409,7 +2600,7 @@ static void render_settings(ht_scene_t *f)
         const char *label = settings_item(s.offset + row, &action);
         if (!label) break;
         if (action == A_NAP) label = s.nap ? "Wake" : "Nap";
-        bool enabled = action == A_INBOX || action == A_NAP || action == A_PHONE ||
+        bool enabled = action == A_INBOX || action == A_NAP || action == A_PHONE || action == A_PREFS ||
             (s.connected && ((action != A_STOP && action != A_MODELS && action != A_SELECT_BEGIN && action != A_LATEST) ||
                 (active() && (action != A_STOP || active()->busy) && (action != A_LATEST || !visit.pending))));
         int y = TAB_TOP + row * TAB_ROW_HEIGHT, hit = s.hit_count++;
@@ -2598,6 +2789,87 @@ static struct {
     ui_settings_t values;
     uint32_t fields;
 } settings_pending;
+
+/*
+ * WHAT THE SETTINGS SCREEN WRITES, AND WHEN.
+ *
+ * Every write is the worker's (NVS is flash). A change moves the live state under the display lock at once and asks the worker to write it: the muted flag and
+ * the brightness through A_SETTINGS_SAVE (which also tells the desktop what the dial now holds), Night mode, Battery saver and the timer through A_PREFS_SAVE.
+ * A full queue is not an error: the field stays pending and goes out with the next save, and the last queue slot is left to the scroll's UP.
+ */
+static void settings_save_queue(void)
+{
+    if (actions && uxQueueSpacesAvailable(actions) > 1) xQueueSend(actions, &(action_t){.kind = A_SETTINGS_SAVE}, 0);
+}
+static void prefs_save_queue(void)
+{
+    if (actions && uxQueueSpacesAvailable(actions) > 1 && xQueueSend(actions, &(action_t){.kind = A_PREFS_SAVE}, 0) == pdPASS) s.prefs_dirty = false;
+}
+// The settings the power code and the panel keep for themselves: what Battery saver and the timer ask of them. At boot and at every change.
+static void prefs_apply_power(void)
+{
+    display_set_brightness_cap((uint8_t)ht_panel_cap(&prefs));
+    power_sleep_set_screen_off_ms(ht_screen_off_ms(&prefs));
+    power_sleep_set_wifi_park_min((unsigned)ht_park_minutes(&prefs));
+}
+static void prefs_changed(void)
+{
+    s.prefs_dirty = true;
+    prefs_save_queue();
+    change();
+}
+static void prefs_note(const char *text)
+{
+    COPY(s.note, text);
+    s.note_until = ms() + 3500;
+    if (!s.note_until) s.note_until = 1;
+    change();
+}
+/*
+ * THE BRIGHTNESS ARC'S TOUCH. A contact that STARTS in the arc's band is the slider's until the finger lifts: no tap, swipe or list scroll sees it (habitat_touch
+ * asks bright_touch first), so a pull up the right edge can neither switch agent nor leave the screen. A contact that starts anywhere else keeps its normal
+ * meaning, even when it later crosses the band. The level changes live while the finger moves (ui_set_brightness); flash is written once, on lift
+ * (A_SETTINGS_SAVE: the same write, and the same report to the desktop, as a change made there). Moving the arc while Night mode is on ends Night mode.
+ */
+static void bright_set(int y)
+{
+    const int percent = ht_bright_percent_at(y);
+    if (percent == s.brightness) return;
+    bool muted = s.muted;
+    if (ht_night_user_moved(&prefs, &muted)) {   // the user took control: Night mode is over, and the sound goes back to what it was
+        s.muted = muted;
+        settings_pending.values.muted = muted;
+        settings_pending.fields |= UI_SETTING_MUTED;
+        s.prefs_dirty = true;
+    }
+    ui_set_brightness((uint8_t)((percent * 255 + 50) / 100));
+}
+static void bright_drag_end(void)
+{
+    if (!s.bright_drag) return;
+    s.bright_drag = false;
+    if (s.brightness == s.bright_from) return;   // nothing moved: nothing to write
+    settings_pending.values.brightness = (uint8_t)s.brightness;
+    settings_pending.fields |= UI_SETTING_BRIGHTNESS;
+    settings_save_queue();
+    if (s.prefs_dirty) prefs_save_queue();
+}
+// True when this sample is the slider's (the caller then does nothing else with it).
+static bool bright_touch(bool down, int x, int y)
+{
+    if (!s.bright_drag) {
+        if (!down || s.touch_down || s.view != BRIGHT || !ht_bright_arc_hit(x, y)) return false;
+        s.bright_drag = true;
+        s.bright_from = s.brightness;
+        s.touch_cancelled = false;
+        s.pressed = -1;
+    } else if (!down) {
+        bright_drag_end();
+        return true;
+    }
+    bright_set(y);
+    return true;
+}
 /*
  * THE BATTERY RIM, last on every screen: while the dial runs on its battery, a thin arc along the bottom of the glass (battery_rim.h).
  * Nothing on the external power. The percent is the one the dial shows (battery.c); habitat_tick marks the scene dirty when it
@@ -2628,6 +2900,7 @@ static int link_icon_state(void)
 }
 static void render_link_icon(ht_scene_t *f)
 {
+    if (s.view == BRIGHT) return;   // the Brightness arc runs through 4:30, where the icon sits
     const ht_link_icon_ink_t ink = {DIM, color(HT_THEME_WARN), color(HT_THEME_RIM_TEXT_BG)};
     ht_link_icon(f, link_icon_kind(), s.connected, &ink);
 }
@@ -2715,6 +2988,15 @@ bool habitat_scene_take(ht_scene_t *f)
         break;
     case FORGET:
         render_forget(f);
+        break;
+    case PREFS:
+        render_prefs(f);
+        break;
+    case BRIGHT:
+        render_bright(f);
+        break;
+    case ABOUT:
+        render_about(f);
         break;
     case READER: {
         agent_t *a = active();
@@ -2804,6 +3086,9 @@ const char *habitat_view_name(void)
     case PHONE: return "phone";
     case PASSKEY: return "passkey";
     case FORGET: return "forget";
+    case PREFS: return "prefs";
+    case BRIGHT: return "brightness";
+    case ABOUT: return "about";
     }
     return "unknown";
 }
@@ -3390,8 +3675,77 @@ static void dispatch(action_t a)
             change();
         }
         break;
-    case A_SETTINGS:
+    case A_SETTINGS: {
+        const int keep = a.value ? s.list_offset : 0;   // back from the Settings screen lands on the row it left
         view(SETTINGS);
+        s.offset = keep;
+        break;
+    }
+    case A_PREFS: {
+        int keep = 0;
+        if (s.view == SETTINGS) s.list_offset = s.offset;
+        else if (a.value) keep = s.prefs_offset;
+        view(PREFS);
+        s.offset = keep;
+        queue((action_t){.kind = A_PLINK_SYNC});   // the worker reads what the Unplugged link row needs; the renderer never reads flash
+        break;
+    }
+    case A_BRIGHT:
+        s.prefs_offset = s.offset;
+        view(BRIGHT);
+        break;
+    case A_ABOUT:
+        s.prefs_offset = s.offset;
+        s.about_at = ms() + 10000;
+        view(ABOUT);
+        break;
+    case A_SOUND:
+        s.muted = !s.muted;
+        settings_pending.values.muted = s.muted;
+        settings_pending.fields |= UI_SETTING_MUTED;
+        settings_save_queue();
+        change();
+        break;
+    case A_PLINK:
+        queue((action_t){.kind = A_PLINK_CYCLE});
+        break;
+    case A_SCREEN_OFF:
+        if (prefs.saver) { prefs_note("Battery saver keeps 30 s."); break; }
+        prefs.timer = ht_timer_next(prefs.timer);
+        prefs_apply_power();
+        prefs_changed();
+        break;
+    case A_NIGHT: {
+        int bright = s.brightness;
+        bool muted = s.muted;
+        ht_night_toggle(&prefs, &bright, &muted);
+        ui_set_brightness((uint8_t)((bright * 255 + 50) / 100));
+        s.muted = muted;
+        settings_pending.values.brightness = (uint8_t)s.brightness;
+        settings_pending.values.muted = muted;
+        settings_pending.fields |= UI_SETTING_BRIGHTNESS | UI_SETTING_MUTED;
+        settings_save_queue();
+        prefs_changed();
+        break;
+    }
+    case A_SAVER:
+        prefs.saver = !prefs.saver;
+        prefs_apply_power();
+        prefs_changed();
+        break;
+    case A_RESTART:
+        if (s.restart_until && (int32_t)(ms() - s.restart_until) < 0) {
+            // The second tap. What is pending is queued first and the worker takes the queue in order, so every write lands before the restart.
+            queue((action_t){.kind = A_SETTINGS_SAVE});
+            queue((action_t){.kind = A_PREFS_SAVE});
+            queue((action_t){.kind = A_RESTART_GO});
+            s.restart_until = 0;
+            prefs_note("Restarting...");
+        } else {
+            s.restart_until = ms() + 3000;
+            if (!s.restart_until) s.restart_until = 1;
+            change();
+        }
         break;
     case A_LINK:
         // No caller in v1 (the edge swipe was removed 2026-11-10; test_link_screen.py pins that nothing dispatches this). The screen opens at once with its
@@ -3491,6 +3845,10 @@ static void dispatch(action_t a)
         break;
     case A_SETTINGS_SAVE:
     case A_LINK_SYNC:
+    case A_PLINK_SYNC:
+    case A_PLINK_CYCLE:
+    case A_RESTART_GO:
+    case A_PREFS_SAVE:
         break;   // the worker's alone: it is queued, never dispatched from a hit rect
     case A_SUPERTAB:
     case A_QUESTION_READ:
@@ -3545,6 +3903,36 @@ static void link_work(action_kind_t kind)
         hwm_logged = true;
         ESP_LOGI("habitat", "link_work stack free_min=%u B of 6144", (unsigned)uxTaskGetStackHighWaterMark(NULL));
     }
+    if (!ok) ui_cable_toast("Link change not saved.");
+}
+// The Settings screen's Unplugged link row, on the worker (it reads and writes NVS). A_PLINK_SYNC reads; A_PLINK_CYCLE writes the next wl_mode first
+// (prefs_logic.h: Auto, Wi-Fi, Phone, Auto, skipping what is not set up), then reads, then tells the mode switch (mode_glue_settings_changed), as link_work does.
+// The mode is the byte `harness dial net auto|wifi|phone` writes (config_net_set_mode), so the two never disagree. Picking Phone with no phone bonded says
+// where to pair.
+static void prefs_link_work(action_kind_t kind)
+{
+    config_net_info_t info;
+    config_net_info(&info);
+    bool attempted = false, ok = true, no_bond = false;
+    if (kind == A_PLINK_CYCLE) {
+        const int next = ht_link_next(info.mode, info.saved, info.ble, PREFS_BLE_IMAGE);
+        if (next >= 0) {
+            ok = config_net_set_mode(next) == CFG_NET_OK;
+            ESP_LOGI("habitat", "link: wl_mode %d -> %d from Settings: %s", (int)info.mode, next, ok ? "ok" : "FAILED");
+            attempted = true;
+            no_bond = ok && next == 2 && ble_link_bond_count() == 0;
+        }
+        config_net_info(&info);
+    }
+    display_lock();
+    prefs_link.loaded = true;
+    prefs_link.wifi = info.saved;
+    prefs_link.phone = info.ble;
+    prefs_link.mode = info.mode;
+    if (no_bond) prefs_note("No phone yet. Pair it: Settings > Phone");
+    change();
+    display_unlock();
+    if (attempted) mode_glue_settings_changed();   // after a failed write too: it can leave the marker off, which the glue should see
     if (!ok) ui_cable_toast("Link change not saved.");
 }
 static void worker(void *unused)
@@ -3693,6 +4081,26 @@ static void worker(void *unused)
         case A_LINK_STAY:
             link_work(a.kind);
             break;
+        case A_PLINK_SYNC:
+        case A_PLINK_CYCLE:
+            prefs_link_work(a.kind);
+            break;
+        case A_PREFS_SAVE: {
+            config_prefs_t c;
+            display_lock();
+            c = (config_prefs_t){.night = prefs.night, .saver = prefs.saver, .night_bright = prefs.night_bright, .timer = prefs.timer,
+                                 .night_muted = prefs.night_muted};
+            display_unlock();
+            if (!config_save_prefs(&c)) ui_cable_toast("Setting not saved.");
+            break;
+        }
+        case A_RESTART_GO:
+            // Every write queued before this one is done (the queue is in order, and each NVS write commits before it returns).
+            ESP_LOGW("habitat", "restart: asked from Settings");
+            last_words_note_reason("restart from Settings");
+            vTaskDelay(pdMS_TO_TICKS(150));   // the log line and the last report leave first
+            esp_restart();
+            break;
         case A_QUESTION_READ:
             cable_client_question_read(a.id,a.text);
             break;
@@ -3737,6 +4145,13 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
         return;
     // The caller holds the display lock (touch_habitat.c): every view() until this function returns, by any of its returns, is the user's (item 4b).
     bool user_nav_scope __attribute__((cleanup(user_nav_end))) = user_nav = true;
+    // A drag on the Brightness arc is the slider's from its first sample to its last: the gesture, scroll and tap code below never sees it.
+    if (bright_touch(down, x, y)) {
+        s.touch_down = down;
+        s.last_x = x;
+        s.last_y = y;
+        return;
+    }
     bool surface = s.view == HOME || s.view == AGENT;
     if (s.touch_down && !s.touch_cancelled) {
         // Classify this sample before the hold deadline. A delayed MOVE/UP
@@ -3801,7 +4216,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
             if (gesture.axis == 2 && ht_tab_carousel_move(&pane_carousel, x, now)) change();
         } else if (s.view == INBOX && character.id == HT_CHARACTER_FOCUS && inbox_carousel.touching) {
             if (gesture.axis == 2 && ht_tab_carousel_move(&inbox_carousel, x, now)) change();
-        } else if ((s.view == AGENTS || s.view == SETTINGS) && gesture.axis == 1) {
+        } else if ((s.view == AGENTS || s.view == SETTINGS || s.view == PREFS) && gesture.axis == 1) {
             tabs_move((s.last_y - y) * (scroll_reversed ? -1 : 1));
         } else if (s.view == DRAFT && gesture.axis == 1) {
             draft_move((s.last_y - y) * (scroll_reversed ? -1 : 1), now);
@@ -3827,7 +4242,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
         bool notice_tap = notice_contact && ht_tab_carousel_end(&inbox_carousel, x, gesture.axis == 2, now);
         if (s.view == AGENTS && character.id == HT_CHARACTER_FOCUS) {
             // the pages own the contact (pane_contact, below)
-        } else if (!s.touch_cancelled && (s.view == AGENTS || s.view == SETTINGS) && gesture.axis == 1)
+        } else if (!s.touch_cancelled && (s.view == AGENTS || s.view == SETTINGS || s.view == PREFS) && gesture.axis == 1)
             tabs_move((s.last_y - y) * (scroll_reversed ? -1 : 1));
         bool tab_contact = s.view == TABS && tab_carousel.touching;
         bool tab_tap = tab_contact && ht_tab_carousel_end(&tab_carousel, x, gesture.axis == 2, now);
@@ -3939,7 +4354,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                 dispatch(pressed_action);
             }
         } else if (gesture.axis == 1 && abs(dy) > 55 && abs(dy) > abs(dx)) {
-            if (s.view == TABS || s.view == AGENTS || s.view == SETTINGS) {
+            if (s.view == TABS || s.view == AGENTS || s.view == SETTINGS || s.view == PREFS) {
                 // The list consumed the drag already, including its final sample.
             } else if (s.view == DRAFT || s.view == DRAFT_OPTIONS) {
                 // Reading a draft never submits or starts recording.
@@ -3970,6 +4385,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                             : s.view == MACHINES ? s.machine_count
                             : s.view == MODELS   ? s.model_count
                             : s.view == SETTINGS ? settings_count()
+                            : s.view == PREFS    ? prefs_count()
                             : s.view == QUESTION ? s.q.item[s.q.index].count : 0;
                 int next = s.offset + (dy < 0 ? 3 : -3);
                 if (next >= 0 && next < count) s.offset = next;
@@ -4068,7 +4484,7 @@ uint32_t habitat_next_wake_ms(void)
         if (left < delay) delay = left;
     }
     uint32_t deadlines[] = {s.pet_pose ? s.pet_until : 0, s.nap ? s.nap_until : 0,
-                            s.voice_retry_until, s.battery_pct_until};
+                            s.voice_retry_until, s.battery_pct_until, s.restart_until, s.note_until};
     for (unsigned i = 0; i < sizeof(deadlines) / sizeof(deadlines[0]); i++)
         if (deadlines[i]) {
             int32_t left = (int32_t)(deadlines[i] - now);
@@ -4110,6 +4526,9 @@ void habitat_tick(void)
             }
         }
     }
+    if (s.restart_until && (int32_t)(now - s.restart_until) >= 0) { s.restart_until = 0; change(); }   // Restart dial disarms itself
+    if (s.note_until && (int32_t)(now - s.note_until) >= 0) { s.note_until = 0; s.note[0] = 0; change(); }
+    if (s.view == ABOUT && (int32_t)(now - s.about_at) >= 0) { s.about_at = now + 10000; change(); }   // uptime and battery move on their own
     surface_tick(now);
 #ifndef DEVICE_UI_GALLERY
     phone_poll();   // the gallery has no radio: its Phone items set phone_ui by hand
@@ -4196,6 +4615,12 @@ void ui_init(void)
     s.pressed = -1;
     s.brightness = (config_load_brightness() * 100 + 127) / 255;
     s.muted = config_load_muted();
+    {   // Night mode, Battery saver and the timer, and what they ask of the panel and the power code (set before the first frame)
+        config_prefs_t c;
+        config_load_prefs(&c);
+        prefs = (ht_prefs_t){.night = c.night, .saver = c.saver, .night_bright = c.night_bright, .night_muted = c.night_muted, .timer = c.timer};
+        prefs_apply_power();
+    }
     memset(&character, 0, sizeof character);
     memset(&home_caption, 0, sizeof home_caption);
     uint8_t saved_character = config_load_habitat_character((uint8_t)ht_character_default());
@@ -4908,7 +5333,7 @@ uint32_t ui_mode_switch_busy(char *focus, size_t cap)
     if (s.view == READER) busy |= MS_BUSY_READER;
     // forms, selections, stop confirmation, model and machine pickers, tabs, the update screen, a message
     switch (s.view) {
-    case FORM: case SELECTION: case STOP: case FORGET: case MODELS: case MACHINES: case TABS: case OTA: case MESSAGE:
+    case FORM: case SELECTION: case STOP: case FORGET: case BRIGHT: case MODELS: case MACHINES: case TABS: case OTA: case MESSAGE:
         busy |= MS_BUSY_PICKER;
         break;
     default:

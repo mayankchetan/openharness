@@ -194,7 +194,7 @@ static bool join_wifi(void)
 // straight to the top of its loop and joins there. The sleep is a notification wait (net_link_poke), with the relaxed poll as the fallback.
 static void radio_off_park(void)
 {
-    ESP_LOGI(TAG, "s2: wifi off after %d min", (int)S2_WIFI_OFF_MIN);
+    ESP_LOGI(TAG, "s2: wifi off after %u min", power_sleep_wifi_park_min());
     atomic_store(&s_radio_off, true);
     nwifi_radio_off();
     for (;;) {

@@ -20,6 +20,13 @@ void config_store_init(void);
 uint8_t config_load_brightness(void);
 void    config_save_brightness(uint8_t level);
 
+// The Settings screen's own flags (ui_habitat.c, prefs_logic.h): Night mode and Battery saver, what Night mode took over from, and the screen-off timer
+// index. Five small keys, written together by one commit. The load fills `out` with the defaults (everything off, timer 0 = the policy's own times) for a key
+// that is absent or of the wrong type, and clamps what it reads; a failed open is the defaults too.
+typedef struct { bool night, saver; uint8_t night_bright, timer; bool night_muted; } config_prefs_t;
+void config_load_prefs(config_prefs_t *out);
+bool config_save_prefs(const config_prefs_t *in);
+
 // Habitat starts muted. The saved preference survives firmware updates.
 bool config_load_muted(void);
 bool config_save_muted(bool muted);
