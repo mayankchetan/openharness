@@ -10,11 +10,14 @@ void ht_menu_open(ht_menu_t *m, uint32_t now_ms, bool boot_down_now)
     m->down_ms = 0;
 }
 
-void ht_menu_close(ht_menu_t *m)
+void ht_menu_close(ht_menu_t *m, bool boot_down)
 {
+    if (!m->open) return;
+    const bool counted = m->down;
     m->open = false;
     m->down = false;
     m->armed = false;
+    if (boot_down || counted) m->swallow = true;   // that press is not a tap: its release is eaten
 }
 
 bool ht_menu_boot(ht_menu_t *m, uint32_t now_ms, bool down)
@@ -35,18 +38,17 @@ bool ht_menu_boot(ht_menu_t *m, uint32_t now_ms, bool down)
         return false;
     }
     if ((uint32_t)(now_ms - m->down_ms) >= HT_MENU_HOLD_MS) {
-        ht_menu_close(m);
-        m->swallow = true;
+        ht_menu_close(m, true);
         return true;
     }
     return false;
 }
 
-bool ht_menu_tick(ht_menu_t *m, uint32_t now_ms)
+bool ht_menu_tick(ht_menu_t *m, uint32_t now_ms, bool boot_down)
 {
     if (!m->open || m->down) return false;
     if ((uint32_t)(now_ms - m->since_ms) < HT_MENU_TIMEOUT_MS) return false;
-    ht_menu_close(m);
+    ht_menu_close(m, boot_down);
     return true;
 }
 

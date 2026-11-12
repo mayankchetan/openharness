@@ -39,6 +39,11 @@ void mode_glue_start(ms_mode_t running);
 // Settings changed (wl_mode or stay_wl, task W16): re-read them. Safe from any task.
 void mode_glue_settings_changed(void);
 
+// Settings > Restart dial. Freezes the NVS writers (store_gate), looks once more at the hard busy rows (a firmware update, a pet upload), and calls esp_restart()
+// with `reason` noted for the next boot's report. Does not return when it restarts. Returns a non-zero mg_restart_t (mode_glue_core.h) when it did not: the
+// writers are frozen for a power-off, a writer did not finish, or an update or an upload is in flight. Any task; not the cable reader.
+int mode_glue_user_restart(const char *reason);
+
 // "Never mid-action" (MS section 3). The mask of what the user is in the middle of, built from the UI states, an update or upload in flight and the
 // blocking model list; and the verdict with the asleep rule applied (a sleeping dial switches silently, except for an update or an upload).
 uint32_t mode_switch_busy(void);

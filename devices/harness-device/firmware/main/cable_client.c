@@ -2011,7 +2011,7 @@ bool cable_client_start_with(const cable_xport_t *xport)
 #if TASK_STACK_PSRAM_FLASH_OPS
     // Stack in PSRAM (task_util.h). session_task sends the hello (esp_app_get_description returns a pointer, no mapping)
     // and reads config from NVS; it maps no flash and hands no stack buffer to DMA (call graph and grep, 2026-10-28).
-    // The failure path below deletes it with vTaskDelete: a boot-time failure that leaves its 4,096 B PSRAM stack allocated.
+    // The failure path below deletes it with task_delete_psram, which frees that 4,096 B PSRAM stack (plain vTaskDelete would leak it at each failed start).
     if (task_create_psram(session_task, "cable_session", 4096, NULL, 4, &hello_task, tskNO_AFFINITY) != pdPASS) {
 #else
     if (xTaskCreate(session_task, "cable_session", 4096, NULL, 4, &hello_task) != pdPASS) {
@@ -2020,7 +2020,11 @@ bool cable_client_start_with(const cable_xport_t *xport)
         goto failed;
     }
     if (!cable_link_start_with(xport, on_frame, session_tick, NULL)) {
+#if TASK_STACK_PSRAM_FLASH_OPS
+        task_delete_psram(hello_task);   // its stack is in PSRAM: plain vTaskDelete leaks 4 KB at every failed start, and the start is now retried
+#else
         vTaskDelete(hello_task);
+#endif
         goto failed;
     }
     s_started = true;

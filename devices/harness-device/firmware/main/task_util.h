@@ -14,6 +14,10 @@
 // Each caller has a TASK_STACK_PSRAM_* macro; 0 puts it back on xTaskCreate*.
 BaseType_t task_create_psram(TaskFunction_t fn, const char *name, uint32_t stack_bytes, void *arg,
                              UBaseType_t priority, TaskHandle_t *out, BaseType_t core);
+// Delete a task made by task_create_psram from ANOTHER task (a failed start that has to undo its creates). A task whose stack is in PSRAM is a static-buffer task
+// (xTaskCreate...WithCaps) and plain vTaskDelete leaks that stack: this frees it (vTaskDeleteWithCaps). A task that fell back to an internal stack is a dynamic task and
+// gets the plain delete.
+void task_delete_psram(TaskHandle_t task);
 
 // Per-task switches (compile with -DTASK_STACK_PSRAM_<X>=0 to put that task's stack back in internal RAM).
 // Stack bytes moved out of internal RAM at the default: ptt 4,096, beep 4,096, proj_refresh 7,168; FLASH_OPS

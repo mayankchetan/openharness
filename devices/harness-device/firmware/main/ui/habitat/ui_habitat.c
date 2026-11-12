@@ -287,7 +287,10 @@ static EXT_RAM_BSS_ATTR struct {
     int brightness;
     bool bright_drag;         // a contact that began in the Brightness arc's band is the slider's until it lifts (bright_touch)
     int bright_from;          // the level that contact began on: no change, no flash write
-    bool prefs_dirty;         // Night mode, Battery saver or the timer changed and the worker has not been asked to write it yet
+    bool prefs_dirty;         // Night mode, Battery saver or the timer changed and the write has not been confirmed yet (cleared by the worker, after a success)
+    bool prefs_inflight;      // an A_PREFS_SAVE is queued or running
+    uint32_t prefs_rev;       // moves with every change to prefs: the worker clears prefs_dirty only for the revision it wrote
+    uint8_t prefs_fails;      // failed writes in a row; the tick retries until 5
     int list_offset, prefs_offset;   // the place in the controls list and in the Settings screen that was left for a screen below it
     uint32_t restart_until;   // Restart dial is armed until this ms() time; 0 = not armed
     uint32_t note_until;      // the Settings screen's note line goes at this time; 0 = none
@@ -661,12 +664,25 @@ static void menu_open(void)
     menu_sync();
     change();
 }
+// EVERY way out of the prompt repaints and syncs: a prompt that stays painted after the machine closed it (BOOT then starts a capture under it, because
+// boot_voice no longer refuses) was the fault of a close that skipped this. BOOT down at the moment of the close has its release eaten (menu_prompt.h).
 static void menu_close(void)
 {
-    if (!s.menu.open) return;
-    ht_menu_close(&s.menu);
+    const bool was_open = s.menu.open;
+    ht_menu_close(&s.menu, atomic_load(&boot_level));
     menu_sync();
-    change();
+    if (was_open) change();
+}
+// The 10 s timeout, and a screen that went to sleep under the prompt. Render task (habitat_tick), display lock held.
+static void menu_tick(uint32_t now)
+{
+    if (!s.menu.open) return;
+    if (ht_menu_tick(&s.menu, now, atomic_load(&boot_level))) {   // closed by the machine: the flag and the glass still say it is up
+        menu_sync();
+        change();
+    } else if (display_is_asleep()) {
+        menu_close();
+    }
 }
 static bool user_nav;   // display lock: true only while habitat_touch runs, so a view change that is a finger's doing can be told from a boot, refresh or desktop one
 static void view(view_t v)
@@ -2485,11 +2501,18 @@ static void render_draft_options(ht_scene_t *f)
  */
 static ht_prefs_t prefs;
 static ht_link_kind_t link_icon_kind(void);   // defined with the link icon, below
-static struct { bool loaded, wifi, phone; int mode; } prefs_link;   // what the worker read: both radios' settings whole, and wl_mode
+static struct { bool loaded, wifi, phone, bonded; int mode; } prefs_link;   // what the worker read: both radios' settings whole, a phone bonded, and wl_mode
 #ifdef DEVICE_BLE_LINK
 #define PREFS_BLE_IMAGE true
 #else
 #define PREFS_BLE_IMAGE false
+#endif
+// Screen off and the Battery saver's timer and radio park are the battery policy's (power_sleep.c, DEVICE_BATTERY_SLEEP). In an image without it their setters
+// are empty stubs, so the Screen off row is not shown there and Battery saver is the panel cap alone.
+#ifdef DEVICE_BATTERY_SLEEP
+#define PREFS_SLEEP_IMAGE true
+#else
+#define PREFS_SLEEP_IMAGE false
 #endif
 static int bright_level(void)
 {
@@ -2497,7 +2520,7 @@ static int bright_level(void)
 }
 static bool prefs_link_shown(void)
 {
-    return prefs_link.loaded && ht_link_options(prefs_link.wifi, prefs_link.phone, PREFS_BLE_IMAGE) >= 2;
+    return prefs_link.loaded && ht_link_options(prefs_link.wifi, prefs_link.phone, PREFS_BLE_IMAGE, prefs_link.bonded) >= 2;
 }
 static void prefs_value(action_kind_t action, char *value, size_t cap)
 {
@@ -2524,6 +2547,7 @@ static const char *prefs_item(int wanted, action_kind_t *action, char *value, si
     };
     for (unsigned i = 0; i < sizeof items / sizeof items[0]; i++) {
         if (items[i].action == A_PLINK && !prefs_link_shown()) continue;
+        if (items[i].action == A_SCREEN_OFF && !PREFS_SLEEP_IMAGE) continue;   // no battery policy in this image: the row would do nothing
         if (wanted-- == 0) {
             if (action) *action = items[i].action;
             if (value && cap) prefs_value(items[i].action, value, cap);
@@ -2844,20 +2868,27 @@ static void settings_save_queue(void)
 {
     if (actions && uxQueueSpacesAvailable(actions) > 1) xQueueSend(actions, &(action_t){.kind = A_SETTINGS_SAVE}, 0);
 }
+// Asks the worker to write prefs. prefs_dirty stays set until the worker has CONFIRMED the write (A_PREFS_SAVE), and the tick asks again after a refusal or a failure
+// (a failed write must not leave 8 percent and muted with Night mode shown Off).
 static void prefs_save_queue(void)
 {
-    if (actions && uxQueueSpacesAvailable(actions) > 1 && xQueueSend(actions, &(action_t){.kind = A_PREFS_SAVE}, 0) == pdPASS) s.prefs_dirty = false;
+    if (s.prefs_inflight || !actions || uxQueueSpacesAvailable(actions) <= 1) return;
+    if (xQueueSend(actions, &(action_t){.kind = A_PREFS_SAVE}, 0) == pdPASS) s.prefs_inflight = true;
 }
 // The settings the power code and the panel keep for themselves: what Battery saver and the timer ask of them. At boot and at every change.
 static void prefs_apply_power(void)
 {
     display_set_brightness_cap((uint8_t)ht_panel_cap(&prefs));
+#ifdef DEVICE_BATTERY_SLEEP
     power_sleep_set_screen_off_ms(ht_screen_off_ms(&prefs));
     power_sleep_set_wifi_park_min((unsigned)ht_park_minutes(&prefs));
+#endif
 }
 static void prefs_changed(void)
 {
     s.prefs_dirty = true;
+    s.prefs_rev++;
+    s.prefs_fails = 0;
     prefs_save_queue();
     change();
 }
@@ -2884,6 +2915,8 @@ static void bright_set(int y)
         settings_pending.values.muted = muted;
         settings_pending.fields |= UI_SETTING_MUTED;
         s.prefs_dirty = true;
+        s.prefs_rev++;
+        s.prefs_fails = 0;
     }
     ui_set_brightness((uint8_t)((percent * 255 + 50) / 100));
 }
@@ -3768,8 +3801,16 @@ static void dispatch(action_t a)
         settings_pending.values.brightness = (uint8_t)s.brightness;
         settings_pending.values.muted = muted;
         settings_pending.fields |= UI_SETTING_BRIGHTNESS | UI_SETTING_MUTED;
-        settings_save_queue();
-        prefs_changed();
+        // Two writes, so the ORDER keeps a failure of the second harmless: turning Night mode ON writes the flag and the saved pair first (a failed second write
+        // leaves Night On and the old level, which the next toggle restores); turning it OFF writes the restored levels first (a failed second write leaves
+        // Night On over the restored levels). Either way "8 percent, muted, Night Off" cannot be what NVS holds. A failed prefs write is retried (the tick).
+        if (prefs.night) {
+            prefs_changed();
+            settings_save_queue();
+        } else {
+            settings_save_queue();
+            prefs_changed();
+        }
         break;
     }
     case A_SAVER:
@@ -3957,14 +3998,15 @@ static void prefs_link_work(action_kind_t kind)
 {
     config_net_info_t info;
     config_net_info(&info);
-    bool attempted = false, ok = true, no_bond = false;
+    bool attempted = false, ok = true;
+    const bool bonded = ble_link_bond_count() > 0;
     if (kind == A_PLINK_CYCLE) {
-        const int next = ht_link_next(info.mode, info.saved, info.ble, PREFS_BLE_IMAGE);
+        // Phone is in the cycle only with a phone bonded: an unplugged dial that rebooted into a phone mode nobody paired would have no link at all.
+        const int next = ht_link_next(info.mode, info.saved, info.ble, PREFS_BLE_IMAGE, bonded);
         if (next >= 0) {
             ok = config_net_set_mode(next) == CFG_NET_OK;
             ESP_LOGI("habitat", "link: wl_mode %d -> %d from Settings: %s", (int)info.mode, next, ok ? "ok" : "FAILED");
             attempted = true;
-            no_bond = ok && next == 2 && ble_link_bond_count() == 0;
         }
         config_net_info(&info);
     }
@@ -3972,8 +4014,9 @@ static void prefs_link_work(action_kind_t kind)
     prefs_link.loaded = true;
     prefs_link.wifi = info.saved;
     prefs_link.phone = info.ble;
+    prefs_link.bonded = bonded;
     prefs_link.mode = info.mode;
-    if (no_bond) prefs_note("No phone yet. Pair it: Settings > Phone");
+    if (kind == A_PLINK_CYCLE && PREFS_BLE_IMAGE && info.ble && !bonded) prefs_note("Phone is skipped: pair it in Settings");
     change();
     display_unlock();
     if (attempted) mode_glue_settings_changed();   // after a failed write too: it can leave the marker off, which the glue should see
@@ -4132,18 +4175,34 @@ static void worker(void *unused)
         case A_PREFS_SAVE: {
             config_prefs_t c;
             display_lock();
+            const uint32_t rev = s.prefs_rev;
             c = (config_prefs_t){.night = prefs.night, .saver = prefs.saver, .night_bright = prefs.night_bright, .timer = prefs.timer,
                                  .night_muted = prefs.night_muted};
             display_unlock();
-            if (!config_save_prefs(&c)) ui_cable_toast("Setting not saved.");
+            const bool ok = config_save_prefs(&c);
+            display_lock();
+            s.prefs_inflight = false;
+            if (ok) {
+                if (s.prefs_rev == rev) s.prefs_dirty = false;   // a change made while this ran stays dirty and is written next
+                s.prefs_fails = 0;
+            } else if (++s.prefs_fails == 5) {
+                ui_cable_toast("Setting not saved.");   // the tick has tried five times; it stops
+            }
+            change();
+            display_unlock();
             break;
         }
         case A_RESTART_GO:
             // Every write queued before this one is done (the queue is in order, and each NVS write commits before it returns).
             ESP_LOGW("habitat", "restart: asked from Settings");
-            last_words_note_reason("restart from Settings");
             vTaskDelay(pdMS_TO_TICKS(150));   // the log line and the last report leave first
-            esp_restart();
+            // Through the mode switch's gate (mode_glue.c): the NVS writers are frozen and waited for, and a firmware update or a pet upload in flight is not cut.
+            // esp_restart() does not return; anything that does return is a refusal, and the dial goes on.
+            if (mode_glue_user_restart("restart from Settings") != 0) {
+                display_lock();
+                prefs_note("Busy, try again");
+                display_unlock();
+            }
             break;
         case A_QUESTION_READ:
             cable_client_question_read(a.id,a.text);
@@ -4239,7 +4298,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
             pressed_action.kind != A_ANSWER && pressed_action.kind != A_DRAFT_SEND && pressed_action.kind != A_DRAFT_EDIT &&
             pressed_action.kind != A_DRAFT_APPEND && pressed_action.kind != A_DRAFT_UNDO) gesture.guarded = false; // Discard is always immediate.
         if (s.pressed >= 0 && ((!surface && s.view != VOICE) || home_footer(pressed_action.kind))) change();
-        if (ui_scroll_reportable() && !(surface && y >= MENU_EDGE_Y)) {   // a pull up from the bottom edge opens the menu prompt, not a scroll
+        if (ui_scroll_reportable()) {
             if (surface && home_footer(pressed_action.kind)) {
                 // Footer choices send no terminal scroll. A contact that stops an existing fling still has to reach the app.
                 if (s.touch_brake) {
@@ -4290,6 +4349,13 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
             tabs_move((s.last_y - y) * (scroll_reversed ? -1 : 1));
         bool tab_contact = s.view == TABS && tab_carousel.touching;
         bool tab_tap = tab_contact && ht_tab_carousel_end(&tab_carousel, x, gesture.axis == 2, now);
+        // A pull up from the bottom edge that opens the menu prompt is not a scroll: the terminal scroll it began (the contact starts as any other on the face, and
+        // the fling brake needs that) ends here without a fling, and the contact is the prompt's. Every test of the ladder below is repeated, so this and the
+        // open agree.
+        const int pull_dx = x - s.start_x, pull_dy = y - s.start_y;
+        const bool menu_pull = surface && !s.menu.open && !s.touch_cancelled && s.start_y >= MENU_EDGE_Y && gesture.axis == 1 && pull_dy < 0 &&
+            abs(pull_dy) > 55 && abs(pull_dy) > abs(pull_dx) && !home_footer(pressed_action.kind);
+        if (menu_pull) ht_scroll_cancel(&scroll);
         bool scrolled = ht_scroll_end(&scroll, x, y, now);
         if (scrolled) {
             uint32_t coast = ht_scroll_coast_ms(scroll.velocity);
@@ -4439,7 +4505,9 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                 if (next >= 0 && next < count) s.offset = next;
             }
         } else if (gesture.axis == 2 && abs(dx) > 60 && abs(dx) > abs(dy)) {
-            if (s.view == TABS) {
+            if (surface && s.menu.open) {
+                // The prompt is modal: a swipe sideways must not change the agent behind it.
+            } else if (s.view == TABS) {
                 // The carousel owns horizontal motion, including contacts that began on its footer.
             } else if (s.view == DRAFT || s.view == DRAFT_OPTIONS) {
                 if (dx > 0) {
@@ -4578,7 +4646,8 @@ void habitat_tick(void)
             }
         }
     }
-    if (s.menu.open && (ht_menu_tick(&s.menu, now) || display_is_asleep())) { menu_close(); }   // 10 s without an action
+    menu_tick(now);   // 10 s without an action
+    if (s.prefs_dirty && !s.prefs_inflight && s.prefs_fails < 5) prefs_save_queue();   // a refused or failed write is asked for again
     if (s.restart_until && (int32_t)(now - s.restart_until) >= 0) { s.restart_until = 0; change(); }   // Restart dial disarms itself
     if (s.note_until && (int32_t)(now - s.note_until) >= 0) { s.note_until = 0; s.note[0] = 0; change(); }
     if (s.view == ABOUT && (int32_t)(now - s.about_at) >= 0) { s.about_at = now + 10000; change(); }   // uptime and battery move on their own
@@ -6745,6 +6814,7 @@ void ui_menu_boot(bool down)
     if (!atomic_load(&menu_live)) return;
     display_lock();
     if (s.menu.open && display_is_asleep()) menu_close();
+    const bool was_down = s.menu.down;
     if (ht_menu_boot(&s.menu, ms(), down)) {
         ESP_LOGI("habitat", "menu: BOOT held 2 s, opening the controls list");
         menu_sync();
@@ -6752,7 +6822,7 @@ void ui_menu_boot(bool down)
         s.offset = 0;
     } else {
         menu_sync();
-        if (s.menu.open) change();   // the bar moves
+        if (s.menu.open && (was_down || s.menu.down)) change();   // the bar moves (and empties on a release); an idle prompt is not repainted at 10 Hz
     }
     display_unlock();
 }

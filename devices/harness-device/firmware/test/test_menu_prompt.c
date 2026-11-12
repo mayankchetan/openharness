@@ -57,7 +57,7 @@ int main(void)
     ptt_run(&k, 6500, 6700, false);
     assert(taps_acted == 0 && voice_starts == 0 && ui.open && menu_opened == 1);
     // Prompt gone (dismissed): the same 1 s hold is a capture again, and a tap acts again.
-    ht_menu_close(&ui);
+    ht_menu_close(&ui, false);
     ptt_run(&k, 7000, 7300, false);
     ptt_run(&k, 7400, 8400, true);
     ptt_run(&k, 8500, 8700, false);
@@ -97,31 +97,53 @@ int main(void)
 
     // TIMEOUT: 10 s with no action closes it (strictly after), by itself; the tick says so once.
     ht_menu_open(&m, 30000, false);
-    assert(!ht_menu_tick(&m, 39999) && m.open && ht_menu_next_ms(&m, 39000) == 1000);
-    assert(ht_menu_tick(&m, 40000) && !m.open && !ht_menu_eats_tap(&m));
-    assert(!ht_menu_tick(&m, 50000) && ht_menu_next_ms(&m, 50000) == 0);
+    assert(!ht_menu_tick(&m, 39999, false) && m.open && ht_menu_next_ms(&m, 39000) == 1000);
+    assert(ht_menu_tick(&m, 40000, false) && !m.open && !ht_menu_eats_tap(&m));
+    assert(!ht_menu_tick(&m, 50000, false) && ht_menu_next_ms(&m, 50000) == 0);
     // A BOOT press is an action: the 10 s restart from the release, and never run out while the key is held.
     ht_menu_open(&m, 60000, false);
     poll(&m, 60000, 60100, false);
     poll(&m, 66000, 67000, true);
-    assert(!ht_menu_tick(&m, 75000) && m.open && "held: no timeout");
+    assert(!ht_menu_tick(&m, 75000, false) && m.open && "held: no timeout");
     ht_menu_boot(&m, 75100, false);
-    assert(!ht_menu_tick(&m, 85000) && ht_menu_tick(&m, 85100) && "10 s from the release");
+    assert(!ht_menu_tick(&m, 85000, false) && ht_menu_tick(&m, 85100, false) && "10 s from the release");
     // The clock wraps: the same rules over the 32-bit edge.
     ht_menu_open(&m, 0xFFFFF000u, false);
-    assert(!ht_menu_tick(&m, 0xFFFFF000u + 9999) && ht_menu_tick(&m, 0xFFFFF000u + 10000));
+    assert(!ht_menu_tick(&m, 0xFFFFF000u + 9999, false) && ht_menu_tick(&m, 0xFFFFF000u + 10000, false));
 
     // SWIPE DOWN dismisses at once, and a press afterwards does nothing.
     ht_menu_open(&m, 90000, false);
-    ht_menu_close(&m);
+    ht_menu_close(&m, false);
     assert(!m.open && !ht_menu_eats_tap(&m) && ht_menu_progress(&m, 90100) == 0);
     assert(poll(&m, 90100, 93000, true) == 0 && !m.open);
     // Dismissed while BOOT is held, then released: nothing is swallowed (no confirm happened).
     ht_menu_open(&m, 100000, false);
     poll(&m, 100000, 100100, false);
     poll(&m, 100200, 100800, true);
-    ht_menu_close(&m);
-    assert(!m.down && !ht_menu_eats_tap(&m));
+    ht_menu_close(&m, false);
+    assert(!m.down && ht_menu_eats_tap(&m) && "closed with a counted press down: its release is eaten");
+    ht_menu_boot(&m, 100900, false);
+    assert(!ht_menu_eats_tap(&m));
+
+    // CLOSE WITH BOOT DOWN. A swipe down, a view change, or the timeout with the key already down at open: the release of that press is eaten, not a
+    // tap (it would go home), and only that release: the next press is a plain press again.
+    ht_menu_open(&m, 130000, true);                                  // BOOT already down, never counted
+    assert(!ht_menu_tick(&m, 139999, true) && ht_menu_tick(&m, 140000, true) && !m.open);
+    assert(ht_menu_eats_tap(&m) && "the key is still down: its release is not a tap");
+    ht_menu_boot(&m, 140100, true);
+    assert(ht_menu_eats_tap(&m));
+    ht_menu_boot(&m, 140200, false);
+    assert(!ht_menu_eats_tap(&m));
+    ht_menu_open(&m, 150000, false);
+    ht_menu_close(&m, true);                                         // a swipe down while the key is down
+    assert(ht_menu_eats_tap(&m));
+    ht_menu_boot(&m, 150100, false);
+    assert(!ht_menu_eats_tap(&m));
+    ht_menu_open(&m, 160000, false);
+    ht_menu_close(&m, false);                                        // nothing down: nothing to eat
+    assert(!ht_menu_eats_tap(&m));
+    ht_menu_close(&m, true);                                         // closing a prompt that is not up is nothing
+    assert(!ht_menu_eats_tap(&m));
 
     // A BOOT TAP while the prompt is up is eaten (ui_boot_pressed asks): the prompt stays up and nothing else runs.
     ht_menu_open(&m, 110000, false);

@@ -38,17 +38,17 @@ int main(void)
         assert(pp_screen_level_cfg(PP_S1, idle, 60000) == pp_screen_level(PP_S1, idle));
 
     // ── Unplugged link: Auto -> Wi-Fi -> Phone -> Auto, with both radios set up in an image that has the phone link.
-    assert(ht_link_next(3, true, true, true) == 1 && ht_link_next(1, true, true, true) == 2 && ht_link_next(2, true, true, true) == 3);
-    assert(ht_link_next(0, true, true, true) == 3 && "USB only enters the cycle at Auto");
-    assert(ht_link_next(99, true, true, true) == 3 && "a byte that is no mode too");
+    assert(ht_link_next(3, true, true, true, true) == 1 && ht_link_next(1, true, true, true, true) == 2 && ht_link_next(2, true, true, true, true) == 3);
+    assert(ht_link_next(0, true, true, true, true) == 3 && "USB only enters the cycle at Auto");
+    assert(ht_link_next(99, true, true, true, true) == 3 && "a byte that is no mode too");
     // A mode that is not set up is skipped; with one mode only there is nothing to go to.
-    assert(ht_link_next(3, true, false, true) == 1 && ht_link_next(1, true, false, true) == -1 && ht_link_options(true, false, true) == 1);
-    assert(ht_link_next(3, false, true, true) == 2 && ht_link_next(2, false, true, true) == -1);
-    assert(ht_link_next(0, false, false, true) == -1 && ht_link_options(false, false, true) == 0);
+    assert(ht_link_next(3, true, false, true, true) == 1 && ht_link_next(1, true, false, true, true) == -1 && ht_link_options(true, false, true, true) == 1);
+    assert(ht_link_next(3, false, true, true, true) == 2 && ht_link_next(2, false, true, true, true) == -1);
+    assert(ht_link_next(0, false, false, true, true) == -1 && ht_link_options(false, false, true, true) == 0);
     // No phone link in the image: Phone and Auto are never offered, whatever is stored, and the row (two options or more) is not shown.
-    assert(ht_link_next(1, true, true, false) == -1 && ht_link_next(0, true, true, false) == 1 && ht_link_options(true, true, false) == 1);
-    assert(!ht_link_offered(2, true, true, false) && !ht_link_offered(3, true, true, false) && ht_link_offered(1, true, true, false));
-    assert(ht_link_options(true, true, true) == 3);
+    assert(ht_link_next(1, true, true, false, true) == -1 && ht_link_next(0, true, true, false, true) == 1 && ht_link_options(true, true, false, true) == 1);
+    assert(!ht_link_offered(2, true, true, false, true) && !ht_link_offered(3, true, true, false, true) && ht_link_offered(1, true, true, false, true));
+    assert(ht_link_options(true, true, true, true) == 3);
     assert(!strcmp(ht_link_label(0), "USB only") && !strcmp(ht_link_label(1), "Wi-Fi") && !strcmp(ht_link_label(2), "Phone") && !strcmp(ht_link_label(3), "Auto"));
     // Any starting point, any set-up: the cycle returns to where it began and never sticks.
     for (int have = 0; have < 8; have++)
@@ -56,18 +56,27 @@ int main(void)
             const bool w = have & 1, p = have & 2, b = have & 4;
             int seen = start, visited = 0;
             for (int steps = 0; steps < 6; steps++) {
-                const int next = ht_link_next(seen, w, p, b);
-                if (next < 0) { assert(ht_link_options(w, p, b) <= 1 && "no way on only when nothing else is on offer"); break; }
-                assert(ht_link_offered(next, w, p, b) && next != seen);
+                const int next = ht_link_next(seen, w, p, b, true);
+                if (next < 0) { assert(ht_link_options(w, p, b, true) <= 1 && "no way on only when nothing else is on offer"); break; }
+                assert(ht_link_offered(next, w, p, b, true) && next != seen);
                 if (steps < 3) visited |= 1 << next;
                 seen = next;
             }
-            if (ht_link_options(w, p, b) >= 2) {   // two or more on offer: three taps visit every one of them
+            if (ht_link_options(w, p, b, true) >= 2) {   // two or more on offer: three taps visit every one of them
                 int want = 0;
-                for (int mode = 1; mode <= 3; mode++) want |= ht_link_offered(mode, w, p, b) ? 1 << mode : 0;
+                for (int mode = 1; mode <= 3; mode++) want |= ht_link_offered(mode, w, p, b, true) ? 1 << mode : 0;
                 assert((visited & want) == want);
             }
         }
+
+    // PHONE needs a bond: without one it is never offered, so an unplugged Wi-Fi dial cannot be cycled into an unpaired phone mode. Auto (Wi-Fi first) is.
+    assert(!ht_link_offered(2, true, true, true, false) && ht_link_offered(2, true, true, true, true) && ht_link_offered(3, true, true, true, false));
+    assert(ht_link_next(1, true, true, true, false) == 3 && ht_link_next(3, true, true, true, false) == 1 && "Wi-Fi and Auto only, no Phone");
+    assert(ht_link_next(2, true, true, true, false) == 3 && "a dial already in phone mode with its bond gone can leave it");
+    assert(ht_link_options(true, true, true, false) == 2 && ht_link_options(false, true, true, false) == 0 && ht_link_options(true, true, true, true) == 3);
+    for (int have = 0; have < 8; have++)   // never PHONE with no bond, whatever else is set up
+        for (int start = 0; start < 4; start++)
+            assert(ht_link_next(start, have & 1, have & 2, have & 4, false) != 2);
 
     // ── Night mode: on = 8 percent and muted, the old pair kept; off = the old pair back.
     ht_prefs_t p;

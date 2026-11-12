@@ -2,6 +2,7 @@
 // IDF create calls are fakes here; the test proves which one runs, with which arguments, and what comes back.
 #include "task_util.h"
 #include <assert.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -29,6 +30,14 @@ BaseType_t xTaskCreatePinnedToCore(TaskFunction_t fn, const char *name, uint32_t
     if (internal_result == pdPASS && out) *out = handle_given;
     return internal_result;
 }
+
+// Deleting from outside (a failed start): a task made with caps is a static-buffer task and is freed with its PSRAM stack; a dynamic one (the internal fallback)
+// gets the plain delete.
+static int caps_deletes, plain_deletes;
+static bool is_static;
+BaseType_t xTaskGetStaticBuffers(TaskHandle_t task, StackType_t **stack, StaticTask_t **tcb) { (void)task; (void)stack; (void)tcb; return is_static ? pdTRUE : pdFALSE; }
+void vTaskDeleteWithCaps(TaskHandle_t task) { (void)task; caps_deletes++; }
+void vTaskDelete(TaskHandle_t task) { (void)task; plain_deletes++; }
 
 static int warnings;
 void host_log_warn(const char *tag, const char *fmt, ...) { (void)tag; (void)fmt; warnings++; }
@@ -77,6 +86,17 @@ int main(void)
     reset(pdPASS, pdPASS);
     assert(task_create_psram(body, "ptt", 4096, NULL, 3, NULL, tskNO_AFFINITY) == pdPASS);
     assert(caps_calls == 1 && last_caps.out == NULL);
+
+    // task_delete_psram: a PSRAM-stack task is freed with its stack (the 4 KB the cable start used to leak on a failed start), an internal one is deleted plainly,
+    // and NULL is nothing.
+    is_static = true; caps_deletes = plain_deletes = 0;
+    task_delete_psram((TaskHandle_t)&token);
+    assert(caps_deletes == 1 && plain_deletes == 0);
+    is_static = false;
+    task_delete_psram((TaskHandle_t)&token);
+    assert(caps_deletes == 1 && plain_deletes == 1);
+    task_delete_psram(NULL);
+    assert(caps_deletes == 1 && plain_deletes == 1);
 
     puts("task_create_psram: PSRAM stack first, internal fallback with the same arguments, failure passed on PASS");
     return 0;

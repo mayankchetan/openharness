@@ -57,8 +57,8 @@ static ui_companion_t desktop_identity;
 static bool companion_celebrating;
 static void select_companion(void) {}
 static void menu_close(void) {}   /* the menu prompt: not up here */
-static bool ht_menu_tick(void *m, uint32_t t) { (void)m; (void)t; return false; }
-static bool display_is_asleep(void) { return false; }
+static void menu_tick(uint32_t t) { (void)t; }
+static void prefs_save_queue(void) {}
 static void bright_drag_end(void) {}   /* input_cancel ends a Brightness drag; no drag here */
 static ht_tab_carousel_t tab_carousel;
 #define PANE_PITCH 60
@@ -68,6 +68,8 @@ static struct {
     uint32_t error_until, restart_until, note_until, about_at;   /* the Settings screen's expiries (habitat_tick) */
     char note[40];
     struct { bool open; } menu;
+    bool prefs_dirty, prefs_inflight;
+    uint8_t prefs_fails;
     uint32_t pet_until, nap_until, voice_retry_until, voice_started, voice_wait_until, voice_generation, voice_question_revision, voice_draft_revision;
     int voice_question_index, battery_rim_seen, link_icon_seen;
     uint32_t battery_wake_seen, battery_pct_until;

@@ -160,6 +160,7 @@ __attribute__((unused)) static int task_create_psram(void (*task)(void *),const 
     (void)core; psram_creates++; return xTaskCreate(task,name,stack,arg,priority,handle);
 }
 static void vTaskDelete(TaskHandle_t task) { assert(task==hello_handle&&hellos);hellos--;hello_handle=NULL; }
+__attribute__((unused)) static void task_delete_psram(TaskHandle_t task) { vTaskDelete(task); }   /* the PSRAM-stack task's delete (task_util.c) */
 static void xTaskNotifyGive(TaskHandle_t task) {
     assert(task==hello_handle&&hellos&&s_running&&driver&&new_task_ready);notifications++;
 }

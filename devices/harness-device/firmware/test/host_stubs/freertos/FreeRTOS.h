@@ -4,6 +4,10 @@
 typedef int BaseType_t;
 typedef unsigned UBaseType_t;
 typedef void *TaskHandle_t;
+typedef uint8_t StackType_t;
+typedef struct { int unused; } StaticTask_t;
+#define pdTRUE 1
+#define pdFALSE 0
 typedef void (*TaskFunction_t)(void *);
 #define pdPASS 1
 #define errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY (-1)

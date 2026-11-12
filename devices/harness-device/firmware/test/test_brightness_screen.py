@@ -54,7 +54,7 @@ enum { A_NONE, A_SETTINGS_SAVE, A_PREFS_SAVE };
 typedef struct { int kind; } action_t;
 enum { UI_SETTING_BRIGHTNESS = 1u << 0, UI_SETTING_MUTED = 1u << 1 };
 typedef struct { uint8_t brightness; bool muted; } ui_settings_t;
-static struct { bool bright_drag, touch_down, touch_cancelled, muted, prefs_dirty; int bright_from, brightness, pressed, view; } s;
+static struct { bool bright_drag, touch_down, touch_cancelled, muted, prefs_dirty, prefs_inflight; uint32_t prefs_rev; uint8_t prefs_fails; int bright_from, brightness, pressed, view; } s;
 static struct { ui_settings_t values; uint32_t fields; } settings_pending;
 static ht_prefs_t prefs;
 #define pdPASS 1
@@ -180,10 +180,19 @@ int main(void)
     prefs.night = true; prefs.night_bright = 70; prefs.night_muted = false;
     assert(bright_touch(true, 443, 233) && bright_touch(true, 437, 150) && bright_touch(false, 437, 150));
     assert(!prefs.night && s.brightness == ht_bright_percent_at(150) && !s.muted && "the user's level stays; sound back");
-    assert(saves == 1 && prefs_saves == 1 && !s.prefs_dirty);
+    assert(saves == 1 && prefs_saves == 1 && s.prefs_dirty && s.prefs_inflight && s.prefs_rev == 1 && "dirty until the worker confirms the write");
+    // A second ask while one is in flight queues nothing more; a refused ask (full queue) stays dirty for the tick to ask again.
+    prefs_save_queue();
+    assert(prefs_saves == 1);
+    s.prefs_inflight = false;                // what the worker does after a FAILED write: dirty stays, the tick asks again
+    spaces = 1; prefs_save_queue();
+    assert(prefs_saves == 1 && s.prefs_dirty && !s.prefs_inflight && "a full queue is not a success");
+    spaces = 8; prefs_save_queue();
+    assert(prefs_saves == 2 && s.prefs_inflight && "the retry");
+    s.prefs_inflight = false; s.prefs_dirty = false;   // the worker's success
     assert((settings_pending.fields & (UI_SETTING_BRIGHTNESS | UI_SETTING_MUTED)) == (UI_SETTING_BRIGHTNESS | UI_SETTING_MUTED) && !settings_pending.values.muted);
     // With Night mode off, a drag asks for no prefs write.
-    queued = saves = prefs_saves = 0; s.brightness = 60; s.prefs_dirty = false;
+    queued = saves = prefs_saves = 0; s.brightness = 60; s.prefs_dirty = false; s.prefs_inflight = false;
     assert(bright_touch(true, 443, 233) && bright_touch(true, 437, 150) && bright_touch(false, 437, 150));
     assert(saves == 1 && prefs_saves == 0);
     puts("brightness touch: live level, one save on lift, floor 8, band-only start, whole contact, cancel, full queue PASS");
@@ -229,7 +238,10 @@ assert rows == [('Brightness', 'A_BRIGHT'), ('Sound', 'A_SOUND'), ('Unplugged li
                 ('Battery saver', 'A_SAVER'), ('Phone', 'A_PHONE'), ('About', 'A_ABOUT'), ('Restart dial', 'A_RESTART')], rows
 assert re.search(r'#ifdef DEVICE_BLE_LINK\n\s*\{"Phone", A_PHONE\},[^\n]*\n#endif', raw[raw.index('static const char *prefs_item'):]), 'Phone only with the phone link'
 assert 'prefs_link_shown()' in table, 'Unplugged link hides when fewer than two modes are on offer'
-assert 'ht_link_options(prefs_link.wifi, prefs_link.phone, PREFS_BLE_IMAGE) >= 2' in function('prefs_link_shown', ui)
+assert 'ht_link_options(prefs_link.wifi, prefs_link.phone, PREFS_BLE_IMAGE, prefs_link.bonded) >= 2' in function('prefs_link_shown', ui)
+assert re.search(r'items\[i\]\.action == A_SCREEN_OFF && !PREFS_SLEEP_IMAGE\) continue;', table), 'no Screen off row in an image without the battery policy'
+assert re.search(r'#ifdef DEVICE_BATTERY_SLEEP\n#define PREFS_SLEEP_IMAGE true\n#else\n#define PREFS_SLEEP_IMAGE false', raw)
+assert re.search(r'display_set_brightness_cap\(\(uint8_t\)ht_panel_cap\(&prefs\)\);\n#ifdef DEVICE_BATTERY_SLEEP\n\s*power_sleep_set_screen_off_ms\(ht_screen_off_ms\(&prefs\)\);\n\s*power_sleep_set_wifi_park_min\(\(unsigned\)ht_park_minutes\(&prefs\)\);\n#endif', function('prefs_apply_power', raw)), 'without the battery policy Battery saver is the panel cap alone'
 bright = function('render_bright', ui)
 assert 'focus_header(f, "BRIGHTNESS")' in bright and re.search(r'control\(f, \d+, \d+, \d+, "<", A_PREFS, 1, true\)', bright), 'title, back to Settings'
 assert 'ht_bright_arc(' in bright and 'bright_level()' in bright
@@ -251,6 +263,15 @@ screen_off = dispatch[dispatch.index('case A_SCREEN_OFF:'):dispatch.index('case 
 assert 'ht_timer_next(prefs.timer)' in screen_off and 'prefs_apply_power()' in screen_off and 'prefs.saver' in screen_off.split('prefs_apply_power')[0], 'Screen off cycles, and Battery saver holds it'
 night = dispatch[dispatch.index('case A_NIGHT: {'):dispatch.index('case A_SAVER:')]
 assert 'ht_night_toggle(&prefs, &bright, &muted);' in night and 'UI_SETTING_BRIGHTNESS | UI_SETTING_MUTED' in night and 'prefs_changed()' in night
+assert re.search(r'if \(prefs\.night\) \{\s*prefs_changed\(\);\s*settings_save_queue\(\);\s*\} else \{\s*settings_save_queue\(\);\s*prefs_changed\(\);\s*\}', night), 'ON: flag and saved pair first; OFF: restored levels first'
+saveq = function('prefs_save_queue', ui)
+assert 's.prefs_dirty = false' not in saveq and 's.prefs_inflight = true' in saveq, 'queueing never clears dirty: only a confirmed write does'
+pw = function('worker', ui)
+pw = pw[pw.index('case A_PREFS_SAVE:'):]
+pw = pw[:pw.index('break;')]
+assert re.search(r'const bool ok = config_save_prefs\(&c\);.*if \(ok\) \{\s*if \(s\.prefs_rev == rev\) s\.prefs_dirty = false;', pw, re.S), 'dirty clears after a success, for the revision written'
+assert '++s.prefs_fails == 5' in pw and 's.prefs_inflight = false;' in pw
+assert 'if (s.prefs_dirty && !s.prefs_inflight && s.prefs_fails < 5) prefs_save_queue();' in function('habitat_tick', ui), 'the tick asks again after a failure'
 saver = dispatch[dispatch.index('case A_SAVER:'):dispatch.index('case A_RESTART:')]
 assert 'prefs.saver = !prefs.saver;' in saver and 'prefs_apply_power()' in saver and 'prefs_changed()' in saver
 power = function('prefs_apply_power', ui)
@@ -264,12 +285,14 @@ second = restart[:restart.index('} else {')]
 assert second.index('A_SETTINGS_SAVE') < second.index('A_PREFS_SAVE') < second.index('A_RESTART_GO'), 'pending writes are queued before the restart'
 worker = function('worker', ui)
 go = worker[worker.index('case A_RESTART_GO:'):]
-go = go[:go.index('esp_restart();') + 14]
-assert 'last_words_note_reason("restart from Settings")' in go and 'ESP_LOGW("habitat", "restart: asked from Settings")' in go, 'a clear reason'
+go = go[:go.index('break;')]
+assert 'mode_glue_user_restart("restart from Settings")' in go and 'ESP_LOGW("habitat", "restart: asked from Settings")' in go, 'a clear reason'
+assert 'esp_restart' not in worker, 'the worker never restarts by itself: the store gate and the busy gate decide'
+assert 'prefs_note("Busy, try again")' in go, 'a refusal is said'
 assert 'case A_PREFS_SAVE:' in worker and 'config_save_prefs(&c)' in worker
 # Unplugged link: the stored wl_mode through the same call the computer's command uses; the mode switch is told; a phone with no bond gets a note.
 link = function('prefs_link_work', ui)
-for want in ('ht_link_next(info.mode, info.saved, info.ble, PREFS_BLE_IMAGE)', 'config_net_set_mode(next)', 'mode_glue_settings_changed()', 'ble_link_bond_count() == 0', 'Settings > Phone'):
+for want in ('ht_link_next(info.mode, info.saved, info.ble, PREFS_BLE_IMAGE, bonded)', 'config_net_set_mode(next)', 'mode_glue_settings_changed()', 'ble_link_bond_count() > 0', 'pair it in Settings', 'prefs_link.bonded = bonded;'):
     assert want in link, want
 assert 'esp_restart' not in link, 'the row itself never reboots: the mode switch decides (USB with a cable stays USB)'
 
@@ -333,4 +356,20 @@ cmake = text(fw / 'main/CMakeLists.txt')
 assert '"ui/habitat/brightness_arc.c"' in cmake and '"ui/habitat/prefs_logic.c"' in cmake, 'both files are in BOARD_SRCS'
 run = text(here / 'run.sh')
 assert 'test_brightness_arc' in run and 'test_brightness_screen.py' in run and 'test_prefs_logic' in run, 'run.sh runs all three'
+
+# Restart dial goes through the mode switch's gate (store-gate freeze, busy look) and not esp_restart() on its own.
+glue_src = code(fw / 'main/mode_glue.c')
+ug = glue_src[glue_src.index('static bool gate_hard_busy'):glue_src.index('int mode_glue_user_restart')]
+assert '(mode_switch_busy() & MS_BUSY_HARD) != 0' in ug and 'USER_GATE = {NULL, gate_frozen, gate_freeze, gate_thaw, gate_hard_busy, gate_restart}' in ug, 'the same freeze and restart, the hard rows only'
+ur = glue_src[glue_src.index('int mode_glue_user_restart'):]
+ur = ur[:ur.index(chr(10) + '}' + chr(10))]
+assert 'mg_restart_try(&USER_GATE)' in ur and ur.index('last_words_note_reason(reason)') < ur.index('mg_restart_try') < ur.index('last_words_note_reason("")'), 'reason noted, gate tried, reason blanked after a refusal'
+assert 'int mode_glue_user_restart(const char *reason);' in text(fw / 'main/mode_glue.h')
+# The failed cable start frees the PSRAM stack of the session task (the start is retried, so a plain vTaskDelete would leak 4 KB each time).
+cc_src = code(fw / 'main/cable_client.c')
+fail = cc_src[cc_src.index('if (!cable_link_start_with(xport, on_frame, session_tick, NULL)) {'):]
+fail = fail[:fail.index('goto failed;')]
+assert 'task_delete_psram(hello_task);' in fail and '#if TASK_STACK_PSRAM_FLASH_OPS' in fail, 'task_delete_psram on a PSRAM-stack task'
+tu = code(fw / 'main/task_util.c')
+assert 'xTaskGetStaticBuffers(task, &stack, &tcb) == pdTRUE) vTaskDeleteWithCaps(task);' in tu and 'else vTaskDelete(task);' in tu, 'caps tasks free their PSRAM stack, the internal fallback gets the plain delete'
 print('settings screen wiring: views, rows, dispatch, worker, touch routing before gestures, restart, link, power, comment, gallery, build PASS')

@@ -14,28 +14,28 @@ const char *ht_timer_label(uint8_t timer) { return timer < HT_TIMER_COUNT ? time
 
 static const int link_order[3] = {3, 1, 2};   // Auto, Wi-Fi, Phone
 
-bool ht_link_offered(int mode, bool have_wifi, bool have_phone, bool ble_image)
+bool ht_link_offered(int mode, bool have_wifi, bool have_phone, bool ble_image, bool have_bond)
 {
     switch (mode) {
     case 1: return have_wifi;
-    case 2: return ble_image && have_phone;
+    case 2: return ble_image && have_phone && have_bond;
     case 3: return ble_image && have_wifi && have_phone;
     default: return false;
     }
 }
-int ht_link_options(bool have_wifi, bool have_phone, bool ble_image)
+int ht_link_options(bool have_wifi, bool have_phone, bool ble_image, bool have_bond)
 {
     int n = 0;
-    for (int i = 0; i < 3; i++) n += ht_link_offered(link_order[i], have_wifi, have_phone, ble_image);
+    for (int i = 0; i < 3; i++) n += ht_link_offered(link_order[i], have_wifi, have_phone, ble_image, have_bond);
     return n;
 }
-int ht_link_next(int current, bool have_wifi, bool have_phone, bool ble_image)
+int ht_link_next(int current, bool have_wifi, bool have_phone, bool ble_image, bool have_bond)
 {
     int at = -1;   // where `current` is in the cycle; USB only, or a byte that is no mode, is before the first
     for (int i = 0; i < 3; i++) if (link_order[i] == current) at = i;
     for (int step = 1; step <= 3; step++) {
         const int mode = link_order[(at + step + 3) % 3];
-        if (mode != current && ht_link_offered(mode, have_wifi, have_phone, ble_image)) return mode;
+        if (mode != current && ht_link_offered(mode, have_wifi, have_phone, ble_image, have_bond)) return mode;
     }
     return -1;
 }

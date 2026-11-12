@@ -15,12 +15,14 @@ const char *ht_timer_label(uint8_t timer);     // "Auto", "30 s", "1 min", "2 mi
 // ── Unplugged link ────────────────────────────────────────────────────────────────────────────────────────────────────────────
 // The numbers are the stored wl_mode: 1 Wi-Fi, 2 phone, 3 auto (Wi-Fi first, then the phone); 0 is "USB only". The cycle is Auto, Wi-Fi, Phone, Auto.
 // `have_wifi` and `have_phone`: the settings of that radio are whole (config_net_info). `ble_image`: this image has the phone link at all (DEVICE_BLE_LINK);
-// without it the phone and auto are not offered. A mode that is not on offer is skipped. Returns the next mode, or -1 when there is nothing else to go to.
-int ht_link_next(int current, bool have_wifi, bool have_phone, bool ble_image);
-bool ht_link_offered(int mode, bool have_wifi, bool have_phone, bool ble_image);
+// without it the phone and auto are not offered. `have_bond`: a phone is bonded; PHONE is offered only with one, so an unplugged dial can never reboot itself into
+// a phone mode nobody paired (Auto, which tries Wi-Fi first, is not held back). A mode that is not on offer is skipped. Returns the next mode, or -1 when there is
+// nothing else to go to.
+int ht_link_next(int current, bool have_wifi, bool have_phone, bool ble_image, bool have_bond);
+bool ht_link_offered(int mode, bool have_wifi, bool have_phone, bool ble_image, bool have_bond);
 const char *ht_link_label(int mode);           // "USB only", "Wi-Fi", "Phone", "Auto"; "?" for anything else
 // How many of the three are on offer: the row is shown only with two or more.
-int ht_link_options(bool have_wifi, bool have_phone, bool ble_image);
+int ht_link_options(bool have_wifi, bool have_phone, bool ble_image, bool have_bond);
 
 // ── Night mode and Battery saver ──────────────────────────────────────────────────────────────────────────────────────────────────
 typedef struct {

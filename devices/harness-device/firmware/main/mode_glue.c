@@ -253,6 +253,19 @@ static bool gate_blocked(void *c) { (void)c; return mode_switch_blocked(); }
 static void gate_restart(void *c) { (void)c; esp_restart(); }
 static const mg_gate_ops_t GATE = {NULL, gate_frozen, gate_freeze, gate_thaw, gate_blocked, gate_restart};
 
+// Settings > Restart dial: the same gate, with the HARD busy rows only (a firmware update or a pet upload in flight: never; a draft or a voice turn is what the user
+// is walking away from by asking). The NVS writers are frozen and waited for first, as for a mode switch and as power_off.c does before it cuts the power.
+static bool gate_hard_busy(void *c) { (void)c; return (mode_switch_busy() & MS_BUSY_HARD) != 0; }
+static const mg_gate_ops_t USER_GATE = {NULL, gate_frozen, gate_freeze, gate_thaw, gate_hard_busy, gate_restart};
+int mode_glue_user_restart(const char *reason)
+{
+    last_words_note_reason(reason);
+    const mg_restart_t r = mg_restart_try(&USER_GATE);   // esp_restart() does not return: anything that does is a refusal
+    last_words_note_reason("");
+    ESP_LOGW(TAG, "restart for the user refused (%d): %s", (int)r, r == MG_RESTART_BUSY ? "an update or an upload is running" : r == MG_RESTART_WRITER ? "an NVS write did not finish" : "the writers are frozen for a power-off");
+    return (int)r;
+}
+
 static bool op_restart(void *ctx, ms_mode_t target)
 {
     (void)ctx;
