@@ -68,7 +68,8 @@ static void ptt_task(void *arg)
         if (pwr_key && power_take_pwrkey_tap()) screen_toggle("PWR tap");
 
         const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
-        switch (bk_step(&boot_key, now_ms, gpio_get_level(BSP_BOOT_BUTTON) == 0, power_sleep_input_allowed(), ui_voice_can_start)) {
+        const bool boot_down = gpio_get_level(BSP_BOOT_BUTTON) == 0;
+        switch (bk_step(&boot_key, now_ms, boot_down, power_sleep_input_allowed(), ui_voice_can_start)) {
         case BK_PRESS:
             if (display_is_asleep()) { display_lock(); display_wake(); display_unlock(); }   // external power only (D1 filtered the rest)
             break;
@@ -93,6 +94,7 @@ static void ptt_task(void *arg)
         case BK_NONE:
             break;
         }
+        ui_menu_boot(boot_down && power_sleep_input_allowed());   // the menu prompt's 2 s hold; after the tap above, so the release that closes a hold is eaten first
         if (bk_capture_active(&boot_key)) {
             switch (bk_capture_poll(&boot_key, now_ms, ui_voice_is_recording(), ui_voice_generation())) {
             case BK_CAP_SEND:

@@ -97,6 +97,7 @@ set(BOARD_SRCS
     "ui/habitat/battery_rim.c"
     "ui/habitat/brightness_arc.c"
     "ui/habitat/prefs_logic.c"
+    "ui/habitat/menu_prompt.c"
     "ui/habitat/link_icon.c"
     "ui/habitat/focus_faces.c"
     "ui/habitat/pets.c"

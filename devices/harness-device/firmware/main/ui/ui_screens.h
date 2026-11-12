@@ -509,6 +509,9 @@ void ui_stop_active_turn(void);
 // Physical BOOT button pressed. Routes to "back" (cancel voice / dismiss the question) while a
 // question is on screen, otherwise to ui_stop_active_turn(). Safe from a non-LVGL task.
 void ui_boot_pressed(void);
+// The BOOT key level, from ptt.c on every poll (after its own handling). Feeds the menu prompt ("Hold BOOT 2 s for menu", ui_habitat.c menu_prompt.h): a hold of 2 s
+// with the prompt up opens the controls list. While the prompt is up BOOT starts no capture (ui_voice_can_start is false) and a tap does nothing.
+void ui_menu_boot(bool down);
 
 // --- Screen lock (3×3 pattern passcode) ---
 // Wire the sleep/wake power hook and lock now if a passcode is set (called once at the end of ui_init).

@@ -19,6 +19,7 @@
 #include "link_icon.h"
 #include "brightness_arc.h"
 #include "prefs_logic.h"
+#include "menu_prompt.h"
 #include "../../battery.h"
 #include "../../power_sleep.h"
 #include "../../last_words.h"
@@ -292,6 +293,7 @@ static EXT_RAM_BSS_ATTR struct {
     uint32_t note_until;      // the Settings screen's note line goes at this time; 0 = none
     uint32_t about_at;        // when the About screen next redraws (uptime and battery move on their own)
     char note[40];
+    ht_menu_t menu;           // the "Hold BOOT 2 s for menu" prompt (menu_prompt.h); display lock
     uint32_t voice_started;
     bool voice_open, voice_start_pending, voice_waiting, voice_carry;
     bool voice_review, voice_review_preview, voice_draft_append, voice_search;
@@ -638,6 +640,34 @@ static void input_cancel(void)
     s.pressed = -1;
     bright_drag_end();   // a contact cut off in the middle of a drag keeps the level the finger had reached, and saves it once
 }
+/*
+ * THE MENU PROMPT (user decision 2026-11-11). The controls list has no touch path of its own any more (the long hold goes to the tabs), so a pull UP from
+ * the bottom edge of the main face (it starts at y >= MENU_EDGE_Y and passes the swipe threshold) opens a prompt, "Hold BOOT 2 s for menu", and BOOT held
+ * for 2 s opens the controls list. A swipe down closes the prompt, and so do 10 s without an action; a tap does nothing (the prompt has no hit areas, so a
+ * stray touch cannot reach the face under it). While it is up the prompt owns BOOT: boot_voice() refuses, so no capture starts, and a BOOT tap is eaten
+ * (ui_boot_pressed), as is the release of the press that opened the menu. The rules are menu_prompt.c; this is the glue.
+ * boot_level and menu_live are for ptt.c's 10 Hz call (ui_menu_boot): it takes the display lock only while the prompt is up or a release is still to be eaten.
+ */
+#define MENU_EDGE_Y 400
+static atomic_bool boot_level;   // BOOT is down (ui_menu_boot, ptt task)
+static atomic_bool menu_live;    // the prompt is up, or the release of the press that confirmed it is still to be eaten
+static void menu_sync(void)
+{
+    atomic_store(&menu_live, s.menu.open || ht_menu_eats_tap(&s.menu));
+}
+static void menu_open(void)
+{
+    ht_menu_open(&s.menu, ms(), atomic_load(&boot_level));
+    menu_sync();
+    change();
+}
+static void menu_close(void)
+{
+    if (!s.menu.open) return;
+    ht_menu_close(&s.menu);
+    menu_sync();
+    change();
+}
 static bool user_nav;   // display lock: true only while habitat_touch runs, so a view change that is a finger's doing can be told from a boot, refresh or desktop one
 static void view(view_t v)
 {
@@ -653,6 +683,7 @@ static void view(view_t v)
     if (selection.active && v != SELECTION && v != VOICE) ht_selection_close(&selection);
     if (s.view == INBOX && v != INBOX) s.opening_notice[0] = 0;
     input_cancel();
+    if (v != HOME && v != AGENT) menu_close();   // the menu prompt belongs to the main face
     s.voice_retry_until = 0;
     // Item 4b (2026-11-10): only the user's touch ends the pairing window, and answers No to a number on show. A boot landing (ui_land_after_reload), a refresh or a
     // desktop message that moves the view off the Phone screen leaves the window and the offer alone: phone_poll brings the Phone screen back while they last.
@@ -1869,10 +1900,10 @@ static void render_answer_review(ht_scene_t *f)
 static const char *settings_item(int wanted, action_kind_t *action)
 {
     static const struct { const char *label; action_kind_t action; uint32_t feature; } items[] = {
+        {"Settings", A_PREFS, 0},   // the Settings screen (render_prefs); the Phone row lives there now. First, because BOOT held 2 s opens this list (menu prompt)
         {"Inbox", A_INBOX, 0}, {"Machines", A_MACHINES, 0},
         {"Model", A_MODELS, 0}, {"Stop current turn", A_STOP, 0},
         {"Nap", A_NAP, 0},
-        {"Settings", A_PREFS, 0},   // the Settings screen (render_prefs); the Phone row lives there now
         {"Find Harness", A_FIND, CABLE_FEATURE_FORM},
         {"New Harness", A_FORM, CABLE_FEATURE_FORM},
         {"Latest output", A_LATEST, CABLE_FEATURE_VISIT},
@@ -2588,6 +2619,18 @@ static void render_about(ht_scene_t *f)
     for (int row = 0; row < 4; row++)
         prefs_row(f, TAB_TOP + row * TAB_ROW_HEIGHT, rows[row].label, rows[row].value, FG, color(HT_THEME_DONE), BG);
 }
+static void render_menu_prompt(ht_scene_t *f)
+{
+    center(f, 190, "Hold BOOT 2 s for menu", FG);
+    const int progress = ht_menu_progress(&s.menu, ms());
+    const int x = 133, w = 200, y = 244;
+    ht_box(f, x, y, w, 10, 5, color(HT_THEME_RIM_TRACK), color(HT_THEME_RIM_TRACK));
+    if (progress > 0) {
+        const int fill = w * progress / 100 < 10 ? 10 : w * progress / 100;
+        ht_box(f, x, y, fill, 10, 5, color(HT_THEME_DONE), color(HT_THEME_DONE));
+    }
+    text_in(f, FACE_CX(260), 290, 260, &ht_mono_20, "swipe down to cancel", DIM, true);
+}
 static void render_settings(ht_scene_t *f)
 {
     heading(f, "controls");
@@ -2696,7 +2739,7 @@ static void phone_leave(void)
     bumped_prompt = false;
 }
 // One read of the link into phone_ui, and the moves that follow from it. Render task, display lock held. Outside the three views it does one thing: when the
-// link has opened the pairing window by itself (no bond stored; ble_link.c), it shows the Phone screen, because no touch path reaches Settings > Phone. The
+// link has opened the pairing window by itself (no bond stored; ble_link.c), it shows the Phone screen at once, without the user walking to it (the way there by hand is a pull up from the bottom edge, BOOT held 2 s, Settings, Phone: the menu prompt). The
 // window is open outside the views only in that case ([pair] is the other opener and it lives in the PHONE view), and leaving the views closes the window
 // (phone_leave), so this cannot pull the user back after they leave.
 static void phone_poll(void)
@@ -2935,7 +2978,8 @@ bool habitat_scene_take(ht_scene_t *f)
 #ifdef DEVICE_UI_GALLERY
     if (gallery_synthetic) { gallery_synthetic(f); return true; }
 #endif
-    switch (s.view) {
+    if (s.menu.open) render_menu_prompt(f);   // a scene of its own: the face under it may already use every run
+    else switch (s.view) {
     case FORM:
         render_form(f);
         break;
@@ -4195,7 +4239,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
             pressed_action.kind != A_ANSWER && pressed_action.kind != A_DRAFT_SEND && pressed_action.kind != A_DRAFT_EDIT &&
             pressed_action.kind != A_DRAFT_APPEND && pressed_action.kind != A_DRAFT_UNDO) gesture.guarded = false; // Discard is always immediate.
         if (s.pressed >= 0 && ((!surface && s.view != VOICE) || home_footer(pressed_action.kind))) change();
-        if (ui_scroll_reportable()) {
+        if (ui_scroll_reportable() && !(surface && y >= MENU_EDGE_Y)) {   // a pull up from the bottom edge opens the menu prompt, not a scroll
             if (surface && home_footer(pressed_action.kind)) {
                 // Footer choices send no terminal scroll. A contact that stops an existing fling still has to reach the app.
                 if (s.touch_brake) {
@@ -4364,6 +4408,10 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                 // Reading/choosing consumed this contact; motion cannot submit an answer.
             } else if (s.view == SELECTION) {
                 // Its bounded reading cursor already consumed this vertical drag.
+            } else if (surface && s.menu.open) {
+                if (dy > 0) menu_close();   // a swipe down dismisses the prompt (and the Inbox pull-down waits for it to be gone)
+            } else if (surface && s.start_y >= MENU_EDGE_Y && dy < 0) {
+                menu_open();   // a pull up from the bottom edge: the prompt, not the menu
             } else if (surface && character.id == HT_CHARACTER_FOCUS && dy > 0 && notice_unread(face_id())) {
                 // Pull down from the badge. The creature skins keep this drag inert — their footer
                 // badge is a target you tap — but on Focus the badge sits at the top edge and a pull
@@ -4457,6 +4505,10 @@ uint32_t habitat_next_wake_ms(void)
         uint32_t due = left < 1 ? 1 : (uint32_t)left;
         if (due < delay) delay = due;
     }
+    if (s.menu.open) {
+        const uint32_t due = ht_menu_next_ms(&s.menu, now);
+        if (due && due < delay) delay = due;
+    }
     if (s.view == FORM && delay > 100) delay = 100;
     if (phone_view(s.view) && delay > 250) delay = 250;   // the countdown, and a number that arrives
     if (character.motion.next_ms && character.motion.next_ms < delay) delay = character.motion.next_ms;
@@ -4526,6 +4578,7 @@ void habitat_tick(void)
             }
         }
     }
+    if (s.menu.open && (ht_menu_tick(&s.menu, now) || display_is_asleep())) { menu_close(); }   // 10 s without an action
     if (s.restart_until && (int32_t)(now - s.restart_until) >= 0) { s.restart_until = 0; change(); }   // Restart dial disarms itself
     if (s.note_until && (int32_t)(now - s.note_until) >= 0) { s.note_until = 0; s.note[0] = 0; change(); }
     if (s.view == ABOUT && (int32_t)(now - s.about_at) >= 0) { s.about_at = now + 10000; change(); }   // uptime and battery move on their own
@@ -5360,7 +5413,7 @@ bool ui_picker_is_open(void) { return s.view == MODELS || s.view == MACHINES || 
 bool ui_switch_is_open(void) { return s.view == TABS; }
 bool ui_scroll_reportable(void)
 {
-    return s.ready && s.connected && !s.loading && (s.view == HOME || s.view == AGENT) && active() &&
+    return s.ready && s.connected && !s.loading && (s.view == HOME || s.view == AGENT) && active() && !s.menu.open &&
            !display_is_asleep() && !s.voice_open && !audio_client_active();
 }
 int ui_notif_pull_zone_px(void) { return 0; }
@@ -6568,6 +6621,7 @@ uint32_t ui_voice_generation(void)
  */
 static bool boot_voice(action_t *out)
 {
+    if (s.menu.open) return false;   // the menu prompt owns BOOT: no capture starts, and none is sent because of its hold
     if (!s.connected) return false;
     action_t a = {.kind = A_VOICE};
     if (s.view == HOME || s.view == AGENT) {
@@ -6684,9 +6738,31 @@ void ui_stop_active_turn(void)
     }
     display_unlock();
 }
+// ptt.c, every poll, after its own BOOT handling: the key level. Cheap while the prompt is down (two atomics, no lock).
+void ui_menu_boot(bool down)
+{
+    atomic_store(&boot_level, down);
+    if (!atomic_load(&menu_live)) return;
+    display_lock();
+    if (s.menu.open && display_is_asleep()) menu_close();
+    if (ht_menu_boot(&s.menu, ms(), down)) {
+        ESP_LOGI("habitat", "menu: BOOT held 2 s, opening the controls list");
+        menu_sync();
+        view(SETTINGS);
+        s.offset = 0;
+    } else {
+        menu_sync();
+        if (s.menu.open) change();   // the bar moves
+    }
+    display_unlock();
+}
 void ui_boot_pressed(void)
 {
     display_lock();
+    if (ht_menu_eats_tap(&s.menu)) {   // the prompt is up, or this is the release of the hold that opened the menu: a tap would go home
+        display_unlock();
+        return;
+    }
     if (s.voice_open || audio_client_active()) {
         dispatch((action_t){.kind = A_VOICE_ABORT});
     } else if (swarm_mode()) {

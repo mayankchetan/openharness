@@ -124,7 +124,7 @@ poll = body(raw, 'phone_poll')
 assert 'if (prompt && s.view == PHONE) view(PASSKEY);' in poll and 'else if (!prompt && s.view == PASSKEY) view(PHONE);' in poll
 assert 'ble_link_pair_prompt(&code)' in poll and 'phone_ui.code = prompt ? code % 1000000 : 0;' in poll
 assert re.search(r'bonds > phone_ui\.bonds', poll) and 'ble_link_pairing_window(false)' in poll, 'a new bond ends the window'
-# AUTO-OPEN (2026-11-09): no touch path reaches Settings, so when the link has opened the window by itself (no bond stored) the poll shows the Phone screen. It
+# AUTO-OPEN (2026-11-09; reachable by hand since 2026-11-11: a pull up from the bottom edge, BOOT held 2 s, Settings > Phone), so when the link has opened the window by itself (no bond stored) the poll shows the Phone screen. It
 # does so only while the window (or a number) is up and the view is not already one of the three; leaving the three views closes the window (rule 3), so it cannot
 # pull the user back; [pair] stays the only UI caller that opens a window.
 assert re.search(r'if \(!phone_view\(s\.view\)\) \{\s*if \(!ble_link_pairing_busy\(\)\) return;\s*memset\(&phone_ui, 0, sizeof phone_ui\);\s*view\(PHONE\);[^\n]*\n\s*if \(!phone_view\(s\.view\)\) return;\s*\}', poll), 'outside the views: only a busy link (window or number) shows the Phone screen, and a refused move is left alone'
