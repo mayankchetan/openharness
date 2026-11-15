@@ -206,3 +206,46 @@ describe('runningPage', () => {
     expect(runningPage(rows(3), 2)).toMatchObject({ offset: 0, total: 3 })
   })
 })
+
+describe('RunningOrder: two reconciles at once', () => {
+  // The pin of a running agent and a roster sync can both reach reconcile, and rank awaits I/O: one in flight at a time, so the second sees what the first built.
+  it('serializes: two calls started together give what the same two calls in a row give, and rank never runs twice at once', async () => {
+    const make = () => {
+      const order = new RunningOrder(4)
+      let inFlight = 0
+      let overlap = 0
+      const rank: RankFn = async (list) => {
+        inFlight++
+        overlap = Math.max(overlap, inFlight)
+        await new Promise(r => setTimeout(r, 5))
+        inFlight--
+        return new Map(list.map(id => [id, { activity: 100 - Number(id.slice(1)), openedAt: 0 }]))   // a0 is the newest
+      }
+      return { order, rank, overlap: () => overlap }
+    }
+    const row = (id: string, i: number) => ({ id, registeredAt: 1000 + i })
+    const five = ['a0', 'a1', 'a2', 'a3', 'a4'].map(row)
+    const three = ['a2', 'a3', 'a4'].map(row)   // a0 and a1 stopped: two kept, one refilled from the unlisted
+
+    const serial = make()
+    expect(await serial.order.reconcile(five, serial.rank)).toEqual(['a0', 'a1', 'a2', 'a3'])
+    const expected = [await serial.order.reconcile(three, serial.rank), await serial.order.reconcile(three, serial.rank)]
+    expect(expected).toEqual([['a2', 'a3', 'a4'], ['a2', 'a3', 'a4']])
+
+    const both = make()
+    await both.order.reconcile(five, both.rank)
+    const got = await Promise.all([both.order.reconcile(three, both.rank), both.order.reconcile(three, both.rank)])
+    expect(got).toEqual(expected)   // unserialized, the first came back one tile short: [a2, a3]
+    expect(both.overlap()).toBe(1)
+  })
+
+  it('a failing call does not block the next one', async () => {
+    const order = new RunningOrder(4)
+    const boom: RankFn = async () => { throw new Error('rank failed') }
+    const ok: RankFn = async (list) => new Map(list.map(id => [id, { activity: 1, openedAt: 0 }]))
+    const running = [{ id: 'a0', registeredAt: 1 }]
+    const [first, second] = await Promise.allSettled([order.reconcile(running, boom), order.reconcile(running, ok)])
+    expect(first.status).toBe('rejected')
+    expect(second).toEqual({ status: 'fulfilled', value: ['a0'] })
+  })
+})

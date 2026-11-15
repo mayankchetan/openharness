@@ -213,6 +213,13 @@ describe('the dial phone routes (B6)', () => {
     expect(a).not.toHaveBeenCalled()
   })
 
+  it('auto refuses another mode with its own text (it takes 3 or none, not "0 or 1")', async () => {
+    const reply = await dialNetRequest('auto', { mode: 2 }, ask())
+    expect(reply).toEqual({ status: 400, body: { error: 'mode must be 3 or left out.', kind: 'bad_request', field: 'mode' } })
+    // the mode route keeps its own text
+    expect((await dialNetRequest('mode', { mode: 3 }, ask())).body).toMatchObject({ error: 'mode must be 0 or 1.' })
+  })
+
   it('the underscore names of the payload are not routes', async () => {
     const a = ask()
     for (const op of ['phone_set', 'phone_mode', 'phone_forget', 'phone']) expect(await dialNetRequest(op, {}, a)).toEqual({ status: 404, body: { error: 'not found' } })

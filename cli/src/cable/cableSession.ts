@@ -2682,7 +2682,8 @@ export class CableSession {
     if (this.link?.transport !== 'usb') return { ok: false, kind: 'transport', message: 'Wi-Fi settings go to a dial over its USB cable only' }
     if (!this.netCapable) return { ok: false, kind: 'unsupported', message: 'this dial\'s firmware does not keep Wi-Fi settings' }
     // The phone-mode forms need the dial's own word that its image has the link (hello.ble); the dial refuses them with `feature` otherwise.
-    if ((request.op === 'set_ble' || (request.op === 'mode' && request.mode === 2)) && !this.bleCapable) {
+    // Mode 3 (auto, Wi-Fi first and then the phone) needs the phone stack too: the dial refuses it with `feature` without the link.
+    if ((request.op === 'set_ble' || (request.op === 'mode' && (request.mode === 2 || request.mode === 3))) && !this.bleCapable) {
       return { ok: false, kind: 'unsupported', message: 'this dial\'s firmware has no phone mode' }
     }
     return this.netRequests.request(request)

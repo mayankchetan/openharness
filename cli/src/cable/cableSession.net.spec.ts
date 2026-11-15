@@ -321,6 +321,13 @@ describe('the "ble" feature and the phone-mode requests (B6)', () => {
     await session.stop()
   })
 
+  it('mode 3 (auto) is refused for a dial that did not say ble, like mode 2: auto needs the phone stack', async () => {
+    const { session, port } = await ready('usb', HELLO)
+    expect(await session.net({ op: 'mode', mode: 3 })).toMatchObject({ ok: false, kind: 'unsupported', message: expect.stringContaining('no phone mode') })
+    expect(wireNet(port)).toEqual([])
+    await session.stop()
+  })
+
   it.each(['wifi', 'ble', 'tunnel'] as const)('are never sent on a %s link', async (transport) => {
     const { session, port } = await ready(transport)
     expect(await session.net(KEYONLY)).toMatchObject({ ok: false, kind: 'transport' })

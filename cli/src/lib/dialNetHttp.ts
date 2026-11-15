@@ -45,7 +45,7 @@ const STATUS: Record<string, number> = {
 
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
 
-const bad = (field: NetField): DialNetReply => ({ status: 400, body: { error: NET_FIELD_MESSAGES[field], kind: 'bad_request', field } })
+const bad = (field: NetField, error: string = NET_FIELD_MESSAGES[field]): DialNetReply => ({ status: 400, body: { error, kind: 'bad_request', field } })
 
 /** The payload for the devices, or the 400 to answer with. */
 function payloadFor(op: DialNetOp, body: unknown): Record<string, unknown> | DialNetReply {
@@ -71,7 +71,7 @@ function payloadFor(op: DialNetOp, body: unknown): Record<string, unknown> | Dia
     payload.mode = input.mode
   }
   // auto: the mode is fixed (3) and is the devices' to send; a body that names another one is not carried on, and a `mode` that is not 3 is refused.
-  if (op === 'auto' && input.mode !== undefined && !validAutoMode(input.mode)) return bad('mode')
+  if (op === 'auto' && input.mode !== undefined && !validAutoMode(input.mode)) return bad('mode', 'mode must be 3 or left out.')
   if (op !== 'provision') return payload
   if (!validSsid(input.ssid)) return bad('ssid')
   if (!validPass(input.pass)) return bad('pass')

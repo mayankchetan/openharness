@@ -30,6 +30,8 @@ const NO_RANK: RunningRank = { activity: 0, openedAt: 0 }
 export class RunningOrder {
   private order: string[] = []
   private known = new Set<string>()
+  // One reconcile in flight: the pin of an agent and a roster sync can both arrive while rank awaits I/O. A later call waits for the one before it (a failure does not block it).
+  private queue: Promise<unknown> = Promise.resolve()
 
   constructor(private readonly max: number = RUNNING_MAX) {}
 
@@ -37,7 +39,13 @@ export class RunningOrder {
    * The ids to list now. `running` is every running agent. The first call after a reset ranks them all;
    * later calls keep the current order and only place what changed.
    */
-  async reconcile(running: Array<{ id: string; registeredAt: number }>, rank: RankFn): Promise<string[]> {
+  reconcile(running: Array<{ id: string; registeredAt: number }>, rank: RankFn): Promise<string[]> {
+    const result = this.queue.then(() => this.reconcileNow(running, rank), () => this.reconcileNow(running, rank))
+    this.queue = result
+    return result
+  }
+
+  private async reconcileNow(running: Array<{ id: string; registeredAt: number }>, rank: RankFn): Promise<string[]> {
     const now = new Set(running.map(r => r.id))
     if (this.order.length === 0) {
       this.order = (await this.ranked([...now], rank)).slice(0, this.max)
