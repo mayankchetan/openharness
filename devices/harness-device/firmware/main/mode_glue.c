@@ -260,7 +260,13 @@ static const mg_gate_ops_t USER_GATE = {NULL, gate_frozen, gate_freeze, gate_tha
 int mode_glue_user_restart(const char *reason)
 {
     last_words_note_reason(reason);
+    // A restart the user asked for is no switch: the next boot is a fresh wake (Wi-Fi first), so the link_auto record (RTC, kept over a software reset) is cleared
+    // before the try, and put back when the restart is refused (the dial keeps running with the retries and edges it has used).
+    const bool had_auto = s_mg.auto_on;
+    const la_view_t keep = mg_auto_view(&s_mg);
+    mode_record_la_clear();
     const mg_restart_t r = mg_restart_try(&USER_GATE);   // esp_restart() does not return: anything that does is a refusal
+    if (had_auto) mode_record_la_save(&keep);
     last_words_note_reason("");
     ESP_LOGW(TAG, "restart for the user refused (%d): %s", (int)r, r == MG_RESTART_BUSY ? "an update or an upload is running" : r == MG_RESTART_WRITER ? "an NVS write did not finish" : "the writers are frozen for a power-off");
     return (int)r;

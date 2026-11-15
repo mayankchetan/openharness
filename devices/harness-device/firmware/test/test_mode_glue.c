@@ -1962,7 +1962,8 @@ static void test_auto_the_panic_loop_beats_it(void)
 
 static void test_auto_going_off_or_on_at_runtime(void)
 {
-    // stored 3 on the phone, then the user picks Wi-Fi only (net.mode 1) or phone only (net.mode 2): the edges stop
+    // stored 3 on the phone, then the user picks Wi-Fi only (net.mode 1) or phone only (net.mode 2): the edges stop. Phone only is what runs, so nothing
+    // happens; Wi-Fi only is a pick of the other wireless mode by hand, so the dial goes there at once (v1.1 review fix: it used to stay on the phone).
     for (int to = 1; to <= 2; to++) {
         fresh();
         provision_auto();
@@ -1971,6 +1972,11 @@ static void test_auto_going_off_or_on_at_runtime(void)
         assert(!run(60000));
         assert(config_net_set_mode(to) == CFG_NET_OK);
         D.reload = true;
+        if (to == 1) {
+            assert(run(250) && D.reboots == 1 && D.reboot_to[0] == MS_MODE_WIFI && !D.mg.auto_on && !D.mg.la.active);
+            assert(rec_is(false, 0, 0));
+            continue;
+        }
         assert(!run(250) && !D.mg.auto_on && !D.mg.la.active);
         assert(rec_is(false, 0, 0));
         assert(!run(900000) && D.reboots == 0);         // the phone never connects, and nothing happens

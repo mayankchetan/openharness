@@ -145,6 +145,7 @@ void ms_step(ms_state_t *s, const ms_in_t *in, ms_out_t *out)
 
     bool due;
     bool picked_usb = false;   // the user's own act (below): the guards that bound automatic switches do not apply to it
+    bool picked_wl = false;    // the user's other act: wl_mode changed between Wi-Fi and phone while a wireless mode runs (Settings, net.mode); the same rule
     bool auto_edge = false;    // the automatic edge between the two wireless modes (in->auto_target)
     ms_mode_t target;
     if (s->mode == MS_MODE_USB) {
@@ -171,6 +172,17 @@ void ms_step(ms_state_t *s, const ms_in_t *in, ms_out_t *out)
                 auto_edge = true;
                 target = (ms_mode_t)in->auto_target;
             }
+        } else if (wl_valid(in->wl_mode) && in->wl_mode != (uint8_t)s->mode) {
+            // The user picked the other wireless mode by hand (the Settings "Unplugged link" row, or net.mode over the cable; wl_mode is the live target, and under
+            // "Wi-Fi first" it equals the running mode, so only a pick can differ). Same order as the edge: USB entry first, while welcomes arrive the pick waits
+            // and the switch that happens is the one to USB. A pick is not held by the anti-flap guards (below), is no flap, and needs no cable or daemon.
+            if (due || s->enter_on) {
+                if (!due) return;
+            } else {
+                due = true;
+                picked_wl = true;
+                target = (ms_mode_t)in->wl_mode;
+            }
         }
     }
     if (!due) return;
@@ -180,7 +192,7 @@ void ms_step(ms_state_t *s, const ms_in_t *in, ms_out_t *out)
     // The anti-flap guards hold an automatic switch back silently: they are not something the user can act on. A pick by hand is not held by them, and
     // neither is the automatic edge between the two wireless modes: link_auto.c bounds it (3 retries, an edge cap, waits that grow), and the dwell would
     // delay the first fallback to a minute.
-    if (!picked_usb && !auto_edge && (now < MS_T_DWELL_MS || s->flaps >= MS_FLAP_CAP)) return;
+    if (!picked_usb && !picked_wl && !auto_edge && (now < MS_T_DWELL_MS || s->flaps >= MS_FLAP_CAP)) return;
 
     // The busy gate: a notice while the user can see it, nothing on a dark screen.
     if (ms_gate_blocked(s->mode, in->busy, in->asleep, in->idle_ms)) {
@@ -189,7 +201,7 @@ void ms_step(ms_state_t *s, const ms_in_t *in, ms_out_t *out)
         return;
     }
     out->act = MS_ACT_REBOOT;
-    out->flaps = picked_usb ? 0u : auto_edge ? s->flaps : (uint8_t)(s->flaps + 1u);   // a change by hand restarts the count (ms_note_manual_change); the edge leaves it
+    out->flaps = picked_usb || picked_wl ? 0u : auto_edge ? s->flaps : (uint8_t)(s->flaps + 1u);   // a change by hand restarts the count (ms_note_manual_change); the edge leaves it
     out->boot_usb = target == MS_MODE_USB;
 }
 

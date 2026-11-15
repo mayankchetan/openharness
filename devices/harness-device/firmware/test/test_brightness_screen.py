@@ -365,6 +365,12 @@ ur = glue_src[glue_src.index('int mode_glue_user_restart'):]
 ur = ur[:ur.index(chr(10) + '}' + chr(10))]
 assert 'mg_restart_try(&USER_GATE)' in ur and ur.index('last_words_note_reason(reason)') < ur.index('mg_restart_try') < ur.index('last_words_note_reason("")'), 'reason noted, gate tried, reason blanked after a refusal'
 assert 'int mode_glue_user_restart(const char *reason);' in text(fw / 'main/mode_glue.h')
+# v1.1 review fix: a restart the user asked for is no switch, so the link_auto record is cleared BEFORE the try (a restart that goes finds none and starts at
+# Wi-Fi) and put back when the restart is refused (the dial keeps running with the retries and edges it had).
+assert 'mode_record_la_clear()' in ur and 'mode_record_la_save(' in ur, 'the record is cleared and can be put back'
+assert ur.index('mode_record_la_clear()') < ur.index('mg_restart_try') < ur.index('mode_record_la_save('), 'cleared before the try, restored after it'
+assert 'mg_auto_view(&s_mg)' in ur and ur.index('mg_auto_view(&s_mg)') < ur.index('mode_record_la_clear()'), 'the view is taken before the clear'
+assert re.search(r'if \(had_auto\)\s*mode_record_la_save', ur), 'restored only when the rules were on'
 # The failed cable start frees the PSRAM stack of the session task (the start is retried, so a plain vTaskDelete would leak 4 KB each time).
 cc_src = code(fw / 'main/cable_client.c')
 fail = cc_src[cc_src.index('if (!cable_link_start_with(xport, on_frame, session_tick, NULL)) {'):]

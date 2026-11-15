@@ -1129,6 +1129,72 @@ static void test_h10_boot_usb(void)
 }
 
 // ── robustness and the rest ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// ── H15: the user picks the other wireless mode while one runs (v1.1 review fix) ──────────────────────────────────────────────────────────────
+// wl_mode (the live target) changing between Wi-Fi and phone while a wireless mode runs is a pick by hand (Settings "Unplugged link", net.mode): the dial
+// switches through the busy gate. No dwell, no flap cap, no flap counted, no cable or daemon. USB entry keeps its priority.
+static void test_h15_pick_other_wireless(void)
+{
+    // Wi-Fi runs, the user picks phone: reboot to BLE at the next step, before the dwell, not an automatic edge, boot_usb stays off
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_WIFI, MS_WL_WIFI, 0);
+        CHECK(!run_to(&m, S(5)));
+        m.wl_mode = MS_WL_BLE;
+        CHECK(run_to(&m, S(5) + MS_STEP_MS));
+        CHECK(m.reboot_target == MS_MODE_BLE && !m.reboot_boot_usb && !m.reboot_auto_edge && m.reboot_flaps == 0);
+        CHECK(m.reboot_t < MS_T_DWELL_MS && m.notices == 0);
+    }
+    // phone runs, the user picks Wi-Fi
+    {
+        sim_t m;
+        wireless_ready(&m, MS_MODE_BLE);
+        m.wl_mode = MS_WL_WIFI;
+        CHECK(run_to(&m, m.t + MS_STEP_MS));
+        CHECK(m.reboot_target == MS_MODE_WIFI && !m.reboot_boot_usb && !m.reboot_auto_edge);
+    }
+    // the flap cap does not hold it, and the count restarts at zero
+    {
+        sim_t m;
+        sim_init(&m, MS_MODE_WIFI, MS_WL_BLE, MS_FLAP_CAP);
+        CHECK(run_to(&m, S(1)));
+        CHECK(m.reboot_target == MS_MODE_BLE && m.reboot_flaps == 0);
+    }
+    // the busy gate holds it: an awake dial in a voice turn shows the notice, and the switch goes when the turn ends
+    {
+        sim_t m;
+        wireless_ready(&m, MS_MODE_WIFI);
+        m.busy = MS_BUSY_VOICE;
+        m.wl_mode = MS_WL_BLE;
+        CHECK(!run_to(&m, m.t + S(5)));
+        CHECK(m.notices > 0);
+        m.busy = 0;
+        CHECK(run_to(&m, m.t + S(1)));
+        CHECK(m.reboot_target == MS_MODE_BLE);
+    }
+    // USB entry keeps its priority: welcomes arrive (SOF and a daemon), the switch that happens is the one to USB
+    {
+        sim_t m;
+        wireless_ready(&m, MS_MODE_WIFI);
+        sim_set_sof(&m, true);
+        m.wl_mode = MS_WL_BLE;
+        CHECK(run_to(&m, S(80)));
+        CHECK(m.reboot_target == MS_MODE_USB && m.reboot_boot_usb);
+    }
+    // the same wireless mode is no change; an unset target is the USB pick (H12), not this one
+    {
+        sim_t m;
+        wireless_ready(&m, MS_MODE_WIFI);
+        CHECK(!run_to(&m, S(300)));
+        CHECK(m.notices == 0);
+    }
+    // USB mode is unchanged: wl_mode differing from USB is the normal case and does not leave without its own rule
+    {
+        sim_t m;
+        usb_ready(&m, MS_WL_BLE);
+        CHECK(!run_to(&m, S(300)));
+    }
+}
+
 static void test_robustness(void)
 {
     ms_out_t out;
@@ -1529,6 +1595,7 @@ int main(void)
     test_h12_pick_usb_while_wireless();
     test_h13_idle_gate();
     test_h14_auto_edge();
+    test_h15_pick_other_wireless();
     test_robustness();
     printf("test_mode_switch: %d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
