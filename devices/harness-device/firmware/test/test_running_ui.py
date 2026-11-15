@@ -48,7 +48,8 @@ def function(name, src):
 san = '-fsanitize=' + os.environ.get('SANITIZERS', 'undefined,bounds')
 
 # --- 1. handle_running_page against the real cJSON ------------------------------------------------------------------------------------------------
-if 'IDF_PATH' in os.environ:
+cjson_half = 'IDF_PATH' in os.environ   # the wire half needs ESP-IDF's cJSON: without it the half is skipped, and the last line must say so (v1.1 review fix)
+if cjson_half:
     json_dir = Path(os.environ['IDF_PATH']) / 'components/json/cJSON'
     page = r'''
 #include "cJSON.h"
@@ -144,7 +145,7 @@ int main(void)
                         str(out / 'page.c'), str(main / 'cable_running.c'), str(json_dir / 'cJSON.c'), '-o', str(out / 'page'), '-lm'], check=True)
         subprocess.run([str(out / 'page')], check=True)
 else:
-    print('IDF_PATH is not set: the cJSON half of test_running_ui.py is skipped')
+    print('SKIPPED: IDF_PATH is not set, so the cJSON half of test_running_ui.py (handle_running_page against the real cJSON) did not run')
 
 # --- 2. the view logic of ui_habitat.c, with fakes -----------------------------------------------------------------------------------------------
 logic = r'''
@@ -155,7 +156,7 @@ logic = r'''
 #include <string.h>
 #include "cable_running.h"
 #define ID_MAX 48
-enum { HOME, SETTINGS, RUNNING };
+enum { HOME, SETTINGS, RUNNING, MESSAGE };
 typedef enum { A_NONE, A_DESKTOP, A_RUNNING_GET } action_kind_t;
 typedef struct { action_kind_t kind; int value; char id[ID_MAX]; char text[192]; uint32_t revision; int dy, velocity; } action_t;
 static struct { cable_running_t running_page; int running_want, view, offset, list_offset; } s;
@@ -165,7 +166,9 @@ static void display_lock(void) { locks++; }
 static void display_unlock(void) { assert(locks > 0); locks--; }
 static void change(void) { assert(locks > 0); changes++; }
 static void view(int v) { s.view = v; views++; }
-static bool queue(action_t a) { if (queue_fail || queued >= 32) return false; sent[queued++] = a; return true; }
+static bool queue(action_t a) { if (queue_fail || queued >= 32) { view(MESSAGE); return false; } sent[queued++] = a; return true; }   // as the real queue(): a refusal shows the busy MESSAGE
+static int leaves;
+static void swarm_leave(void) { leaves++; }
 ''' + function('copy', ui) + '#define COPY(dst, src) copy(dst, sizeof(dst), src)\n' + ''.join(function(n, ui) for n in ('running_empty_text', 'ui_running_replace', 'ui_running_clear', 'running_ask', 'running_open', 'running_pick', 'running_drag')) + r'''
 static void rows_of(cable_running_row_t *r, int n, int first)
 {
@@ -225,16 +228,22 @@ int main(void)
     rows_of(rows, 4, 0);
     ui_running_replace(s.running_page.request, 0, 4, rows, 4);
     int q = queued, v = views;
+    leaves = 0;
     running_pick(2);
     assert(queued == q + 1 && sent[q].kind == A_DESKTOP && !strcmp(sent[q].id, "id-2") && s.view == HOME && views == v + 1);
+    assert(leaves == 1);   // a Swarm face would hide the picked agent: the pick leaves it before it goes home
     running_pick(4); running_pick(-1); running_pick(99);
     assert(queued == q + 1);
     s.running_page.rows[1].id[0] = 0;
     running_pick(1);
     assert(queued == q + 1);   // a row with no id sends nothing
     // a full queue: no view change on a failed send is not required, but no crash and nothing queued twice
-    s.view = RUNNING; queue_fail = 1; q = queued; running_pick(0); queue_fail = 0;
-    assert(queued == q);
+    s.view = RUNNING; queue_fail = 1; q = queued; leaves = 0; running_pick(0); queue_fail = 0;
+    assert(queued == q && leaves == 0 && s.view == MESSAGE);   // a refused pick stays where it is (the busy MESSAGE shows) and leaves nothing
+    // a refused open keeps the busy MESSAGE: it does not go on to the list (running_ask returns what queue() said; v1.1 review fix)
+    s.view = SETTINGS; s.offset = 3; queue_fail = 1; q = queued; running_open(); queue_fail = 0;
+    assert(queued == q && s.view == MESSAGE);
+    assert(running_ask(0) && queued == q + 1);
     // no agents: after a page with total 0 the empty text
     s.view = RUNNING;
     running_ask(0);
@@ -335,7 +344,7 @@ assert re.search(r'case A_RUNNING_PICK:\s*running_pick\(a\.value\);', ui), 'pick
 assert re.search(r'case A_RUNNING_GET:\s*cable_client_request_running\(a\.value, a\.revision\);', ui), 'the worker sends the request'
 assert re.search(r'case RUNNING:\s*render_running\(f\);', ui), 'drawn'
 render = function('render_running', ui)
-assert 'focus_header(f, "AGENTS")' in render and re.search(r'control\(f, 87, 67, 48, "<", A_SETTINGS, 1, true\)', render), 'heading AGENTS and the back to the menu'
+assert 'focus_header(f, "ALL AGENTS")' in render and re.search(r'control\(f, 87, 67, 48, "<", A_SETTINGS, 1, true\)', render), 'heading ALL AGENTS and the back to the menu'
 assert 'A_RUNNING_PICK' in render and 'running_empty_text(' in render
 assert '"Loading..."' in function('running_empty_text', ui) and '"No running agents"' in function('running_empty_text', ui)
 row = function('running_row', ui)
@@ -365,11 +374,15 @@ assert re.search(r'strcmp\(t, "running\.page"\) == 0\)\s*\{\s*handle_running_pag
 assert 'ui_running_clear();' in function('session_down', client), 'session down clears the page'
 screens = code(main / 'ui/ui_screens.h')
 assert 'void ui_running_replace(uint32_t request, int offset, int total, const cable_running_row_t *rows, int n);' in screens and 'void ui_running_clear(void);' in screens
-assert '"AGENTS"' in ui and '"Loading..."' in ui and '"No running agents"' in ui
+assert '"ALL AGENTS"' in function('render_running', ui) and 'focus_header(f, "AGENTS")' not in function('render_running', ui), 'the heading says which list it is (user decision 2026-11-15)'
+assert '"Loading..."' in ui and '"No running agents"' in ui
 
 # the gallery covers both states
 gallery = text(habitat / 'ui_gallery.inc')
 items = text(habitat / 'ui_gallery_items.h')
 assert 'SETUP(running)' in gallery and 'SETUP(running_empty)' in gallery
 assert re.search(r'X\(running,\s+"running",\s+0, 2000, "running",\s+"render_running"', items) and re.search(r'X\(running_empty,\s+"running_empty",\s+0, 2000, "running",\s+"render_running"', items)
-print('running ui: menu row and 14 lines, PSRAM placement, view, actions, worker, gesture lists, wire, session clear, gallery, words PASS')
+if cjson_half:
+    print('running ui: menu row and 14 lines, PSRAM placement, view, actions, worker, gesture lists, wire, session clear, gallery, words PASS')
+else:
+    print('running ui: SKIPPED (IDF_PATH is not set: the cJSON wire half did not run); the view logic, menu row, PSRAM placement, actions, worker, gesture lists, session clear, gallery and words checks ran and passed')

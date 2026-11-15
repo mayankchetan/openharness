@@ -421,6 +421,7 @@ python3 "$here/test_display_power.py"
 python3 "$here/test_machine_ui.py"
 # "All agents": running.page against the real cJSON, the view logic with fakes, the menu row and the 14-line list (dial-reach T7)
 python3 "$here/test_running_ui.py"
+python3 "$here/test_v11_review_ui.py"   # v1.1 review fixes in ui_habitat.c: boot_voice carry, prefs_row layout, ALL AGENTS heading width, Swarm leave and moon
 python3 "$here/test_reload_threads.py"
 python3 "$here/test_agent_snapshot.py"
 python3 "$here/test_running_empty.py"

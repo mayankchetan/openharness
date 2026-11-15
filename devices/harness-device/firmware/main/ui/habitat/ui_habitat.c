@@ -1456,6 +1456,7 @@ static void render_focus_panes(ht_scene_t *f);
  * local wait's question, else the Lead's last message; done: that message, or the resting face. No Leads: PANES' own
  * "No agents in this tab.".
  */
+static void render_moon(ht_scene_t *f);   // below, with the single-agent face
 static void render_swarm_face(ht_scene_t *f)
 {
     const ht_lead_t *l = swarm_lead();
@@ -1494,6 +1495,7 @@ static void render_swarm_face(ht_scene_t *f)
         f_.notice_ms = bell ? s.notice_ms : 0;
     }
     ht_character_face(f, &character, &f_, ACCENT, recap);
+    if (s.nap) render_moon(f);   // Quiet is on: the moon on the Swarm face too
     s.pet_next_ms = focus_face ? ht_focus_pet_next_ms(&f_, recap) : 0;
     ht_rect_t bubble = {0};
     bool told = bell && focus_face && ht_focus_alert_shown(&f_, recap, &bubble);
@@ -2021,16 +2023,16 @@ void ui_running_clear(void)
     display_unlock();
 }
 // Ask for the page at `offset`: a new serial, then the worker sends it (the cable is never written from the render task).
-static void running_ask(int offset)
+static bool running_ask(int offset)
 {
     s.running_want = offset;
     const uint32_t serial = cable_running_request(&s.running_page, offset);
-    queue((action_t){.kind = A_RUNNING_GET, .value = offset, .revision = serial});
+    return queue((action_t){.kind = A_RUNNING_GET, .value = offset, .revision = serial});   // false: the cable is busy, and queue() showed the MESSAGE
 }
 static void running_open(void)
 {
     if (s.view == SETTINGS) s.list_offset = s.offset;   // "<" comes back to this place in the menu
-    running_ask(0);
+    if (!running_ask(0)) return;   // the busy MESSAGE stays on the glass; the view would overwrite it
     view(RUNNING);
 }
 static void running_pick(int row)
@@ -2039,6 +2041,7 @@ static void running_pick(int row)
     action_t open = {.kind = A_DESKTOP};
     COPY(open.id, s.running_page.rows[row].id);
     if (!queue(open)) return;   // the cable is busy: stay, and the next tap tries again
+    swarm_leave();   // a Swarm face would hide the agent just picked (A_AGENT leaves it the same way)
     view(HOME);
 }
 // A drag of `steps` rows. It pages from the request still pending when there is one, so three quick steps reach three pages on, and it asks again when the
@@ -2706,9 +2709,21 @@ static void prefs_row(ht_scene_t *f, int y, const char *label, const char *value
         if (vw) focus_put(f, right - vw, ty, vw, font, value_ink, ground, value, false);
         return;
     }
-    const int cells = (int)strlen(value);
-    ht_text(f, SET_TEXT_X, y + 14, (int)strlen(label) * UI_FONT->width, UI_FONT, ink, ground, label);
-    if (cells) ht_text(f, LIST_HIT_X + LIST_HIT_W - 16 - cells * UI_FONT->width, y + 14, cells * UI_FONT->width, UI_FONT, value_ink, ground, value);
+    // The label and the value share one line of 308 px. Both go in the page's font (28) while the pair fits with a gap; when it does not ("Unplugged link" beside
+    // "USB only" is 22 cells, 374 px) both drop to the small mono face, as measured from the fonts, and a label that is still too long for what is left is cut
+    // with an ellipsis. Without this the label ran into the value (66 px for "USB only", 15 px for Wi-Fi and Phone).
+    const int right = LIST_HIT_X + LIST_HIT_W - 16, room = right - SET_TEXT_X;
+    const ht_font_t *font = UI_FONT;
+    int vw = ht_measure(font, value), lw = ht_measure(font, label);
+    if (lw + (vw ? 8 + vw : 0) > room) {
+        font = &ht_mono_20;
+        vw = ht_measure(font, value);
+    }
+    char fitted[HT_TEXT_BYTES];
+    lw = ht_fit_width(fitted, sizeof fitted, label, vw ? room - vw - 8 : room, font);
+    const int ty = y + 14 + (UI_FONT->height - font->height) / 2;
+    ht_text(f, SET_TEXT_X, ty, lw, font, ink, ground, fitted);
+    if (vw) ht_text(f, right - vw, ty, vw, font, value_ink, ground, value);
 }
 static void render_prefs(ht_scene_t *f)
 {
@@ -2748,7 +2763,7 @@ static void running_row(ht_scene_t *f, int y, const cable_running_row_t *row, ui
 }
 static void render_running(ht_scene_t *f)
 {
-    focus_header(f, "AGENTS");
+    focus_header(f, "ALL AGENTS");   // not "AGENTS": that is the heading of one tab's list (test_v11_review_ui.py measures it against the glass)
     control(f, 87, 67, 48, "<", A_SETTINGS, 1, true);
     const char *empty = running_empty_text(&s.running_page);
     if (empty) {
@@ -2825,7 +2840,7 @@ static void menu_label(ht_scene_t *f, int group, int y)
     static const char *const names[MENU_GROUPS] = {"THIS AGENT", "ON COMPUTER", "DIAL"};
     const ht_font_t *font = focus_skin() ? &ht_lv_inter_20.base : &ht_mono_16;
     char full[HT_TEXT_BYTES], fitted[HT_TEXT_BYTES];
-    const agent_t *a = group == MENU_GROUP_AGENT ? active() : NULL;
+    const agent_t *a = group == MENU_GROUP_AGENT && !swarm_mode() ? active() : NULL;   // a Swarm acts on its Lead, not on the desk agent
     if (a) snprintf(full, sizeof full, "THIS AGENT: %s", a->name[0] ? a->name : "Untitled");
     else snprintf(full, sizeof full, "%s", names[group]);
     ht_fit_width(fitted, sizeof fitted, full, SET_TEXT_W, font);
@@ -3111,7 +3126,8 @@ static void bright_drag_end(void)
 {
     if (!s.bright_drag) return;
     s.bright_drag = false;
-    if (s.brightness == s.bright_from) return;   // nothing moved: nothing to write
+    // Nothing moved: nothing to write. Unless the drag ended Night mode on the way (bright_set queued the sound change): that still goes out.
+    if (s.brightness == s.bright_from && !(settings_pending.fields & UI_SETTING_MUTED)) return;
     settings_pending.values.brightness = (uint8_t)s.brightness;
     settings_pending.fields |= UI_SETTING_BRIGHTNESS;
     settings_save_queue();
@@ -6924,7 +6940,9 @@ static bool boot_voice(action_t *out)
     action_t a = {.kind = A_VOICE};
     if (s.view == HOME || s.view == AGENT) {
         if (s.loading || !(active() || swarm_mode())) return false;   // make_action names the agent on the face, or the Lead
-        *out = make_action((hit_t){.action = A_VOICE});
+        // A carry is on: build it as the pet tap did (value 3 and the carried text, so the voice turn takes the text along), then make it the voice action.
+        *out = make_action((hit_t){.action = carry.active ? A_PET : A_VOICE});
+        out->kind = A_VOICE;
         return true;
     }
     if (s.view == QUESTION || s.view == ANSWER_REVIEW) {

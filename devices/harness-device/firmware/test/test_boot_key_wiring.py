@@ -37,8 +37,10 @@ can = re.search(r'bool ui_voice_can_start\(void\)\n\{.*?^\}', ui, re.M | re.S)[0
 assert 'boot_voice(&a)' in start and 'dispatch(a);' in start, 'BOOT dispatches the purpose of the screen it is on'
 assert 'a.value == 6 && s.view == DRAFT_OPTIONS) view(DRAFT);' in start, 'Add to message is accepted from the draft, as the touch control was'
 assert 'boot_voice(&a)' in can and 's.voice_open' in can and 's.voice_waiting' in can and 'audio_client_active()' in can
-assert ui.count('make_action((hit_t){.action = A_VOICE})') == 1, 'the one main-surface voice purpose (Home, agent, Lead) is in boot_voice'
-assert 'make_action((hit_t){.action = A_VOICE})' in boot
+# v1.1 review fix: a carry is on -> built as the pet tap built it (value 3 and the carried text), then made the voice action, so the text goes along.
+voice_main = 'make_action((hit_t){.action = carry.active ? A_PET : A_VOICE});' + chr(10) + '        out->kind = A_VOICE;'
+assert ui.count('make_action((hit_t){.action = carry.active ? A_PET : A_VOICE})') == 1 and 'make_action((hit_t){.action = A_VOICE})' not in ui, 'the one main-surface voice purpose (Home, agent, Lead) is in boot_voice'
+assert voice_main in boot
 # Each screen's BOOT purpose, pinned in boot_voice: the gate its touch control had, and the purpose value the worker accepts.
 for needle in (
     'if (!s.connected) return false;',
