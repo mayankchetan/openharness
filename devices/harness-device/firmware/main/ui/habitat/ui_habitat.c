@@ -4660,12 +4660,14 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
             /*
              * A TOUCH ON THE FACE DOES NOT START VOICE (owner, 2026-11-11). Voice starts only from the
              * BOOT hold (ptt.c -> ui_voice_start). A swipe on the dial face was read as a tap and
-             * recorded, so this contact is consumed and does nothing else.
+             * recorded, so this contact is consumed: it ends a Quiet rest (A_NAP) and does nothing else.
              */
             ht_gesture_guard(&gesture, now);
+            if (s.nap) { s.nap = false; change(); }
         } else if (result == HT_TOUCH_TAP && pressed_action.kind == A_PET &&
                    (surface || s.view == VOICE || s.view == SELECTION)) {
             ht_gesture_guard(&gesture, now);
+            if (surface && s.nap) { s.nap = false; change(); }   // a face tap ends a Quiet rest (A_NAP); no A_PET, so no boop
             // A tap ends a capture that BOOT started; it never starts one (owner, 2026-11-11).
             if (s.view == VOICE) {
                 ESP_LOGI("habitat", "gesture tap: finish voice");

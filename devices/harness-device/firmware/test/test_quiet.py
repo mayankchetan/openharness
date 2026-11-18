@@ -69,6 +69,17 @@ assert re.search(r'if \(s\.nap\)\s*render_moon\(f\);', function('render_home')),
 assert 'hits[' not in function('render_moon') and 'hit_count' not in function('render_moon'), 'the moon is not a hit'
 assert 'ht_box(' in function('render_moon') and function('render_moon').count('ht_box(') == 2, 'two discs: the moon and the one that cuts it'
 assert 'int nap_shown' in ui or 'nap_shown;' in ui, 'one int in the state struct'
+# a tap on the face ends the rest on both skins (the comment at A_NAP says so): the Focus face's consumed tap and the sibling tap on a surface clear s.nap
+# and repaint, and neither dispatches A_PET (no boop) or starts voice
+release = function('habitat_touch')
+focus_tap = release[release.index('character.id == HT_CHARACTER_FOCUS && pressed_action.kind == A_PET'):]
+focus_tap = focus_tap[:focus_tap.index('} else if')]
+assert re.search(r'if \(s\.nap\)\s*\{\s*s\.nap = false;\s*change\(\);\s*\}', focus_tap), 'a Focus face tap ends Quiet and repaints'
+assert 'dispatch(' not in focus_tap, 'the consumed Focus face tap dispatches nothing'
+surface_tap = release[release.index('result == HT_TOUCH_TAP && pressed_action.kind == A_PET &&'):]
+surface_tap = surface_tap[:surface_tap.index('} else if (result == HT_TOUCH_HOLD)')]
+assert re.search(r'if \(surface && s\.nap\)\s*\{\s*s\.nap = false;\s*change\(\);\s*\}', surface_tap), 'a face tap on a surface ends Quiet on every skin'
+assert 'dispatch(pressed_action)' not in surface_tap, 'the surface face tap dispatches no A_PET'
 
 SET_TEXT_W, LIST_HIT_W = define('SET_TEXT_W'), define('LIST_HIT_W')
 
